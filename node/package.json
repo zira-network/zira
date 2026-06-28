@@ -1,0 +1,48 @@
+{
+  "name": "@zira/node",
+  "version": "1.9.2",
+  "description": "ZIRA Core. A peer to peer node: gossips signed events over libp2p, validates every rule, computes Proof of Resonance Locks and checkpoint finality, and serves the Console GUI.",
+  "type": "module",
+  "bin": {
+    "zira-node": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc --noEmit && tsup",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@chainsafe/libp2p-gossipsub": "^14.1.0",
+    "@chainsafe/libp2p-noise": "^16.0.0",
+    "@chainsafe/libp2p-yamux": "^7.0.1",
+    "@libp2p/autonat": "^2.0.38",
+    "@libp2p/bootstrap": "^11.0.0",
+    "@libp2p/circuit-relay-v2": "^3.2.24",
+    "@libp2p/crypto": "^5.0.0",
+    "@libp2p/dcutr": "^2.0.38",
+    "@libp2p/identify": "^3.0.0",
+    "@libp2p/kad-dht": "^15.1.11",
+    "@libp2p/ping": "^2.0.0",
+    "@libp2p/tcp": "^10.0.0",
+    "@libp2p/websockets": "^9.0.0",
+    "@multiformats/multiaddr": "^12.3.0",
+    "@zira/protocol": "workspace:*",
+    "it-length-prefixed": "^9.1.0",
+    "it-pipe": "^3.0.1",
+    "libp2p": "^2.3.0",
+    "node-llama-cpp": "^3.18.1",
+    "uint8arrays": "^5.1.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.10",
+    "tsup": "^8.1.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0",
+    "vitest": "^1.6.0"
+  }
+}

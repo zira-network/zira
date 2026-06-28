@@ -1,0 +1,18 @@
+packages:
+  - "packages/*"
+  - "node"
+  - "apps/*"
+
+verifyDepsBeforeRun: false
+
+onlyBuiltDependencies:
+  - esbuild
+  - classic-level
+  - electron
+  - electron-winstaller
+  - esbuild-darwin-64
+
+allowBuilds:
+  '@reown/appkit': set this to true or false
+  esbuild: set this to true or false
+  node-llama-cpp: set this to true or false

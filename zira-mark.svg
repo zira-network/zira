@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="88" height="88" viewBox="0 0 88 88" fill="none" shape-rendering="geometricPrecision" text-rendering="geometricPrecision" role="img" aria-labelledby="zm-t">
+  <title id="zm-t">ZIRA</title>
+  <defs>
+    <linearGradient id="zm-cell" x1="18" y1="14" x2="70" y2="74" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#E8FCF7" stop-opacity="0.95"></stop>
+      <stop offset="0.38" stop-color="#3ECFC0" stop-opacity="0.9"></stop>
+      <stop offset="1" stop-color="#6B8CE8" stop-opacity="0.78"></stop>
+    </linearGradient>
+  </defs>
+  <g fill="url(#zm-cell)">
+    <circle cx="44" cy="31" r="13" fill-opacity="0.88"></circle>
+    <circle cx="55.3" cy="37.5" r="13" fill-opacity="0.64"></circle>
+    <circle cx="55.3" cy="50.5" r="13" fill-opacity="0.48"></circle>
+    <circle cx="44" cy="57" r="13" fill-opacity="0.64"></circle>
+    <circle cx="32.7" cy="50.5" r="13" fill-opacity="0.48"></circle>
+    <circle cx="32.7" cy="37.5" r="13" fill-opacity="0.72"></circle>
+  </g>
+  <g fill="none" stroke="rgba(255,255,255,0.34)" stroke-width="0.75" stroke-opacity="0.9">
+    <circle cx="44" cy="31" r="13"></circle>
+    <circle cx="55.3" cy="37.5" r="13"></circle>
+    <circle cx="55.3" cy="50.5" r="13"></circle>
+    <circle cx="44" cy="57" r="13"></circle>
+    <circle cx="32.7" cy="50.5" r="13"></circle>
+    <circle cx="32.7" cy="37.5" r="13"></circle>
+  </g>
+</svg>

@@ -1,0 +1,349 @@
+// apps/console/src/store/useZira.ts
+// Zustand store wrapping the client, the identity, and a light polling loop. It also tracks the
+// Tier 1/Tier 2 node status (hardware, provider config + live provider status), per-domain ZTI,
+// and a local notification feed derived by diffing the polled state.
+import { create } from "zustand";
+import type { ZiraClient, NetworkStats, Lock, SignedTx, NetworkId, NetworkPhase, Domain, HardwareProfile, NodeConfig, ProviderConfig } from "@zira/protocol";
+import { DEFAULT_NODE_CONFIG, DEFAULT_PROVIDER_CONFIG, MAINNET_ANCHOR_STEWARD, MAINNET_NETWORK_RESONATOR_OWNER } from "@zira/protocol";
+import { createClient, getClientMode, type ClientMode } from "../client/createClient";
+import { NodeApi, type StatusInfo, type ProviderStatus, type MiningStatus, type MiningPatch, type LocalLaunchMinerSummary } from "../lib/nodeApi";
+import { Wallet } from "../lib/keys";
+import { hasNodeFeature } from "../lib/version-compat";
+import { probeStats, qualityFor, type ConnectionQuality } from "../lib/connection";
+
+export type NotificationKind =
+  | "payment_received" | "task_assigned" | "task_delivered" | "task_completed"
+  | "task_expired" | "task_disputed" | "provider_online" | "provider_offline"
+  | "zti_milestone" | "lock_contributed";
+
+// `href` is an in-app route (e.g. "/wallet", "/resonators/:id") the notification points at. When present
+// the NotificationCenter navigates there on click; when absent the notification is non-navigating and its
+// body is shown inline instead, so a click always lands somewhere or expands to its own detail.
+export interface AppNotification { id: string; kind: NotificationKind; title: string; body?: string; ts: number; read: boolean; href?: string }
+
+// Well-known mainnet steward wallets. The 30% anchor-reserve wallet owns all 512 anchor positions at
+// genesis; the founder wallet owns the seeded network Resonators. Detecting the active wallet against
+// these lets the Console surface the steward controls even when the running node does not hold the
+// steward key (the node may run a different identity), in which case actions are shown read-only with
+// an inline note. The detection is wallet-address-only; it does not grant any server permission.
+export type StewardKind = "none" | "anchor-reserve" | "founder";
+const STEWARD_WALLETS: Record<string, Exclude<StewardKind, "none">> = {
+  [MAINNET_ANCHOR_STEWARD]: "anchor-reserve",
+  [MAINNET_NETWORK_RESONATOR_OWNER]: "founder",
+};
+export function detectStewardKind(address: string | null | undefined): StewardKind {
+  if (!address) return "none";
+  return STEWARD_WALLETS[address] ?? "none";
+}
+
+const NOTIF_KEY = "zira.notifications.v1";
+const NOTIF_CAP = 200;
+
+function loadNotifications(): AppNotification[] {
+  try { return JSON.parse(localStorage.getItem(NOTIF_KEY) ?? "[]") as AppNotification[]; } catch { return []; }
+}
+function saveNotifications(n: AppNotification[]): void {
+  try { localStorage.setItem(NOTIF_KEY, JSON.stringify(n.slice(0, NOTIF_CAP))); } catch { /* ignore */ }
+}
+
+interface ZiraState {
+  client: ZiraClient | null;
+  mode: "node" | null;
+  base: string;
+
+  address: string | null;
+  hasWallet: boolean;
+  unlocked: boolean;
+  balanceUZIR: number;
+
+  stats: NetworkStats | null;
+  locks: Lock[];
+  events: SignedTx[];
+  // Steward Anchor Event toggle (spec §2.1): when disabled, the anchor contribute section is hidden
+  // everywhere. evm/tron are the steward-set USDT receiving addresses shown at contribution time.
+  anchorEvent: { enabled: boolean; evm: string; tron: string; wcProjectId: string };
+
+  network: NetworkId;
+  phase: NetworkPhase;
+  // API version negotiation: the node's reported build version (from /rpc/stats), or null when the node
+  // is older and does not report one yet. Version-sensitive features gate on nodeAtLeast() and degrade
+  // gracefully when this is null/older rather than crashing or looping failed fetches.
+  nodeVersion: string | null;
+  // Connection quality: the last measured round-trip latency to /rpc/stats and a coarse bucket for the
+  // indicator. latencyMs is null when the node is unreachable (quality === "offline").
+  latencyMs: number | null;
+  connQuality: ConnectionQuality;
+  isFounder: boolean;    // true when the wallet/node belongs to the active founder set
+  // true when the loaded/active wallet IS a well-known steward wallet (anchor-reserve or founder),
+  // regardless of whether the running node currently holds that steward key.
+  isStewardWallet: boolean;
+  stewardKind: StewardKind;
+  // true when steward ACTIONS are gated server-side: the active wallet is a steward wallet but the node
+  // is not running with that steward key, so signed steward routes would 403. The panel stays visible
+  // (read-only) with an inline note when this is true.
+  stewardActionsGated: boolean;
+  providerOn: boolean;
+
+  // Tier 1 / Tier 2 node status (node mode only)
+  hardware: HardwareProfile | null;
+  nodeConfig: NodeConfig;
+  providerConfig: ProviderConfig;
+  providerStatus: ProviderStatus;
+  mining: MiningStatus | null;
+  localLaunchMiners: LocalLaunchMinerSummary[];
+  ztiByDomain: Partial<Record<Domain, number>>;
+  zti: number;
+
+  // local notifications feed
+  notifications: AppNotification[];
+
+  ready: boolean;
+  polling: boolean;
+
+  init: () => Promise<void>;
+  reconnect: () => Promise<void>;
+  refreshIdentity: () => Promise<void>;
+  refresh: () => Promise<void>;
+  refreshStatus: () => Promise<void>;
+  // One timed probe of /rpc/stats: updates latencyMs, connQuality, and nodeVersion. Called on the poll
+  // loop and on visibility return.
+  probeConnection: () => Promise<void>;
+  // API version negotiation gate. Returns true when the connected node's version is >= semver. Returns
+  // false for an unknown/older node so version-sensitive features stay hidden/disabled instead of failing.
+  nodeAtLeast: (semver: string) => boolean;
+  setProviderConfig: (cfg: Partial<ProviderConfig>) => void;
+  toggleProvider: (enabled: boolean) => Promise<void>;
+  setMining: (patch: MiningPatch) => Promise<void>;
+  startPolling: () => void;
+  stopPolling: () => void;
+  setUnlocked: (v: boolean) => void;
+  setProviderOn: (v: boolean) => void;
+  pushNotification: (n: Omit<AppNotification, "id" | "ts" | "read">) => void;
+  markNotificationRead: (id: string) => void;
+  markAllNotificationsRead: () => void;
+  clearNotifications: () => void;
+}
+
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+let visibilityHooked = false;
+const ZTI_MILESTONES = [0.5, 0.7, 0.9];
+
+export const useZira = create<ZiraState>((set, get) => ({
+  client: null,
+  mode: null,
+  base: "",
+  address: null,
+  hasWallet: false,
+  unlocked: false,
+  balanceUZIR: 0,
+  stats: null,
+  locks: [],
+  events: [],
+  anchorEvent: { enabled: false, evm: "", tron: "", wcProjectId: "" },
+  network: "mainnet",
+  phase: "live",
+  nodeVersion: null,
+  latencyMs: null,
+  connQuality: "offline",
+  isFounder: false,
+  isStewardWallet: false,
+  stewardKind: "none",
+  stewardActionsGated: false,
+  providerOn: false,
+  hardware: null,
+  nodeConfig: { ...DEFAULT_NODE_CONFIG },
+  providerConfig: { ...DEFAULT_PROVIDER_CONFIG },
+  providerStatus: { active: false, endpoint: DEFAULT_PROVIDER_CONFIG.endpoint, reachable: false, queriesAnswered: 0, earnedTodayUZIR: 0 },
+  mining: null,
+  localLaunchMiners: [],
+  ztiByDomain: {},
+  zti: 0,
+  notifications: loadNotifications(),
+  ready: false,
+  polling: false,
+
+  init: async () => {
+    const hasWallet = await Wallet.exists();
+    const address = await Wallet.address();
+    const info = await createClient(address ?? undefined);
+    set({ client: info.client, mode: info.mode, base: info.base, hasWallet, address, unlocked: Wallet.isUnlocked() });
+    await get().refresh();
+    await get().refreshStatus();
+    await get().probeConnection();
+    set({ ready: true });
+    get().startPolling();
+  },
+
+  reconnect: async () => {
+    const address = get().address ?? (await Wallet.address());
+    const info = await createClient(address ?? undefined);
+    set({ client: info.client, mode: info.mode, base: info.base });
+    await get().refresh();
+    await get().refreshStatus();
+  },
+
+  refreshIdentity: async () => {
+    const hasWallet = await Wallet.exists();
+    const address = await Wallet.address();
+    set({ hasWallet, address, unlocked: Wallet.isUnlocked() });
+    await get().refresh();
+  },
+
+  refresh: async () => {
+    const { client, address, balanceUZIR: prevBalance } = get();
+    if (!client) return;
+    try {
+      const [stats, locks, events] = await Promise.all([
+        client.getStats(),
+        client.getRecentLocks(20),
+        client.getRecentEvents(40),
+      ]);
+      const founderAddress = (stats as NetworkStats & { founderAddress?: string }).founderAddress;
+      const founderAddresses = (stats as NetworkStats & { founderAddresses?: string[] }).founderAddresses ?? (founderAddress ? [founderAddress] : []);
+      const isFounder = Boolean(address && founderAddresses.includes(address));
+      const stewardKind = detectStewardKind(address);
+      const isStewardWallet = stewardKind !== "none";
+      const patch: Partial<ZiraState> = {
+        stats, locks, events, network: stats.network, phase: stats.phase,
+        isFounder, stewardKind, isStewardWallet,
+        // Actions are gated when the wallet is a steward wallet but the node does not treat it as an
+        // active founder (refreshStatus refines this with the node's canSteward signal).
+        stewardActionsGated: isStewardWallet && !isFounder,
+      };
+      if (address) {
+        const next = await client.getBalanceUZIR(address);
+        patch.balanceUZIR = next;
+        // payment notification on a credit (skip the very first poll where prevBalance is 0/unset)
+        if (prevBalance > 0 && next > prevBalance) {
+          get().pushNotification({ kind: "payment_received", title: "Payment received", body: `+${((next - prevBalance) / 1_000_000).toFixed(2)} ZIR`, href: "/wallet" });
+        }
+      }
+      // Anchor event status gates the contribute section on EVERY client (web/auto users on the gateway
+      // included), so it is fetched here in refresh() rather than the node-only refreshStatus.
+      try { patch.anchorEvent = await NodeApi.getAnchorEvent(); } catch { /* anchor event status optional */ }
+      set(patch);
+    } catch {
+      // keep last good values
+    }
+  },
+
+  refreshStatus: async () => {
+    if (getClientMode() !== "node") return;
+    try {
+      const [st, localLaunchMiners]: [StatusInfo, LocalLaunchMinerSummary[]] = await Promise.all([
+        NodeApi.status(),
+        NodeApi.localLaunchMiners().catch(() => [] as LocalLaunchMinerSummary[]),
+      ]);
+      const prev = get();
+      // provider reachability transitions
+      if (prev.providerConfig.enabled && st.providerStatus.active) {
+        if (st.providerStatus.reachable && !prev.providerStatus.reachable) get().pushNotification({ kind: "provider_online", title: "Provider online", body: st.providerStatus.endpoint, href: "/mine" });
+        if (!st.providerStatus.reachable && prev.providerStatus.reachable) get().pushNotification({ kind: "provider_offline", title: "Provider offline", body: st.providerStatus.endpoint, href: "/mine" });
+      }
+      const founders = st.founderAddresses ?? [];
+      const stewardKind = detectStewardKind(prev.address);
+      const isStewardWallet = stewardKind !== "none";
+      // The node treats THIS connection as a founder/steward operator only when st.isFounder is true
+      // (the node identity is in the active founder set) or the active wallet is in the founder list.
+      const nodeTreatsAsFounder = st.isFounder || Boolean(prev.address && founders.includes(prev.address));
+      const patch: Partial<ZiraState> = {
+        hardware: st.hardware, nodeConfig: st.nodeConfig, providerConfig: st.providerConfig,
+        providerStatus: st.providerStatus, providerOn: st.providerStatus.active,
+        isFounder: nodeTreatsAsFounder,
+        stewardKind, isStewardWallet,
+        // Steward controls show whenever the active wallet is a founder OR a well-known steward wallet.
+        // Actions require the node to run with the steward key; if it does not (st.isFounder false),
+        // the panel stays visible read-only and shows the inline "run your node with the steward key" note.
+        stewardActionsGated: isStewardWallet && !nodeTreatsAsFounder,
+        mining: st.mining, localLaunchMiners,
+      };
+      if (st.address) {
+        try {
+          const z = await NodeApi.zti(st.address);
+          patch.zti = z.zti;
+          patch.ztiByDomain = z.ztiByDomain;
+          for (const m of ZTI_MILESTONES) {
+            if ((prev.zti < m && z.zti >= m)) get().pushNotification({ kind: "zti_milestone", title: `ZTI milestone ${m.toFixed(2)}`, body: "Your overall trust crossed a threshold.", href: "/resonators" });
+          }
+        } catch { /* zti optional */ }
+      }
+      set(patch);
+    } catch { /* node status optional (the node may be unreachable) */ }
+  },
+
+  probeConnection: async () => {
+    const probe = await probeStats();
+    if (!probe.ok) { set({ latencyMs: null, connQuality: "offline" }); return; }
+    const patch: Partial<ZiraState> = { latencyMs: probe.latencyMs, connQuality: qualityFor(probe.latencyMs) };
+    // The version is sticky: once a node reports it, keep the last known value even if a later probe omits
+    // it, so a transient empty body never flips a known node back to "unknown".
+    if (probe.version) patch.nodeVersion = probe.version;
+    set(patch);
+  },
+
+  nodeAtLeast: (semver) => hasNodeFeature(get().nodeVersion, semver),
+
+  setProviderConfig: (cfg) => set((s) => ({ providerConfig: { ...s.providerConfig, ...cfg } })),
+
+  toggleProvider: async (enabled) => {
+    const cfg = get().providerConfig;
+    const st = await NodeApi.setStatus({ providerConfig: { ...cfg, enabled } });
+    set({ providerConfig: st.providerConfig, providerStatus: st.providerStatus, providerOn: st.providerStatus.active });
+  },
+
+  setMining: async (patch) => {
+    const st = await NodeApi.setMining(patch);
+    set({ mining: st.mining });
+    if (patch.enabled === true) get().pushNotification({ kind: "provider_online", title: "Mining on", body: "Lending compute to run the field's model.", href: "/mine" });
+  },
+
+  startPolling: () => {
+    if (pollTimer) return;
+    // Poll only when needed: skip ticks while the tab is hidden so a backgrounded Console stops
+    // hitting the node, and refresh once immediately when it becomes visible again.
+    pollTimer = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void get().refresh();
+      void get().refreshStatus();
+      void get().probeConnection();
+    }, 6000);
+    if (typeof document !== "undefined" && !visibilityHooked) {
+      visibilityHooked = true;
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden && pollTimer) { void get().refresh(); void get().refreshStatus(); void get().probeConnection(); }
+      });
+    }
+    set({ polling: true });
+  },
+  stopPolling: () => {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    set({ polling: false });
+  },
+
+  setUnlocked: (v) => set({ unlocked: v }),
+  setProviderOn: (v) => set({ providerOn: v }),
+
+  pushNotification: (n) => {
+    const note: AppNotification = { ...n, id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, ts: Date.now(), read: false };
+    set((s) => {
+      const next = [note, ...s.notifications].slice(0, NOTIF_CAP);
+      saveNotifications(next);
+      return { notifications: next };
+    });
+  },
+  markNotificationRead: (id) => set((s) => {
+    const next = s.notifications.map((x) => (x.id === id ? { ...x, read: true } : x));
+    saveNotifications(next);
+    return { notifications: next };
+  }),
+  markAllNotificationsRead: () => set((s) => {
+    const next = s.notifications.map((x) => ({ ...x, read: true }));
+    saveNotifications(next);
+    return { notifications: next };
+  }),
+  clearNotifications: () => { saveNotifications([]); set({ notifications: [] }); },
+}));
+
+export function currentClientMode(): ClientMode {
+  return getClientMode();
+}

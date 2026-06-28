@@ -1,0 +1,32 @@
+{
+  "name": "@zira/protocol",
+  "version": "3.1.0",
+  "description": "ZIRA protocol spine: crypto, types, Proof of Resonance, the ledger, and the client interface. Pure TypeScript, browser safe.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src", "test"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "gen:vectors": "tsx scripts/genVectors.ts"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.4.0",
+    "@noble/hashes": "^1.4.0",
+    "@scure/base": "^1.1.6"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0",
+    "tsx": "^4.11.0"
+  }
+}

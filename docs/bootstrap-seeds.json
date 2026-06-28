@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "network": "mainnet",
+  "generatedAt": 1781711537210,
+  "seeds": [
+    {
+      "multiaddr": "/ip4/157.173.106.50/tcp/9645/p2p/12D3KooWK1284RKM9TX25ikBRAywEGpy3tCoG8FHo38xW5XEVv6Z",
+      "label": "ZIRA VPS bootstrap seed 1",
+      "roles": [
+        "master",
+        "bootstrap",
+        "community-seed"
+      ],
+      "priority": 1
+    },
+    {
+      "multiaddr": "/ip4/157.173.106.50/tcp/9646/ws/p2p/12D3KooWK1284RKM9TX25ikBRAywEGpy3tCoG8FHo38xW5XEVv6Z",
+      "label": "ZIRA VPS bootstrap seed 2",
+      "roles": [
+        "bootstrap",
+        "community-seed"
+      ],
+      "priority": 2
+    }
+  ],
+  "pubKey": "aeb29d551f99023d865e732b14b432586ff99dc31183b4e2893ae308cbc1bef1",
+  "sig": "2d5fc5332e5024296717dcaaf6148b2e8d2a9721ad13c3fe2c76ac72ec52be4d7bd332105bc9f46d204dc3cc9c02da0436301ec95048feacebd46141fd362004"
+}

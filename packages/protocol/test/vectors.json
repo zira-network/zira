@@ -1,0 +1,44 @@
+{
+  "note": "Shared canonical encoding test vectors. TS and PHP must both reproduce these.",
+  "testKey": {
+    "privateKey": "0101010101010101010101010101010101010101010101010101010101010101",
+    "publicKey": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "address": "zir1jh7l9csu7ae92k5kl2dsl7cdqhkuceytpjy69g"
+  },
+  "observation": {
+    "body": {
+      "type": "value",
+      "observer": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+      "timestamp": 1700000000000,
+      "subject": "MODEL_ANSWER_QUALITY",
+      "domain": "language",
+      "confidence": 0.9,
+      "sourceHashes": [
+        "aa",
+        "bb"
+      ],
+      "value": 0.82
+    },
+    "canonical": "{\"confidence\":0.9,\"domain\":\"language\",\"observer\":\"8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c\",\"sourceHashes\":[\"aa\",\"bb\"],\"subject\":\"MODEL_ANSWER_QUALITY\",\"timestamp\":1700000000000,\"type\":\"value\",\"value\":0.82}",
+    "id": "874cca32a60f253a59a677e55ada6878c09b1f5d58cfad07c732971fa23eddcb",
+    "sig": "e93f02e7c6c153d118b1e0ee4b52166655cc358b6300e13c69ccf25dbce14a6e77a4f745153ffc4496580c0370115ce8c3907fa67bcb60fbfd01609d49a35e0f"
+  },
+  "tx": {
+    "body": {
+      "network": "devnet",
+      "from": "zir1jh7l9csu7ae92k5kl2dsl7cdqhkuceytpjy69g",
+      "fromPubKey": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+      "to": "zir1jh7l9csu7ae92k5kl2dsl7cdqhkuceytpjy69g",
+      "amountUZIR": 1000000,
+      "feeUZIR": 1000,
+      "nonce": 0,
+      "kind": "transfer",
+      "parents": [],
+      "timestamp": 1700000000000,
+      "memo": "hello zira"
+    },
+    "canonical": "{\"amountUZIR\":1000000,\"feeUZIR\":1000,\"from\":\"zir1jh7l9csu7ae92k5kl2dsl7cdqhkuceytpjy69g\",\"fromPubKey\":\"8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c\",\"kind\":\"transfer\",\"memo\":\"hello zira\",\"network\":\"devnet\",\"nonce\":0,\"parents\":[],\"timestamp\":1700000000000,\"to\":\"zir1jh7l9csu7ae92k5kl2dsl7cdqhkuceytpjy69g\"}",
+    "id": "d8cd1f8ef25ed7a3756a171de2d305076cf2f81ae85a714757e2c9ce02c1acca",
+    "sig": "ca5a7185f62417b266002c1e3e046fa6d28eb107902d042ee350048263906f6842917b892475300315b7e7e8f0d6570ed4c37ff73c77e423c3d6181185487400"
+  }
+}

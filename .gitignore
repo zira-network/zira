@@ -1,0 +1,62 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+*.tsbuildinfo
+.zira/
+.zira-local/
+.zira-mainnet-local/
+data/
+.env
+*.local
+node/public/
+web/dist/
+apps/console/.env
+
+# local agent/editor tooling, operator scratch, mobile build-staging, signing artifacts
+.claude/
+commands.txt
+mobile/
+*.jks
+*.aab
+*.blockmap
+win-unpacked/
+builder-debug.yml
+
+# never commit the founder private key or any secret material
+secrets/
+local-private/
+FOUNDER_WALLET*
+# private keys, seed phrases, keystores, and node identities (generated, never shipped)
+*.key
+*.pem
+*.keystore
+keystore/
+keystores/
+identity.json
+peer-key.bin
+founder-backups.json
+*.seed
+*.mnemonic
+seed-phrase*
+bootstrap-seeds.wordpress-upload.json
+
+# runtime data dirs (generated state: event logs, snapshots, mining, per-node identities)
+runtime-mainnet/
+runtime-mainnet-*/
+runtime-new-user-test/
+.zira-mainnet/
+public-port-mapping.json
+
+
+# runnable app builds go to GitHub Releases, not the repo
+ZIRA-Windows/
+gui/
+gui-mainnet-final/
+apps/desktop/dist/
+apps/desktop/dist-*/
+# stray rebuild/scratch build dirs
+dist-rebuild/
+dist-*/
+*.tmp/
+.cache/

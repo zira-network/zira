@@ -1,0 +1,295 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  ZIRA "Ink" design system — modern, minimalist, corporate (Vercel / Geist grade).
+  Near-monochrome: ink on white, crisp 1px hairlines, flat surfaces, generous whitespace, bold
+  typographic hierarchy, tabular mono for all data. The teal accent is the ONE color — reserved for
+  primary actions, links, focus, and a single hero figure per screen. Everything else is greyscale,
+  with amber/red kept only for genuine warning/danger state. The whole app reads these CSS variables;
+  components never hardcode hex. Variable names are preserved for compatibility; the decorative tones
+  (indigo/violet/rose) are intentionally desaturated to ink-greys so the UI reads monochrome.
+*/
+
+/* ---- LIGHT (the polished default) ---- */
+:root {
+  --bg-base: #fafafa;
+  --bg-surface: #ffffff;
+  --bg-elevated: #f4f4f5;
+  --bg-panel: rgba(255, 255, 255, 0.96);
+
+  --border: #ececec;
+  --border-strong: #d8d8db;
+
+  --text: #0a0a0a;
+  --text-muted: #525252;
+  --text-faint: #a1a1aa;
+
+  /* The single accent: a confident teal (the brand mark), used sparingly. On a light fill, white ink
+     on --accent clears AA; --accent-contrast is the readable ink for anything on an --accent surface. */
+  --accent: #0c7d72;
+  --accent-contrast: #ffffff;
+  --accent-soft: rgba(12, 125, 114, 0.08);
+  --accent-ring: rgba(12, 125, 114, 0.32);
+
+  /* Teal stays the positive/success tone (aligned to the accent). Decorative tones are ink-greys so the
+     UI is monochrome; only warn/danger carry real color, muted. */
+  --teal: #0c7d72;
+  --indigo: #3f3f46;
+  --violet: #52525b;
+  --rose: #6b7280;
+  --mist: #0a0a0a;
+  --warn: #b45309;
+  --danger: #dc2626;
+  --neutral: #525252;
+
+  /* The one quiet hero ramp per screen: teal fading to ink. Legible on white. */
+  --gradient: linear-gradient(135deg, #0c7d72 0%, #134e4a 60%, #0a0a0a 100%);
+
+  --radius-sm: 4px; --radius: 6px; --radius-lg: 8px;
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1); --dur-fast: 110ms; --dur: 160ms;
+
+  /* Flat by default: near-invisible elevation; cards are defined by hairlines, not shadow. */
+  --shadow-1: 0 1px 2px rgba(10, 10, 10, 0.04);
+  --shadow-2: 0 1px 3px rgba(10, 10, 10, 0.07), 0 6px 16px -8px rgba(10, 10, 10, 0.08);
+  --shadow-float: 0 18px 48px -20px rgba(10, 10, 10, 0.22), 0 2px 8px rgba(10, 10, 10, 0.06);
+}
+
+/* ---- DARK (true ink: near-black, not slate) ---- */
+:root[data-theme="dark"] {
+  --bg-base: #0a0a0a;
+  --bg-surface: #121214;
+  --bg-elevated: #1a1a1d;
+  --bg-panel: rgba(18, 18, 20, 0.90);
+
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.16);
+
+  --text: #fafafa;
+  --text-muted: #a1a1aa;
+  --text-faint: #6b6b73;
+
+  /* On near-black, the accent brightens; dark ink on an --accent fill keeps a crisp corporate contrast. */
+  --accent: #2dd4bf;
+  --accent-contrast: #04221e;
+  --accent-soft: rgba(45, 212, 191, 0.13);
+  --accent-ring: rgba(45, 212, 191, 0.36);
+
+  --teal: #2dd4bf;
+  --indigo: #d4d4d8;
+  --violet: #a1a1aa;
+  --rose: #c4c4cc;
+  --mist: #fafafa;
+  --warn: #f0b75e;
+  --danger: #f87171;
+  --neutral: #a1a1aa;
+
+  --gradient: linear-gradient(135deg, #2dd4bf 0%, #0f766e 55%, #fafafa 100%);
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.40);
+  --shadow-2: 0 2px 8px rgba(0, 0, 0, 0.46);
+  --shadow-float: 0 20px 50px -20px rgba(0, 0, 0, 0.70), 0 2px 8px rgba(0, 0, 0, 0.34);
+}
+
+* {
+  border-color: var(--border);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-base);
+  color: var(--text);
+  font-family: "Geist", "Inter", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-kerning: normal;
+  font-feature-settings: "kern", "liga", "calt";
+  letter-spacing: -0.011em;
+}
+
+/* Premium keyboard focus: a single crisp accent ring with offset, never a default browser outline. */
+:where(a, button, input, textarea, select, [role="button"], [tabindex]):focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Bold, tight typographic hierarchy — the structure carries the design, not color. */
+h1, h2, h3, h4, h5, h6, label, legend {
+  color: var(--text);
+  text-shadow: none;
+}
+h1, h2, .title-glow {
+  color: var(--text);
+  font-weight: 680;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
+  text-shadow: none;
+}
+h3 { font-weight: 640; letter-spacing: -0.018em; }
+h4, h5 { font-weight: 600; letter-spacing: -0.012em; }
+
+input,
+textarea,
+select {
+  color: var(--text);
+  caret-color: var(--accent);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-faint);
+  opacity: 1;
+}
+
+option {
+  color: var(--text);
+  background: var(--bg-surface);
+}
+
+/* Flat surface: a clean panel with a crisp hairline. No shadow, no gradient. */
+.field-surface {
+  background: var(--bg-surface);
+  border-color: var(--border);
+  box-shadow: none;
+}
+
+/* Hero band: a flat elevated panel marked by a single hairline; no wash, no glow. The accent appears
+   only as a thin top rule via the component, keeping the band monochrome. */
+.field-hero {
+  position: relative;
+  overflow: hidden;
+  background: var(--bg-surface);
+  border-color: var(--border);
+}
+
+/* Anchor stage: a calm, contained panel for the seat map. Flat with a faint center lift. */
+.anchor-stage {
+  position: relative;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 46%, color-mix(in srgb, var(--accent) 6%, transparent), transparent 50%),
+    var(--bg-elevated);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.anchor-seat {
+  transition: opacity 0.18s ease, r 0.18s ease, filter 0.18s ease;
+}
+.anchor-seat:hover {
+  opacity: 1;
+  filter: drop-shadow(0 0 5px color-mix(in srgb, currentColor 45%, transparent));
+}
+
+.anchor-stage svg text {
+  paint-order: stroke;
+  stroke: color-mix(in srgb, var(--bg-elevated) 78%, transparent);
+  stroke-width: 2px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--text);
+}
+
+/* Flat elevation: cards read as hairline-bordered surfaces; hover firms the border with a whisper of lift. */
+.elevate {
+  box-shadow: none;
+  transition: border-color var(--dur) var(--ease), transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+.lift:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-2);
+}
+
+/* Mono is mandatory for ZIR amounts, addresses, hashes, and ZTI. */
+.mono {
+  font-family: "Geist Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.glass {
+  background: var(--bg-panel);
+  backdrop-filter: blur(14px);
+  border: 1px solid var(--border);
+}
+
+/* The page surface is calm: no grid overlay, no radial wash. */
+.page-shell {
+  position: relative;
+}
+.page-shell > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Used at most once per screen for a single hero figure. Legible in both themes. */
+.gradient-text {
+  background: var(--gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.app-title {
+  color: var(--text);
+  text-shadow: none;
+}
+
+.gradient-bg {
+  background: var(--gradient);
+}
+
+/* Thin, quiet scrollbars. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Subtle motion only. */
+@keyframes breathe {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.animate-breathe { animation: breathe 2.4s ease-in-out infinite; }
+
+/* Quiet, intentional entrance for streamed answers and panels. */
+@keyframes fade-in-up { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.fade-in-up { animation: fade-in-up var(--dur) var(--ease); }
+
+/* Keyboard focus is always visible, in both themes, in the accent. */
+:where(button, a, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Respect reduced-motion: stop all looping/decorative animation and long transitions. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+  .animate-breathe { animation: none; }
+}

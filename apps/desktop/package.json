@@ -1,0 +1,56 @@
+{
+  "name": "@zira/desktop",
+  "private": true,
+  "version": "1.9.2",
+  "description": "ZIRA desktop app. Runs a full ZIRA Core node (with mining) and the Console in one window.",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:dir": "electron-builder --win dir",
+    "dist:linux": "electron-builder --linux",
+    "dist:mac": "electron-builder --mac"
+  },
+  "devDependencies": {
+    "electron": "31.7.7",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "network.zira.desktop",
+    "productName": "ZIRA",
+    "asar": false,
+    "files": [
+      "electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../../node/dist",
+        "to": "core"
+      },
+      {
+        "from": "../../node/public",
+        "to": "core/public"
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "target": [
+        "AppImage"
+      ],
+      "category": "Network"
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.utilities"
+    }
+  }
+}
