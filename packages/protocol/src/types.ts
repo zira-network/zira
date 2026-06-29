@@ -139,7 +139,8 @@ export interface Lock {
 export type TxKind =
   | "transfer" | "reward" | "agent_spend" | "bond_post" | "bond_return" | "bond_burn" | "reserve_grant" | "founder_delegate" | "founder_revoke"
   | "anchor_claim" | "anchor_transfer" | "anchor_list" | "anchor_delist" | "anchor_code_edit"
-  | "anchor_vest_start" | "anchor_vest_release" | "anchor_activate" | "anchor_position_transfer";
+  | "anchor_vest_start" | "anchor_vest_release" | "anchor_activate" | "anchor_position_transfer"
+  | "storage_attest";
 export interface TxBody {
   network: NetworkId; from: Address; fromPubKey: PublicKey; to: Address;
   amountUZIR: uZIR; feeUZIR: uZIR; nonce: number; kind: TxKind;
