@@ -127,6 +127,13 @@ export interface ObservationBody {
   // hosts a bounded bonus deterministically (see storageRewardMultiplier). Absent on observations that
   // carry no storage; absent => no bonus, identical to the pre-storage canonical form.
   storageGiB?: number;
+  // Master-only storage vouch: addresses this observer (a genesis master) has verified hold + serve the
+  // authorized model via a random-chunk probe this window. Part of the signed body and gossiped to every
+  // node, so runField can deterministically credit a vouched miner's work (set lastWorkEpoch) from the
+  // CONVERGED observations — never from per-master ledger txs (those diverge and freeze finality). A miner
+  // vouched by >= PROTOCOL.MIN_STORAGE_VOUCHERS distinct masters in the sealed Lock earns heartbeat emission.
+  // Absent on non-master / no-vouch observations => identical canonical form to before.
+  vouchedMiners?: Address[];
 }
 export interface SignedObservation extends ObservationBody { id: Hex; sig: Signature; }
 

@@ -1060,43 +1060,42 @@ export class ZiraNode {
    * their verifiable work and makes the heartbeat emission earnable by genuine storage/serving miners. Only a
    * master's attestation is honored by consensus; the attest tx gossips so every node credits the same miners.
    */
+  // Miners this master has verified (random-chunk probe) hold + serve the model, with the wall-clock ms of
+  // the last successful probe. A master VOUCHES for the fresh ones inside its signed heartbeat observation;
+  // runField credits any miner vouched by enough masters in the converged Lock. No ledger tx is created, so
+  // this is consensus-safe (the credit derives from converged observations, not divergent per-master txs).
+  private verifiedMiners = new Map<string, number>();
+  private static VOUCH_FRESH_MS = 120_000;   // vouch a peer for ~2 min after a successful probe
+
   private async runStorageProbe(): Promise<void> {
-    if (!MASTER_EARN_TX) return;   // master-created storage_attest txs are gated off to keep finality deterministic
     if (this.storageProbeBusy) return;
     const me = this.state.accounts.get(this.identity.address);
-    if (!(this.state.isGenesisMaster(this.identity.address) || (me?.isMaster ?? false))) return;  // only masters attest
+    if (!(this.state.isGenesisMaster(this.identity.address) || (me?.isMaster ?? false))) return;  // only masters vouch
     const modelId = this.models.localHeldModelId();
     if (!modelId) { log.debug("storage-proof: no model held locally yet; skipping probe"); return; }
     const peers = this.models.peersServing(modelId).slice(0, 16);   // bound work per round
     if (peers.length === 0) { log.debug(`storage-proof: no peers advertising model ${modelId.slice(0, 12)} to probe yet`); return; }
-    log.info(`storage-proof: probing ${peers.length} peer(s) that serve model ${modelId.slice(0, 12)}`);
     this.storageProbeBusy = true;
     try {
-      const verified: string[] = [];
+      const now = Date.now();
+      let verified = 0;
       for (const { peerId, address } of peers) {
-        try { if (await this.models.verifyPeerStorage(peerId, modelId)) verified.push(address); } catch { /* unreachable peer: skip */ }
+        try { if (await this.models.verifyPeerStorage(peerId, modelId)) { this.verifiedMiners.set(address, now); verified++; } }
+        catch { /* unreachable peer: skip */ }
       }
-      const unique = [...new Set(verified)];
-      if (unique.length > 0) {
-        log.info(`storage-proof: verified ${unique.length} peer(s) hold model ${modelId.slice(0, 12)} -> crediting work (storage_attest)`);
-        this.submitStorageAttest(unique);
-      } else {
-        log.info(`storage-proof: ${peers.length} peer(s) advertised the model but none returned a matching chunk this round`);
-      }
+      // prune stale entries so the vouch set stays current and bounded
+      for (const [a, ts] of this.verifiedMiners) if (now - ts > ZiraNode.VOUCH_FRESH_MS) this.verifiedMiners.delete(a);
+      if (verified > 0) log.info(`storage-proof: verified ${verified} peer(s) hold model ${modelId.slice(0, 12)} -> vouching in heartbeat`);
     } finally {
       this.storageProbeBusy = false;
     }
   }
 
-  /** Build, sign, and submit a master-signed storage attestation crediting the listed miners' work. */
-  private submitStorageAttest(miners: string[]): void {
-    if (miners.length === 0) return;
-    const body: TxBody = {
-      network: this.genesis.network, from: this.identity.address, fromPubKey: this.identity.publicKey,
-      to: this.identity.address, amountUZIR: 0, feeUZIR: 0, nonce: this.state.provisionalNonce(this.identity.address),
-      kind: "storage_attest", parents: [], timestamp: Date.now(), memo: JSON.stringify({ miners: miners.slice(0, 64) }),
-    };
-    this.submitTx(signTx(body, this.identity.privateKey));
+  /** The miners this master currently vouches for (verified within the freshness window), for the heartbeat. */
+  private freshVouchedMiners(now: number): string[] {
+    const out: string[] = [];
+    for (const [a, ts] of this.verifiedMiners) if (now - ts <= ZiraNode.VOUCH_FRESH_MS) out.push(a);
+    return out;
   }
   private lastAutonomousResonanceBucket = -1;
   private lastHeartbeatBucket = -1;
@@ -1120,10 +1119,14 @@ export class ZiraNode {
     }
     this.lastHeartbeatBucket = bucket;
     const storageGiB = Math.round((this.models.storageUsedBytes() / 1024 ** 3) * 100) / 100;
+    // A genesis master vouches (in this signed heartbeat) for the miners it has verified hold + serve the
+    // model. runField credits any miner vouched by >= MIN_STORAGE_VOUCHERS masters in the converged Lock,
+    // unlocking its heartbeat emission — deterministically, with no per-master ledger tx.
+    const vouchedMiners = this.state.isGenesisMaster(this.identity.address) ? this.freshVouchedMiners(now) : undefined;
     const body = buildObservationBody({
       type: "value", observer: this.identity.publicKey, timestamp: now,
       subject: FIELD_HEARTBEAT_SUBJECT, domain: "data", confidence: 0.9,
-      sourceHashes: ["field-heartbeat"], value: 1, storageGiB,
+      sourceHashes: ["field-heartbeat"], value: 1, storageGiB, vouchedMiners,
     });
     const c = canonical(body);
     this.submitObservation({ ...body, id: hashHex(c), sig: edSign(c, this.identity.privateKey) });
@@ -1741,7 +1744,7 @@ export class ZiraNode {
     return {
       // Release version, exposed so the Console can negotiate features against older nodes (upgrade
       // without ruptures). Tracks the node package version / installer release.
-      version: "1.9.8",
+      version: "1.9.9",
       network: this.genesis.network,
       phase: "live",
       providersOnline: this.soft.onlineProviders(now).length,
