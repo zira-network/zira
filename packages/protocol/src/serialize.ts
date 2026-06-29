@@ -46,7 +46,7 @@ export function canonical(body: unknown): string {
 export function buildObservationBody(input: {
   type: ObservationType; observer: PublicKey; timestamp: number;
   subject: string; domain: Domain; value?: number; proofRef?: Hex;
-  confidence: number; sourceHashes: Hex[]; storageGiB?: number;
+  confidence: number; sourceHashes: Hex[]; storageGiB?: number; vouchedMiners?: string[];
 }): ObservationBody {
   const body: ObservationBody = {
     type: input.type,
@@ -61,6 +61,11 @@ export function buildObservationBody(input: {
   if (input.proofRef !== undefined) body.proofRef = input.proofRef;
   // Only included when the observer reports storage, so observations without it hash exactly as before.
   if (input.storageGiB !== undefined) body.storageGiB = input.storageGiB;
+  // Storage vouches: deduped, sorted, bounded so the canonical form is deterministic across nodes. Absent
+  // when empty => identical hash to before.
+  if (input.vouchedMiners && input.vouchedMiners.length > 0) {
+    body.vouchedMiners = [...new Set(input.vouchedMiners)].filter((a) => /^zir1[0-9a-z]{6,}$/.test(a)).sort().slice(0, 64);
+  }
   return body;
 }
 

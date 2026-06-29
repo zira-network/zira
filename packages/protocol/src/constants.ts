@@ -53,6 +53,11 @@ export const PROTOCOL = {
   // the accurate observation IS the work there.
   WORK_VALIDITY_EPOCHS: 720,            // ~1 hour: a node that served recently keeps earning base emission
   FIELD_HEARTBEAT_SUBJECT: "ZIRA_FIELD_HEARTBEAT",  // the liveness beacon subject the work-gate applies to
+  // Storage vouch: a miner is credited as having done real work (so its heartbeat emission unlocks) when at
+  // least this many distinct genesis masters vouch — inside their signed, converged heartbeat observations —
+  // that they verified it holds + serves the model (a random-chunk probe). 1 is enough because genesis
+  // masters are the trust root; the proof rides on consensus observations, so the credit is deterministic.
+  MIN_STORAGE_VOUCHERS: 1,
   BASE_FEE_UZIR: 1_000,
   // F12: the entire transaction fee is removed from circulation and booked as burned. The sender always
   // pays the full fee (need = amount + fee), and the non-burned remainder was never credited to any

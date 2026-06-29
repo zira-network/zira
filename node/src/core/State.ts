@@ -694,6 +694,29 @@ export class State {
       this.lockLog.unshift(lock);
       if (this.lockLog.length > State.LOCK_CAP) this.lockLog.pop();
 
+      // Deterministic storage credit. A miner vouched by >= MIN_STORAGE_VOUCHERS distinct GENESIS-MASTER
+      // observers in THIS sealed Lock has proven (via the masters' off-chain random-chunk probes) that it
+      // holds + serves the model. We credit its work here from the CONVERGED observations every node shares
+      // (vouchedMiners rides on the signed observation), so it is byte-identical across nodes — never from
+      // per-master ledger txs, which diverge and freeze finality. Setting lastWorkEpoch unlocks its heartbeat
+      // emission in the eligibility check just below. lastWorkEpoch is not in the state root; the emission it
+      // unlocks is, and that stays deterministic because the vouch set is derived from consensus observations.
+      if (subject === PROTOCOL.FIELD_HEARTBEAT_SUBJECT) {
+        const vouches = new Map<Address, Set<Address>>();
+        for (const c of claims) {
+          const voucher = addressFromPubKey(c.observer);
+          if (!this.isGenesisMaster(voucher)) continue;
+          for (const m of latest.get(c.observer)?.vouchedMiners ?? []) {
+            if (!/^zir1[0-9a-z]{6,}$/.test(m) || m === voucher) continue;
+            let s = vouches.get(m); if (!s) { s = new Set(); vouches.set(m, s); }
+            s.add(voucher);
+          }
+        }
+        for (const [miner, voucherSet] of vouches) {
+          if (voucherSet.size >= PROTOCOL.MIN_STORAGE_VOUCHERS) this.acct(miner).lastWorkEpoch = epoch;
+        }
+      }
+
       // update contributor ZTI and mint the round reward
       const rewardContribs: { pubKey: string; accuracy: number; address: Address; storageGiB: number }[] = [];
       for (const c of claims) {
