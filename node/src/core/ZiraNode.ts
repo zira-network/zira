@@ -1057,9 +1057,10 @@ export class ZiraNode {
     const me = this.state.accounts.get(this.identity.address);
     if (!(this.state.isGenesisMaster(this.identity.address) || (me?.isMaster ?? false))) return;  // only masters attest
     const modelId = this.models.localHeldModelId();
-    if (!modelId) return;
+    if (!modelId) { log.debug("storage-proof: no model held locally yet; skipping probe"); return; }
     const peers = this.models.peersServing(modelId).slice(0, 16);   // bound work per round
-    if (peers.length === 0) return;
+    if (peers.length === 0) { log.debug(`storage-proof: no peers advertising model ${modelId.slice(0, 12)} to probe yet`); return; }
+    log.info(`storage-proof: probing ${peers.length} peer(s) that serve model ${modelId.slice(0, 12)}`);
     this.storageProbeBusy = true;
     try {
       const verified: string[] = [];
@@ -1067,7 +1068,12 @@ export class ZiraNode {
         try { if (await this.models.verifyPeerStorage(peerId, modelId)) verified.push(address); } catch { /* unreachable peer: skip */ }
       }
       const unique = [...new Set(verified)];
-      if (unique.length > 0) this.submitStorageAttest(unique);
+      if (unique.length > 0) {
+        log.info(`storage-proof: verified ${unique.length} peer(s) hold model ${modelId.slice(0, 12)} -> crediting work (storage_attest)`);
+        this.submitStorageAttest(unique);
+      } else {
+        log.info(`storage-proof: ${peers.length} peer(s) advertised the model but none returned a matching chunk this round`);
+      }
     } finally {
       this.storageProbeBusy = false;
     }
@@ -1166,13 +1172,21 @@ export class ZiraNode {
     const eligible = this.autonomousResonanceEligible();
     if (eligible.length === 0) return { queries: 0, released: 0 };
 
+    // Only a FUNDING node drives autonomous coordination: the founder/steward (drives every resonator) or
+    // a genesis master (drives its own shard, paying from the emission it earns). A plain miner does not
+    // drive — it EARNS by answering these queries. This is what lets miners earn coordination pay on a
+    // keyless network with no steward online.
+    const mine = this.autonomousResonanceDriven(eligible);
+    if (mine.length === 0) return { queries: 0, released: 0 };
+
     let queries = 0;
     if (this.lastAutonomousResonanceBucket !== bucket) {
       this.lastAutonomousResonanceBucket = bucket;
-      for (const resonator of this.autonomousResonanceBatch(eligible, bucket)) {
+      for (const resonator of this.autonomousResonanceBatch(mine, bucket)) {
         const query = this.autonomousResonanceQuery(resonator, bucket, now);
         if (!this.soft.queries.has(query.id)) { this.publishQuery(query); queries++; }
       }
+      if (queries > 0) log.info(`autonomous coordination: published ${queries} resonance ${queries === 1 ? "query" : "queries"} this cycle (driving ${mine.length} of ${eligible.length} eligible resonators)`);
     }
 
     let released = 0;
@@ -1180,16 +1194,15 @@ export class ZiraNode {
       if (settleBucket < 0) continue;
       const bucketStart = settleBucket * AUTONOMOUS_RESONANCE_CYCLE_MS;
       if (now < bucketStart + AUTONOMOUS_RESONANCE_SETTLE_MS) continue;
-      for (const resonator of this.autonomousResonanceBatch(eligible, settleBucket)) {
+      for (const resonator of this.autonomousResonanceBatch(mine, settleBucket)) {
         const task = this.autonomousResonanceTask(resonator, settleBucket, now);
-        if (task && this.publishTask(task)) {
-          released++;
-          // Real coordination payout: the funding wallet (this founder/steward node, the query asker)
-          // pays the providers whose accepted answers converged this query, so a MINING contributor's
-          // balance actually grows from Proof of Resonance + coordination. Reuses settleQueryCoordination
-          // (split by domain ZTI x confidence, steward-ops share, no minting). Idempotent per query.
-          this.settleAutonomousCoordination(resonator.id, settleBucket);
-        }
+        if (task && this.publishTask(task)) released++;
+        // Real coordination payout: the funding wallet (this master/steward node, the query asker) pays the
+        // providers whose accepted answers converged this query, so a MINING contributor's balance actually
+        // grows from Proof of Resonance + coordination. Run EVERY cycle (not only when the task first
+        // publishes): answers can arrive after the task is created, and settle is idempotent per query, so
+        // retrying each cycle until >= 2 answers exist is what makes the payout reliable.
+        this.settleAutonomousCoordination(resonator.id, settleBucket);
       }
     }
     return { queries, released };
@@ -1204,11 +1217,17 @@ export class ZiraNode {
    */
   private settleAutonomousCoordination(resonatorId: string, bucket: number): void {
     if (AUTONOMOUS_COORDINATION_REWARD_UZIR <= 0) return;
-    if (this.identity.address !== this.genesis.founder) return;   // only the funding (asker) wallet pays
+    // The founder/steward, or any genesis master, funds the payout from its own balance. A master pays
+    // from the emission it earns, so coordination pay flows to answering miners with no steward online.
+    if (this.identity.address !== this.genesis.founder && !this.state.isGenesisMaster(this.identity.address)) return;
     const queryId = this.autonomousResonanceQueryId(resonatorId, bucket);
     if (this.settledCoordinationQueries.has(queryId)) return;
-    const answers = this.modelBackedProviderAnswers(this.soft.answers.get(queryId) ?? []);
-    if (answers.length < AUTONOMOUS_RESONANCE_MIN_ANSWERS) return;
+    const raw = this.soft.answers.get(queryId) ?? [];
+    const answers = this.modelBackedProviderAnswers(raw);
+    if (answers.length < AUTONOMOUS_RESONANCE_MIN_ANSWERS) {
+      if (raw.length > 0) log.debug(`autonomous coordination: ${queryId.slice(0, 16)} has ${raw.length} answer(s), ${answers.length} model-backed; need ${AUTONOMOUS_RESONANCE_MIN_ANSWERS} to pay`);
+      return;
+    }
     const result = this.settleQueryCoordination(queryId, AUTONOMOUS_COORDINATION_REWARD_UZIR);
     if (result.ok) {
       this.settledCoordinationQueries.add(queryId);
@@ -1227,6 +1246,22 @@ export class ZiraNode {
       .filter((r) => r.listed && r.resonanceEnabled && r.status !== "paused" && (r.balanceUZIR ?? 0) > 0)
       .sort((a, b) => a.id.localeCompare(b.id))
       .slice(0, 12);
+  }
+
+  /**
+   * The subset of eligible resonators THIS node funds. The founder/steward drives all of them; a genesis
+   * master drives only its own shard (resonator hashed to this master's index in the genesis master set),
+   * so the masters split the work and never settle the same query twice. Any other node drives none.
+   */
+  private autonomousResonanceDriven(eligible: Resonator[]): Resonator[] {
+    if (this.identity.address === this.genesis.founder) return eligible;
+    const masters = (this.genesis.masters ?? []).map((m) => m.address);
+    const idx = masters.indexOf(this.identity.address);
+    if (idx < 0 || masters.length === 0) return [];
+    return eligible.filter((r) => {
+      let h = 0; for (let i = 0; i < r.id.length; i++) h = (h * 31 + r.id.charCodeAt(i)) >>> 0;
+      return h % masters.length === idx;
+    });
   }
 
   private autonomousResonanceBatch(resonators: Resonator[], bucket: number): Resonator[] {
@@ -1695,7 +1730,7 @@ export class ZiraNode {
     return {
       // Release version, exposed so the Console can negotiate features against older nodes (upgrade
       // without ruptures). Tracks the node package version / installer release.
-      version: "1.9.5",
+      version: "1.9.6",
       network: this.genesis.network,
       phase: "live",
       providersOnline: this.soft.onlineProviders(now).length,

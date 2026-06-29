@@ -9,7 +9,7 @@
 // changed port, a missing build, or a startup crash can no longer leave the app as an invisible
 // background process. Fatal conditions are surfaced in the window (and the system log) instead of a
 // silent app.quit().
-const { app, BrowserWindow, Menu, shell, dialog, session } = require("electron");
+const { app, BrowserWindow, Menu, shell, dialog, session, ipcMain } = require("electron");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
 const http = require("node:http");
@@ -256,21 +256,33 @@ else {
 let quitting = false;
 function stopNode() { quitting = true; if (nodeProc) { try { nodeProc.kill(); } catch { /* */ } nodeProc = null; } }
 
-// A fresh start wipes ledger/app state but keeps heavy model caches unless ZIRA_DEEP_RESET=1.
-async function fullReset() {
+// A fresh start wipes ledger/app state but keeps heavy model caches unless deep is requested
+// (env ZIRA_DEEP_RESET=1, or the Settings "Reset ZIRA" button which always deep-resets).
+async function fullReset(deep = process.env.ZIRA_DEEP_RESET === "1") {
   try {
     const dataDir = path.join(app.getPath("userData"), "zira-data", NETWORK);
     const resetNames = [
       "events.jsonl", "snapshot.json", "mining.json", "provider.json", "storage-peers.json",
       "founder-backups.json", "zti-history.jsonl", "peers.json", "identity.json", "peer-key.bin",
+      "genesis-id",
     ];
-    if (process.env.ZIRA_DEEP_RESET === "1") resetNames.push("models");
+    if (deep) resetNames.push("models");
     for (const name of resetNames) fs.rmSync(path.join(dataDir, name), { recursive: true, force: true });
   } catch { /* */ }
   try { await session.defaultSession.clearStorageData(); } catch { /* */ }
   try { await session.defaultSession.clearCache(); } catch { /* */ }
-  console.log(process.env.ZIRA_DEEP_RESET === "1" ? "ZIRA_RESET: cleared local ledger, model cache, and app storage, starting fresh" : "ZIRA_RESET: cleared local ledger and app storage, kept model cache, starting fresh");
+  console.log(deep ? "ZIRA_RESET: cleared local ledger, model cache, and app storage, starting fresh" : "ZIRA_RESET: cleared local ledger and app storage, kept model cache, starting fresh");
 }
+
+// Settings -> "Reset ZIRA": stop the node, wipe EVERYTHING (ledger + wallet/app storage + model cache),
+// then relaunch the app clean. Driven from the renderer via the contextBridge.
+ipcMain.handle("zira:reset", async () => {
+  try { stopNode(); } catch { /* */ }
+  await fullReset(true);
+  app.relaunch();
+  app.exit(0);
+  return true;
+});
 
 // The application menu bar is intentionally off (Menu.setApplicationMenu(null) above). Copy/paste and
 // text selection still work natively inside inputs; the app is driven entirely from the Console UI.

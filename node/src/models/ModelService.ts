@@ -131,6 +131,7 @@ export class ModelService {
     e.peerIds.add(a.peerId);
     e.hosts.add(a.host);
     if (a.peerId && a.peerId !== "genesis" && /^zir1[0-9a-z]{6,}$/.test(a.host)) this.serverAddr.set(a.peerId, a.host);
+    else log.debug(`model announce kept peerId=${String(a.peerId).slice(0, 12)} host=${String(a.host).slice(0, 16)} (no serverAddr mapping)`);
     if (fresh && this.mining.storageEnabled) void this.reconcileStorage();
     return fresh;
   }
@@ -384,6 +385,17 @@ export class ModelService {
     // leaving a perfectly servable local model unserved (the "holds a model but never answers" bug).
     const target = this.bestLocalModelId();
     if (!target) return;
+    // Mark the model we actually hold+serve as LOCAL and broadcast a real announce (peerId + our ZIR
+    // address). Without this, a baked launch model stays local=false, announceLocal never advertises it,
+    // and other masters can't discover us to run the storage-proof — so a genuine serving miner never gets
+    // the work credit. Do it once per (re)load; announceLocal re-gossips it periodically thereafter.
+    const held = this.registry.get(target);
+    if (held && !held.local) {
+      held.local = true;
+      held.peerIds.add(this.net.peerId());
+      held.hosts.add(this.identity.address);
+      this.announce(this.makeAnnounce(held));
+    }
     // Atomic swap: when a newer/better model has arrived locally, retire the current subprocess and let
     // the next reconcile tick respawn onto the new model (gives the inference port time to free). The old
     // served model stops being essential only after we've switched, so the cap can reclaim it cleanly.

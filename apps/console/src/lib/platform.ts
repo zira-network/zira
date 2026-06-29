@@ -1,10 +1,17 @@
 // apps/console/src/lib/platform.ts
 // Whether the Console is running inside the ZIRA desktop app. Mining (running a model on your CPU
 // or GPU) is desktop only, so these features are hidden on the web and on mobile.
-interface ZiraBridge { isDesktop: boolean; platform: string; version: string }
+interface ZiraBridge { isDesktop: boolean; platform: string; version: string; resetAndRelaunch?: () => Promise<boolean> }
 
 export function isDesktop(): boolean {
   return typeof window !== "undefined" && !!(window as unknown as { zira?: ZiraBridge }).zira?.isDesktop;
+}
+
+// Desktop only: ask the app to wipe EVERYTHING (ledger + wallet + model cache + app storage) and relaunch
+// clean. Returns null when not running in the desktop app (web/mobile fall back to a browser-side wipe).
+export function desktopResetAndRelaunch(): Promise<boolean> | null {
+  const fn = (window as unknown as { zira?: ZiraBridge }).zira?.resetAndRelaunch;
+  return typeof fn === "function" ? fn() : null;
 }
 
 // Whether the Console runs inside a Capacitor native app (Android/iOS). Such a build serves its own
