@@ -75,15 +75,25 @@ export class ModelService {
     // model without any live founder announce — this is what lets the VPS miner and any joining miner serve
     // and earn. We deliberately keep it OFF pure storage/consensus coordinators: fetching + hashing a multi-GB
     // model is CPU-heavy and would starve their checkpoint voting, so they stay free to finalize.
-    if (this.mining.enabled) {
-      for (const a of this.launchModels) { try { this.onAnnounce(a); } catch { /* a malformed bake is non-fatal */ } }
-    }
+    if (this.mining.enabled || this.mining.storageEnabled) this.registerLaunchModels();
     // On restart, reconcile heavy storage against the persisted cap before doing anything else: evict
     // anything over the cap or held while disabled, so the persisted runtime state is authoritative.
     this.enforceStorageCap();
     this.announceLocal();
     if (this.mining.enabled) { if (this.mining.mode === "auto") void this.reconcileAuto(); else if (this.mining.modelId) void this.loadIfReady(); }
     else if (this.mining.ownTaskInference) void this.ensureOwnTaskModel();
+  }
+
+  /**
+   * Register the genesis-authorized launch models into the registry (founder-signed, verified by onAnnounce).
+   * This only adds metadata — fetching the bytes stays gated behind reconcileStorage/reconcileAuto — so it is
+   * safe to call whenever mining or storage turns on. Crucially it must run when mining is enabled AT RUNTIME
+   * (not only at startup), otherwise a node that starts with mining off and the user enables it later never
+   * learns the launch model id, never serves or replicates it, and so never earns. Idempotent (onAnnounce
+   * de-dupes by id), so calling it repeatedly is harmless.
+   */
+  private registerLaunchModels(): void {
+    for (const a of this.launchModels) { try { this.onAnnounce(a); } catch { /* a malformed bake is non-fatal */ } }
   }
 
   // ---- announcements ----
@@ -607,7 +617,7 @@ export class ModelService {
     // re-advertise and replicate up to the cap; when off, stop advertising/replicating heavy bytes.
     if (patch.storageEnabled !== undefined || patch.storageCapBytes !== undefined || patch.storageLimitGb !== undefined) {
       this.enforceStorageCap();
-      if (this.mining.storageEnabled) { this.announceLocal(); void this.reconcileStorage(); }
+      if (this.mining.storageEnabled) { this.registerLaunchModels(); this.announceLocal(); void this.reconcileStorage(); }
     }
     if (!this.mining.enabled) {
       // Mining is off. Stop the isolated inference subprocess and free the engine. Keep (or load) a native
@@ -617,6 +627,9 @@ export class ModelService {
       else await this.inference.unload();
       return this.mining;
     }
+    // Mining is on. Make sure the genesis launch models are registered NOW (the user may have enabled mining
+    // after startup, when init() skipped the bake) so reconcile has a model to hold, serve, and earn from.
+    this.registerLaunchModels();
     if (this.mining.mode === "auto") await this.reconcileAuto();
     else if (this.mining.modelId) await this.loadIfReady();
     return this.mining;

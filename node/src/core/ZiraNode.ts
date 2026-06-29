@@ -1731,7 +1731,7 @@ export class ZiraNode {
     return {
       // Release version, exposed so the Console can negotiate features against older nodes (upgrade
       // without ruptures). Tracks the node package version / installer release.
-      version: "1.9.7",
+      version: "1.9.8",
       network: this.genesis.network,
       phase: "live",
       providersOnline: this.soft.onlineProviders(now).length,
