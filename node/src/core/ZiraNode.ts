@@ -63,6 +63,13 @@ function envInt(name: string, fallback: number): number {
   return Number.isInteger(n) && n > 0 ? n : fallback;
 }
 
+// Master-created earning txs (storage_attest credit + autonomous coordination payout from genesis masters)
+// are OFF by default. They are created continuously per-master from local soft state and, in practice,
+// make the per-epoch state diverge across masters (different masters include slightly different tx sets per
+// epoch), which breaks quorum finality (it freezes once the chain catches up to real time). Until the
+// credit is carried deterministically inside the heartbeat observation (verified identically by every node),
+// keep these off so finality stays byte-identical and real-time. The founder/steward path is unaffected.
+const MASTER_EARN_TX = (process.env.ZIRA_MASTER_EARN_TX ?? "0") === "1";
 const AUTONOMOUS_RESONATOR_DELIVER_MS = envMs("ZIRA_AUTONOMOUS_RESONATOR_DELIVER_MS", 10_000);
 const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS", 5 * 60_000);
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
@@ -1054,6 +1061,7 @@ export class ZiraNode {
    * master's attestation is honored by consensus; the attest tx gossips so every node credits the same miners.
    */
   private async runStorageProbe(): Promise<void> {
+    if (!MASTER_EARN_TX) return;   // master-created storage_attest txs are gated off to keep finality deterministic
     if (this.storageProbeBusy) return;
     const me = this.state.accounts.get(this.identity.address);
     if (!(this.state.isGenesisMaster(this.identity.address) || (me?.isMaster ?? false))) return;  // only masters attest
@@ -1218,9 +1226,11 @@ export class ZiraNode {
    */
   private settleAutonomousCoordination(resonatorId: string, bucket: number): void {
     if (AUTONOMOUS_COORDINATION_REWARD_UZIR <= 0) return;
-    // The founder/steward, or any genesis master, funds the payout from its own balance. A master pays
-    // from the emission it earns, so coordination pay flows to answering miners with no steward online.
-    if (this.identity.address !== this.genesis.founder && !this.state.isGenesisMaster(this.identity.address)) return;
+    // The founder/steward always may settle. A genesis master may too, but ONLY when master-earn txs are
+    // enabled — by default they are off, because master-created payout txs diverge per-epoch across masters
+    // and freeze quorum finality. The founder/steward path stays available (single funder = deterministic).
+    const isMasterFunder = this.state.isGenesisMaster(this.identity.address);
+    if (this.identity.address !== this.genesis.founder && !(isMasterFunder && MASTER_EARN_TX)) return;
     const queryId = this.autonomousResonanceQueryId(resonatorId, bucket);
     if (this.settledCoordinationQueries.has(queryId)) return;
     const raw = this.soft.answers.get(queryId) ?? [];
