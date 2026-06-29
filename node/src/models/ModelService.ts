@@ -130,8 +130,54 @@ export class ModelService {
     const fresh = !e.peerIds.has(a.peerId);
     e.peerIds.add(a.peerId);
     e.hosts.add(a.host);
+    if (a.peerId && a.peerId !== "genesis" && /^zir1[0-9a-z]{6,}$/.test(a.host)) this.serverAddr.set(a.peerId, a.host);
     if (fresh && this.mining.storageEnabled) void this.reconcileStorage();
     return fresh;
+  }
+
+  // libp2p peer -> the ZIR address that announced it serves a model, so a storage probe can attribute a
+  // verified result to a ledger account. Populated from signed model announces.
+  private serverAddr = new Map<string, string>();
+
+  /** The id of an authorized model this node holds locally and can verify probes against, or null. */
+  localHeldModelId(): string | null {
+    for (const e of this.registry.values()) if (this.store.hasValidGguf(e.meta.id)) return e.meta.id;
+    return null;
+  }
+
+  /** (peerId, ZIR address) of OTHER nodes that announced they serve the given model. Excludes self. */
+  peersServing(modelId: string): { peerId: string; address: string }[] {
+    const e = this.registry.get(modelId);
+    if (!e) return [];
+    const mine = this.net.peerId();
+    const out: { peerId: string; address: string }[] = [];
+    for (const peerId of e.peerIds) {
+      if (peerId === mine || peerId === "genesis") continue;
+      const address = this.serverAddr.get(peerId);
+      if (address && address !== this.identity.address) out.push({ peerId, address });
+    }
+    return out;
+  }
+
+  /**
+   * Storage probe: request a random chunk of a model this node ALSO holds from `peerId`, and verify the
+   * returned bytes byte-for-byte against the local copy. Only a node that genuinely stores the chunk can
+   * return it, so this proves the peer holds the model (a real ~hundreds-of-MB cost), which is what makes
+   * the work credit it earns sybil-resistant. Best-effort: any error or mismatch is a clean false.
+   */
+  async verifyPeerStorage(peerId: string, modelId: string): Promise<boolean> {
+    if (!this.store.hasValidGguf(modelId)) return false;     // must hold it myself to verify
+    const meta = this.store.meta(modelId);
+    if (!meta || meta.chunkCount <= 0) return false;
+    const index = Math.floor(Math.random() * meta.chunkCount);
+    try {
+      const frames = await this.net.request(peerId, MODEL_PROTOCOL, enc.encode(JSON.stringify({ id: modelId, index })));
+      const got = frames[0];
+      const mine = new Uint8Array(this.store.readChunk(modelId, index));
+      if (!got || got.length !== mine.length || mine.length === 0) return false;
+      for (let i = 0; i < mine.length; i++) if (got[i] !== mine[i]) return false;
+      return true;
+    } catch { return false; }
   }
 
   private trackLocal(meta: ModelMeta, founderPubKey: string, manifestSig: string): RegistryEntry {

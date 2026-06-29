@@ -1026,6 +1026,11 @@ export class ZiraNode {
     // Field heartbeat: contributing (mining/storage) nodes attest participation so PoR Locks form and the
     // round emission flows to them (storage-weighted). Self-throttled to FIELD_HEARTBEAT_INTERVAL_MS.
     this.contributeFieldHeartbeat(now);
+    // Storage proof: a master that holds the model periodically probes peers serving it and attests the ones
+    // that prove they hold the bytes (a random-chunk probe), so genuine storage/serving miners earn the
+    // heartbeat emission, not only paid coordination.
+    this.storageProbeEvery = (this.storageProbeEvery + 1) % 20;     // ~ every 20s
+    if (this.storageProbeEvery === 0) void this.runStorageProbe();
     // anchor vesting: release any class-allocation that has linearly accrued to seat owners since the
     // last tick. No-op on nodes without the reserve key, and when nothing new has vested.
     this.releaseAnchorVesting(now);
@@ -1037,6 +1042,47 @@ export class ZiraNode {
   }
   private autoEvery = 0;
   private ztiSnapEvery = 0;
+  private storageProbeEvery = 0;
+  private storageProbeBusy = false;
+
+  /**
+   * Storage-proof attestation. Runs on a MASTER that holds the model: it probes each peer serving that model
+   * for a random chunk and verifies the bytes against its own copy. Peers that pass demonstrably hold the
+   * model (a real storage cost), so the master attests them on-ledger with a storage_attest tx, which credits
+   * their verifiable work and makes the heartbeat emission earnable by genuine storage/serving miners. Only a
+   * master's attestation is honored by consensus; the attest tx gossips so every node credits the same miners.
+   */
+  private async runStorageProbe(): Promise<void> {
+    if (this.storageProbeBusy) return;
+    const me = this.state.accounts.get(this.identity.address);
+    if (!(this.state.isGenesisMaster(this.identity.address) || (me?.isMaster ?? false))) return;  // only masters attest
+    const modelId = this.models.localHeldModelId();
+    if (!modelId) return;
+    const peers = this.models.peersServing(modelId).slice(0, 16);   // bound work per round
+    if (peers.length === 0) return;
+    this.storageProbeBusy = true;
+    try {
+      const verified: string[] = [];
+      for (const { peerId, address } of peers) {
+        try { if (await this.models.verifyPeerStorage(peerId, modelId)) verified.push(address); } catch { /* unreachable peer: skip */ }
+      }
+      const unique = [...new Set(verified)];
+      if (unique.length > 0) this.submitStorageAttest(unique);
+    } finally {
+      this.storageProbeBusy = false;
+    }
+  }
+
+  /** Build, sign, and submit a master-signed storage attestation crediting the listed miners' work. */
+  private submitStorageAttest(miners: string[]): void {
+    if (miners.length === 0) return;
+    const body: TxBody = {
+      network: this.genesis.network, from: this.identity.address, fromPubKey: this.identity.publicKey,
+      to: this.identity.address, amountUZIR: 0, feeUZIR: 0, nonce: this.state.provisionalNonce(this.identity.address),
+      kind: "storage_attest", parents: [], timestamp: Date.now(), memo: JSON.stringify({ miners: miners.slice(0, 64) }),
+    };
+    this.submitTx(signTx(body, this.identity.privateKey));
+  }
   private lastAutonomousResonanceBucket = -1;
   private lastHeartbeatBucket = -1;
 
@@ -1649,7 +1695,7 @@ export class ZiraNode {
     return {
       // Release version, exposed so the Console can negotiate features against older nodes (upgrade
       // without ruptures). Tracks the node package version / installer release.
-      version: "1.9.4",
+      version: "1.9.5",
       network: this.genesis.network,
       phase: "live",
       providersOnline: this.soft.onlineProviders(now).length,

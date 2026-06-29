@@ -528,6 +528,26 @@ export class State {
     const sender = this.acct(tx.from);
     if (tx.nonce !== sender.nonce) return;                 // out of order or replay, drop
     const need = tx.amountUZIR + tx.feeUZIR;
+
+    if (tx.kind === "storage_attest") {
+      // A master attests that the listed miners proved they hold and serve authorized model bytes (the
+      // master probed a random chunk and verified it against the known content hash). This credits their
+      // verifiable storage/serving work, so heartbeat emission is earnable by genuine storage miners and
+      // not only by paid coordination. Only a master may attest; from anyone else it is a no-op. No balance
+      // moves. lastWorkEpoch is not in the state root, but the emission it unlocks IS, so every node must
+      // run this rule (it ships as a re-genesis cutover). Deterministic: every field is in the signed tx.
+      sender.nonce += 1;
+      if (!sender.pubkey) sender.pubkey = tx.fromPubKey;
+      const signerIsMaster = this.isGenesisMaster(tx.from) || (this.accounts.get(tx.from)?.isMaster ?? false);
+      if (signerIsMaster) {
+        let miners: string[] = [];
+        try { const p = JSON.parse(tx.memo ?? "{}") as { miners?: unknown }; if (Array.isArray(p.miners)) miners = p.miners.slice(0, 64).map(String); } catch { /* malformed memo attests no one */ }
+        for (const m of miners) if (/^zir1[0-9a-z]{6,}$/.test(m) && m !== tx.from) this.acct(m).lastWorkEpoch = epoch;
+      }
+      this.record({ ...tx, committedEpoch: epoch });
+      return;
+    }
+
     if (tx.kind === "reserve_grant" && !this.isAuthorizedFounder(tx.from)) return;
 
     if (tx.kind === "founder_delegate") {
