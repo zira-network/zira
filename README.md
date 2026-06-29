@@ -61,8 +61,7 @@ pnpm --filter @zira/desktop dist:linux   # Linux AppImage
 - **The models are shared.** Approved model files are checked by every node and passed between peers
   like a swarm. Each node serves the models its hardware can handle, guided by trust.
 
-There is more depth in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and the
-[whitepaper](docs/ZIRA_WHITEPAPER.md). To run a node, see [`docs/RUN_A_NODE.md`](docs/RUN_A_NODE.md).
+The full design, economics, and roadmap are in the [whitepaper](docs/ZIRA_WHITEPAPER.md).
 
 ## Project layout
 
@@ -79,8 +78,7 @@ docs                architecture, whitepaper, running a node, decentralization
 
 ZIRA is early. ZIR has no value today and may never have one. There is no promise of a price, a
 listing, or a return. Like any young network, it leans on a few reachable nodes at first, and it
-decentralizes as more people run nodes and earn trust (see
-[`docs/DECENTRALIZATION.md`](docs/DECENTRALIZATION.md)). Run your own node and verify everything
+decentralizes as more people run nodes and earn trust. Run your own node and verify everything
 yourself instead of trusting anyone. You could lose what you put in. Take part because you believe in
 the idea.
 
