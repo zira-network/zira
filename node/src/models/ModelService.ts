@@ -607,6 +607,12 @@ export class ModelService {
     if (next.threads !== undefined) next.threads = Math.max(1, Math.min(256, Math.floor(Number(next.threads) || 1)));
     if ((patch.gpuLayers !== undefined || patch.threads !== undefined) && patch.useRecommendedHardware === undefined) next.useRecommendedHardware = false;
     this.mining = { ...this.mining, ...next };
+    // Mining IMPLIES storage. A contributing node must hold the model bytes to serve them and to be
+    // storage-credited (the desktop build can't run native inference, so holding+serving the bytes is how it
+    // earns at all). So enabling mining auto-enables storage — "turn on Mine" is all a normal user needs.
+    // Turning mining OFF leaves storage on its own setting (a node can be a pure storage peer).
+    const storageJustForcedOn = patch.enabled === true && !this.mining.storageEnabled;
+    if (this.mining.enabled) this.mining.storageEnabled = true;
     // A GB-only patch (older Console) updates the byte cap too, so the authoritative value tracks it.
     if (patch.storageLimitGb !== undefined && patch.storageCapBytes === undefined) {
       this.mining.storageCapBytes = Math.max(1, Math.min(4096, Number(patch.storageLimitGb) || 1)) * 1024 ** 3;
@@ -615,7 +621,7 @@ export class ModelService {
     this.saveMining();
     // Storage-affecting changes: re-enforce the cap (evict over-cap non-essential bytes), and when on,
     // re-advertise and replicate up to the cap; when off, stop advertising/replicating heavy bytes.
-    if (patch.storageEnabled !== undefined || patch.storageCapBytes !== undefined || patch.storageLimitGb !== undefined) {
+    if (patch.storageEnabled !== undefined || patch.storageCapBytes !== undefined || patch.storageLimitGb !== undefined || storageJustForcedOn) {
       this.enforceStorageCap();
       if (this.mining.storageEnabled) { this.registerLaunchModels(); this.announceLocal(); void this.reconcileStorage(); }
     }

@@ -99,6 +99,11 @@ interface ZiraState {
   localLaunchMiners: LocalLaunchMinerSummary[];
   ztiByDomain: Partial<Record<Domain, number>>;
   zti: number;
+  // The node's OWN mining wallet (its identity) — the address that actually earns from mining/serving on
+  // this machine. Separate from the user's spendable Console `address`. The Mine tab shows these so a
+  // miner sees real earnings even when their personal wallet is a different (empty) address.
+  minerAddress: string | null;
+  minerBalanceUZIR: number;
 
   // local notifications feed
   notifications: AppNotification[];
@@ -142,6 +147,8 @@ export const useZira = create<ZiraState>((set, get) => ({
   hasWallet: false,
   unlocked: false,
   balanceUZIR: 0,
+  minerAddress: null,
+  minerBalanceUZIR: 0,
   stats: null,
   locks: [],
   events: [],
@@ -262,6 +269,9 @@ export const useZira = create<ZiraState>((set, get) => ({
         // the panel stays visible read-only and shows the inline "run your node with the steward key" note.
         stewardActionsGated: isStewardWallet && !nodeTreatsAsFounder,
         mining: st.mining, localLaunchMiners,
+        // The node's own mining wallet + its live balance (the address that earns on this machine).
+        minerAddress: st.address ?? null,
+        minerBalanceUZIR: typeof st.balanceUZIR === "number" ? st.balanceUZIR : prev.minerBalanceUZIR,
       };
       if (st.address) {
         try {

@@ -311,7 +311,7 @@ function ConvergencePanel({ converged, convergenceMin, earningUnlocked, locksPer
 
 // Earnings panel: paid ZIR (demand) vs ZTI (earned trust from all accurate serving). The status badge
 // reads from the single participation state so it never contradicts the other badges on the page.
-function EarningsPanel({ answered, earnedTodayUZIR, balanceUZIR, zti, state }: { answered: number; earnedTodayUZIR: number; balanceUZIR: number; zti: number; state: ParticipationState }) {
+function EarningsPanel({ answered, earnedTodayUZIR, balanceUZIR, zti, state, minerAddress }: { answered: number; earnedTodayUZIR: number; balanceUZIR: number; zti: number; state: ParticipationState; minerAddress?: string | null }) {
   return (
     <Card>
       <div className="flex items-center justify-between">
@@ -323,9 +323,12 @@ function EarningsPanel({ answered, earnedTodayUZIR, balanceUZIR, zti, state }: {
       <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
         <Stat label="Answered" value={answered} />
         <Stat label="Paid today (ZIR)" value={formatZir(earnedTodayUZIR)} tone="teal" />
-        <Stat label="Wallet balance" value={formatZir(balanceUZIR)} />
+        <Stat label="Mining balance (ZIR)" value={formatZir(balanceUZIR)} tone="teal" />
         <Stat label="Trust (ZTI)" value={zti.toFixed(2)} tone="indigo" />
       </div>
+      {minerAddress && (
+        <div className="mt-2 text-[11px] text-faint">Mining wallet <span className="mono text-muted">{minerAddress.slice(0, 10)}…{minerAddress.slice(-6)}</span> — this node earns here. It is separate from your personal wallet; both live on this machine.</div>
+      )}
       <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
         <div className="rounded-lg border border-[color-mix(in_srgb,var(--teal)_24%,var(--border))] bg-[color-mix(in_srgb,var(--teal)_7%,transparent)] p-2.5">
           <div className="font-medium text-[var(--teal)]">Paid ZIR</div>
@@ -533,7 +536,7 @@ function HowYouEarn() {
 export function Mine() {
   const toast = useToast();
   const { mode, isFounder, stats, balanceUZIR, hardware, nodeConfig, providerStatus, mining, localLaunchMiners, zti, address, locks,
-    setMining, refreshStatus } = useZira();
+    minerAddress, minerBalanceUZIR, setMining, refreshStatus } = useZira();
   const [busy, setBusy] = useState(false);
   const [hardwareBusy, setHardwareBusy] = useState(false);
   const [advanced, setAdvanced] = useState(false);
@@ -839,9 +842,10 @@ export function Mine() {
       <EarningsPanel
         answered={(mining?.answered ?? 0) + localLaunchAnswers}
         earnedTodayUZIR={providerStatus.earnedTodayUZIR + localLaunchEarnedUZIR}
-        balanceUZIR={balanceUZIR}
+        balanceUZIR={minerBalanceUZIR}
         zti={zti}
         state={state}
+        minerAddress={minerAddress}
       />
 
       {/* Period earnings history: 1H / 24H / 7D / 30D, computed from the signed ledger. */}
@@ -1008,10 +1012,10 @@ export function Mine() {
         <div className="mt-3 rounded-lg border border-hairline bg-base p-3">
           <div className="flex items-center justify-between gap-3">
             <div className="text-xs">
-              <div className="flex items-center gap-2 font-medium text-text"><Link2 size={14} className="text-[var(--indigo)]" /> Storage (peer-to-peer) <span className="font-normal text-faint">you control this</span></div>
-              <div className="mt-0.5 text-faint">On by default with a small 1 GB cap. Storage peers hold authorized model bytes and pass them to each other, so models reach any storage-enabled peer without a central host. Turning it off keeps this node fully working for consensus and queries; it just stops advertising and replicating peer storage. This is separate from mining and from serving a model.</div>
+              <div className="flex items-center gap-2 font-medium text-text"><Link2 size={14} className="text-[var(--indigo)]" /> Storage (peer-to-peer) <span className="font-normal text-faint">{mining?.enabled ? "on with mining" : "you control this"}</span></div>
+              <div className="mt-0.5 text-faint">{mining?.enabled ? "Mining needs storage to hold and serve the model, so it stays on while you mine. Storage peers pass authorized model bytes to each other, so models reach any peer without a central host." : "Storage peers hold authorized model bytes and pass them to each other, so models reach any storage-enabled peer without a central host. Turning it off keeps this node working for consensus and queries; it just stops replicating peer storage."}</div>
             </div>
-            <Toggle on={mining?.storageEnabled ?? false} onClick={() => updateStorage(!(mining?.storageEnabled ?? false))} disabled={busy} />
+            <Toggle on={(mining?.storageEnabled ?? false) || (mining?.enabled ?? false)} onClick={() => updateStorage(!(mining?.storageEnabled ?? false))} disabled={busy || (mining?.enabled ?? false)} />
           </div>
           <div className="mt-2 grid gap-2 sm:grid-cols-3">
             <Field label="Storage cap" hint="GB. Default is 1 GB. The node never stores more than this; when full it stops taking new bytes and keeps serving what fits.">
