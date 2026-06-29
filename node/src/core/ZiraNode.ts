@@ -1011,8 +1011,9 @@ export class ZiraNode {
         for (const vote of votes) this.publish(this.topics.consensus, { t: "checkpoint", data: vote });
       }
     }
-    // any mining node: keep the built-in engine running the authorized field model (auto mode).
-    this.autoEvery = (this.autoEvery + 1) % 8;
+    // any mining node: keep the built-in engine running the authorized field model (auto mode). Re-announce
+    // and reconcile every ~5s so a freshly-serving miner is discovered (and storage-credited) quickly.
+    this.autoEvery = (this.autoEvery + 1) % 5;
     if (this.autoEvery === 0) {
       this.models.announceLocal(); this.models.reannounceField(); void this.models.reconcileAuto(); void this.models.reconcileStorage();
       // Keep anchor Resonators in lockstep with their positions: re-materialize (re-key) any whose
@@ -1730,7 +1731,7 @@ export class ZiraNode {
     return {
       // Release version, exposed so the Console can negotiate features against older nodes (upgrade
       // without ruptures). Tracks the node package version / installer release.
-      version: "1.9.6",
+      version: "1.9.7",
       network: this.genesis.network,
       phase: "live",
       providersOnline: this.soft.onlineProviders(now).length,

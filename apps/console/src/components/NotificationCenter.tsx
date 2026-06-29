@@ -2,6 +2,7 @@
 // A bell in the top bar with an unread badge; opens a slide-out feed. Notifications are derived in
 // the store by diffing polled state and persisted to localStorage (200-item ring buffer).
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import { Bell, Check, Trash2, X, ChevronRight } from "lucide-react";
 import { cn } from "../lib/cn";
@@ -55,7 +56,7 @@ export function NotificationCenter() {
         )}
       </button>
 
-      {open && (
+      {open && createPortal(
         <div className="fixed inset-0 z-50 flex justify-end bg-black/40 backdrop-blur-[2px]" onClick={() => setOpen(false)}>
           <aside className="flex h-full w-full max-w-sm flex-col border-l border-hairline bg-surface shadow-[var(--shadow-float)]" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-hairline px-4 py-3">
@@ -85,7 +86,8 @@ export function NotificationCenter() {
               )}
             </div>
           </aside>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );

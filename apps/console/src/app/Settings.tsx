@@ -53,6 +53,60 @@ function isPublicTcpAddress(addr: string): boolean {
   return addr.includes("/tcp/") && addr.includes("/p2p/") && !addr.includes("/ws") && !isPrivateOrLanAddress(addr);
 }
 
+// Reset ZIRA: a clearly-discoverable danger card shown at the bottom of every Settings tab. Wipes the
+// node ledger, the wallet, and all local app data; on desktop it also clears the model cache and relaunches.
+function ResetZiraCard() {
+  const toast = useToast();
+  const [wipeOpen, setWipeOpen] = useState(false);
+  const [confirmText, setConfirmText] = useState("");
+  const [backedUp, setBackedUp] = useState(false);
+  const [wiping, setWiping] = useState(false);
+  const canWipe = confirmText.trim().toUpperCase() === "DELETE" && backedUp && !wiping;
+  function closeWipe() { setWipeOpen(false); setConfirmText(""); setBackedUp(false); }
+
+  async function startFresh() {
+    if (!canWipe) return;
+    setWiping(true);
+    try { await NodeApi.reset(); } catch { /* node already restarting or unreachable */ }
+    try { await Wallet.destroy(); } catch { /* */ }
+    try {
+      localStorage.clear();
+      sessionStorage.clear();
+      if ("caches" in window) { const keys = await caches.keys(); await Promise.all(keys.map((k) => caches.delete(k))); }
+      const dbs = await (indexedDB as unknown as { databases?: () => Promise<{ name?: string }[]> }).databases?.();
+      if (dbs) for (const d of dbs) if (d.name) indexedDB.deleteDatabase(d.name);
+    } catch { /* */ }
+    const relaunch = desktopResetAndRelaunch();
+    if (relaunch) { toast.push("Wiped everything. Restarting ZIRA fresh…"); try { await relaunch; } catch { /* app is exiting */ } return; }
+    toast.push("Wiped. Restarting fresh from genesis.");
+    setTimeout(() => location.reload(), 2000);
+  }
+
+  return (
+    <Card className="border-[color-mix(in_srgb,var(--danger)_30%,transparent)]">
+      <h3 className="mb-1 flex items-center gap-2 text-sm font-semibold text-[var(--danger)]"><RotateCcw size={15} /> Reset ZIRA</h3>
+      <p className="mb-2 text-xs text-muted">One click wipes everything and rebuilds from genesis: your wallet, settings, and chats on this device, and your node's whole ledger{isDesktop() ? ", plus the downloaded model cache. The app restarts itself clean (the model re-downloads on next use)." : " (all past transactions)."} Back up your private key first if you want to keep it.</p>
+      <Button variant="danger" onClick={() => setWipeOpen(true)}>Reset ZIRA and start fresh</Button>
+      <Modal open={wipeOpen} onClose={closeWipe} title="Reset ZIRA and start fresh">
+        <div className="space-y-4">
+          <p className="text-sm text-muted">This is irreversible. It destroys your wallet, settings, and chats on this device{isDesktop() ? ", clears the downloaded model," : ","} and resets your node's entire ledger back to genesis.</p>
+          <Field label='Type DELETE to confirm'>
+            <Input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder="DELETE" />
+          </Field>
+          <label className="flex items-start gap-2 text-sm text-muted">
+            <input type="checkbox" checked={backedUp} onChange={(e) => setBackedUp(e.target.checked)} className="mt-0.5 accent-[var(--accent)]" />
+            <span>I have backed up my private key (or I accept losing this wallet).</span>
+          </label>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={closeWipe}>Cancel</Button>
+            <Button variant="danger" onClick={startFresh} disabled={!canWipe}>{wiping ? "Wiping…" : "Reset everything"}</Button>
+          </div>
+        </div>
+      </Modal>
+    </Card>
+  );
+}
+
 export function SettingsPage() {
   const [tab, setTab] = useState("connection");
   const isFounder = useZira((s) => s.isFounder);
@@ -85,6 +139,7 @@ export function SettingsPage() {
       {tab === "network" && <NetworkTab />}
       {tab === "about" && <About />}
       {tab === "economy" && <Economy />}
+      <ResetZiraCard />
     </div>
   );
 }
@@ -603,41 +658,6 @@ function WalletTab() {
   const setUnlocked = useZira((s) => s.setUnlocked);
   const request = useUnlock((s) => s.request);
   const toast = useToast();
-  const [wipeOpen, setWipeOpen] = useState(false);
-  const [confirmText, setConfirmText] = useState("");
-  const [backedUp, setBackedUp] = useState(false);
-  const [wiping, setWiping] = useState(false);
-  // Two explicit gates before an unrecoverable wipe: type DELETE and confirm a backup. A misclick alone
-  // can no longer destroy the wallet and the whole local ledger.
-  const canWipe = confirmText.trim().toUpperCase() === "DELETE" && backedUp && !wiping;
-
-  function closeWipe() { setWipeOpen(false); setConfirmText(""); setBackedUp(false); }
-
-  async function startFresh() {
-    if (!canWipe) return;
-    setWiping(true);
-    // reset the node's ledger (clears all past transactions); the node restarts itself fresh
-    try { await NodeApi.reset(); } catch { /* node already restarting or unreachable */ }
-    // clear everything on this device: wallet, settings, chats, notifications, onboarding
-    try { await Wallet.destroy(); } catch { /* */ }
-    try {
-      localStorage.clear();
-      sessionStorage.clear();
-      if ("caches" in window) {
-        const keys = await caches.keys();
-        await Promise.all(keys.map((key) => caches.delete(key)));
-      }
-      const dbs = await (indexedDB as unknown as { databases?: () => Promise<{ name?: string }[]> }).databases?.();
-      if (dbs) for (const d of dbs) if (d.name) indexedDB.deleteDatabase(d.name);
-    } catch { /* */ }
-    // Desktop: hand off to the app to wipe the node data dir INCLUDING the model cache and relaunch the
-    // whole app clean. Web/mobile have no local node, so the browser-side wipe + reload above is the reset.
-    const relaunch = desktopResetAndRelaunch();
-    if (relaunch) { toast.push("Wiped everything. Restarting ZIRA fresh…"); try { await relaunch; } catch { /* app is exiting */ } return; }
-    toast.push("Wiped. Restarting fresh from genesis.");
-    setTimeout(() => location.reload(), 2000);
-  }
-
   return (
     <div className="space-y-4">
       <Card>
@@ -648,30 +668,8 @@ function WalletTab() {
             ? <Button variant="secondary" onClick={() => { Wallet.lock(); setUnlocked(false); toast.push("Locked"); }}>Lock</Button>
             : <Button variant="secondary" onClick={async () => { if (await request()) { setUnlocked(true); toast.push("Unlocked"); } }}>Unlock</Button>}
         </div>
-        <p className="mt-2 text-xs text-faint">Backup and export are on the Wallet page, behind a clear warning. Keys never leave this device.</p>
+        <p className="mt-2 text-xs text-faint">Backup and export are on the Wallet page, behind a clear warning. Keys never leave this device. Reset ZIRA is at the bottom of Settings.</p>
       </Card>
-      <Card className="border-[color-mix(in_srgb,var(--danger)_30%,transparent)]">
-        <h3 className="mb-1 text-sm font-semibold text-[var(--danger)]">Reset ZIRA</h3>
-        <p className="mb-2 text-xs text-muted">One click wipes everything and rebuilds from genesis: your wallet, settings, and chats on this device, and your node's whole ledger{isDesktop() ? ", plus the downloaded model cache. The app restarts itself clean (the model re-downloads on next use)." : " (all past transactions)."} Back up your private key first if you want to keep it.</p>
-        <Button variant="danger" onClick={() => setWipeOpen(true)}>Reset ZIRA and start fresh</Button>
-      </Card>
-
-      <Modal open={wipeOpen} onClose={closeWipe} title="Wipe everything and start fresh">
-        <div className="space-y-4">
-          <p className="text-sm text-muted">This is irreversible. It destroys your wallet, settings, and chats on this device, and resets your node's entire ledger (all past transactions) back to genesis.</p>
-          <Field label='Type DELETE to confirm'>
-            <Input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder="DELETE" />
-          </Field>
-          <label className="flex items-start gap-2 text-sm text-muted">
-            <input type="checkbox" checked={backedUp} onChange={(e) => setBackedUp(e.target.checked)} className="mt-0.5 accent-[var(--accent)]" />
-            <span>I have backed up my private key (or I accept losing this wallet).</span>
-          </label>
-          <div className="flex justify-end gap-2">
-            <Button variant="ghost" onClick={closeWipe}>Cancel</Button>
-            <Button variant="danger" onClick={startFresh} disabled={!canWipe}>{wiping ? "Wiping…" : "Wipe everything"}</Button>
-          </div>
-        </div>
-      </Modal>
     </div>
   );
 }
