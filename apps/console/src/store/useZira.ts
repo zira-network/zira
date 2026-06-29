@@ -40,7 +40,13 @@ const NOTIF_KEY = "zira.notifications.v1";
 const NOTIF_CAP = 200;
 
 function loadNotifications(): AppNotification[] {
-  try { return JSON.parse(localStorage.getItem(NOTIF_KEY) ?? "[]") as AppNotification[]; } catch { return []; }
+  try {
+    const raw = JSON.parse(localStorage.getItem(NOTIF_KEY) ?? "[]");
+    if (!Array.isArray(raw)) return [];
+    // Drop malformed or legacy-schema entries (no id or no title). Otherwise the unread badge could count
+    // a notification that renders blank, so the bell shows "9+" while the open panel looks empty.
+    return raw.filter((n): n is AppNotification => !!n && typeof n.id === "string" && typeof n.title === "string" && n.title.trim().length > 0);
+  } catch { return []; }
 }
 function saveNotifications(n: AppNotification[]): void {
   try { localStorage.setItem(NOTIF_KEY, JSON.stringify(n.slice(0, NOTIF_CAP))); } catch { /* ignore */ }

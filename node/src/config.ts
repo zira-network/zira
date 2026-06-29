@@ -55,7 +55,9 @@ export interface NodeRuntimeConfig {
   obsRateLimit: number;       // max observations per minute per identity
   freeQueryLimit: number;     // free field queries per window per identity (the free tier, INITIAL allowance)
   freeQueryWindowMs: number;  // free-tier window length ("period of pause")
-  freeTierDurationMs: number; // free tier tapers over this span from genesis, then closes (default 1 year)
+  freeTierStartMs: number;    // wall-clock launch time the free tier taper is measured FROM (NOT the genesis
+                              // timestamp, which is far in the past, so the year-one window is real)
+  freeTierDurationMs: number; // free tier tapers over this span from the launch, then closes (default 1 year)
   taskReapMs: number;         // interval between expired task scans
   fastSync: boolean;           // adopt peer snapshots, verified against a finalized checkpoint; on by default
 
@@ -133,6 +135,10 @@ export function loadConfig(overrides: Partial<NodeRuntimeConfig> = {}): NodeRunt
     obsRateLimit: envInt("ZIRA_OBS_RATE_LIMIT", 20),
     freeQueryLimit: envInt("ZIRA_FREE_QUERY_LIMIT", 10),
     freeQueryWindowMs: envInt("ZIRA_FREE_QUERY_WINDOW_MS", 600_000),
+    // The public launch date (2026-06-29 UTC). The free-tier year-one taper runs from here, not from the
+    // genesis timestamp. effectiveFreeLimit returns the full allowance before this instant, so any clock
+    // skew before launch is harmless. Override with ZIRA_FREE_TIER_START_MS if the launch date moves.
+    freeTierStartMs: envInt("ZIRA_FREE_TIER_START_MS", 1782604800000),
     freeTierDurationMs: envInt("ZIRA_FREE_TIER_DURATION_MS", 365 * 24 * 60 * 60 * 1000),
     taskReapMs: envInt("ZIRA_TASK_REAP_MS", 30_000),
     // Fast-sync is hardened: a snapshot is adopted only when it hashes to a finalized checkpoint

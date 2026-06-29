@@ -171,7 +171,7 @@ async function main(): Promise<void> {
     const candidates = [join(here, "public"), resolve(here, "../public"), resolve(here, "../../apps/console/dist")];
     consoleDir = candidates.find((c) => existsSync(c));
   }
-  const stopRpc = startRpc(node, { host: cfg.rpcHost, port: cfg.rpcPort, consoleDir: cfg.serveConsole ? consoleDir : undefined, obsRateLimit: cfg.obsRateLimit, freeQueryLimit: cfg.freeQueryLimit, freeQueryWindowMs: cfg.freeQueryWindowMs, freeTierStartMs: genesis.timestamp, freeTierDurationMs: cfg.freeTierDurationMs, adminToken: cfg.rpcAdminToken, gateway: cfg.gateway });
+  const stopRpc = startRpc(node, { host: cfg.rpcHost, port: cfg.rpcPort, consoleDir: cfg.serveConsole ? consoleDir : undefined, obsRateLimit: cfg.obsRateLimit, freeQueryLimit: cfg.freeQueryLimit, freeQueryWindowMs: cfg.freeQueryWindowMs, freeTierStartMs: cfg.freeTierStartMs, freeTierDurationMs: cfg.freeTierDurationMs, adminToken: cfg.rpcAdminToken, gateway: cfg.gateway });
 
   const stops: Array<() => void> = [stopRpc];
   // Tier 2 inference serving is owned by the node (started in node.start when provider.enabled), and

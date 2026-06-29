@@ -336,6 +336,11 @@ export function Console() {
   // A pending "ask the field instead" offer belongs to one message in one thread; drop it when the user
   // switches mode or conversation so it never attaches to an unrelated message.
   useEffect(() => { setLocalFieldOffer(null); }, [answerMode, activeId]);
+  // If a local task can't run because this machine has no model, answer it from the network automatically,
+  // with no extra click. Only the question is sent to the field, never local files, so workspace privacy
+  // holds. Fires once the failed turn has finished streaming; askFieldFallback clears the offer so it cannot loop.
+  useEffect(() => { if (localFieldOffer && !streaming) void askFieldFallback(); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localFieldOffer, streaming]);
   // Switching mode or project switches to that scope's most recent thread (separate histories).
   useEffect(() => {
     const inScope = (c: ModeConvo) => (c.mode ?? "field") === answerMode && (activeProjectId ? c.projectId === activeProjectId : !c.projectId);
@@ -707,7 +712,7 @@ export function Console() {
       if (localNoModel) {
         setLocalFieldOffer({ msgId: asstMsg.id, convoId, question });
         update(convoId, (c) => ({
-          ...c, messages: c.messages.map((m) => m.id === asstMsg.id ? { ...m, content: "This machine has no local model yet, so it can't answer privately right now. You don't need one. The network can answer for you. Ask it below.", streaming: false } : m),
+          ...c, messages: c.messages.map((m) => m.id === asstMsg.id ? { ...m, content: "No model on this machine yet. You don't need one. Asking the network for you...", streaming: false } : m),
         }));
       } else {
         update(convoId, (c) => ({
