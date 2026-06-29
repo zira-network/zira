@@ -403,7 +403,7 @@ const PUBLIC_POST_ROUTES = new Set<string>([
   // signed-tx submission paths: the body is a signed transaction; invalid signatures are rejected by state.
   "/tx", "/provider/register", "/provider/answer",
   "/anchors/claim", "/anchors/transfer", "/anchors/list", "/anchors/delist", "/anchors/code-edit",
-  "/anchors/position-transfer", "/anchors/activate", "/anchors/request", "/anchors/contribution", "/events/claim",
+  "/anchors/position-transfer", "/anchors/activate", "/anchors/contribution", "/events/claim",
   // publishing soft-state resonators/tasks is signed + validated like the field gossip it mirrors.
   "/resonator", "/task",
 ]);
@@ -662,10 +662,8 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
     case "POST /anchors/position-transfer":
     case "POST /anchors/activate": { const b = await body(req); return json(res, node.submitTx(b.tx)); }
 
-    // ---- founder-mediated anchor code redemption + assignment ----
-    case "POST /anchors/request": { const b = await body(req); return json(res, node.submitAnchorRequest(String(b.code ?? ""), String(b.address ?? ""))); }
-    case "GET /anchors/requests": if (!node.isFounder()) return json(res, { error: "only the founder can view anchor requests" }, 403); return json(res, node.listAnchorRequests());
-    case "POST /anchors/assign": { if (!node.isFounder()) return json(res, { error: "only the founder can assign anchors" }, 403); const b = await body(req); const vz = b.vestZir ?? b.releaseZir; return json(res, node.assignAnchor(String(b.seatId ?? ""), vz ? Number(vz) * PROTOCOL.UZIR_PER_ZIR : undefined)); }
+    // ---- steward assigns anchor seats by CONTRIBUTION (no codes): transfer a reserve-held position to the
+    // confirmed contributor's address, which opens its one-year vesting. See /anchors/contributions. ----
     // Steward (founder) transfers positions it owns out to a chosen address: single or batch in one op.
     case "POST /anchors/transfer-positions": { if (!node.isFounder()) return json(res, { error: "only the founder can transfer steward positions" }, 403); const b = await body(req); const seatIds = Array.isArray(b.seatIds) ? b.seatIds.map(String) : (b.seatId ? [String(b.seatId)] : []); return json(res, node.transferAnchorPositions(seatIds, String(b.to ?? ""))); }
 

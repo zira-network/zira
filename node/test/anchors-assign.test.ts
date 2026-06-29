@@ -1,10 +1,11 @@
 // node/test/anchors-assign.test.ts
-// Founder-mediated anchor seat assignment with ONE-YEAR LINEAR VESTING. An owner redeems their secret
-// code to request a seat; the founder, holding the anchor-reserve key, claims that seat by the same
-// code, opens a one-year linear vesting of the seat's class allocation to the requester, and transfers
-// ownership. The allocation is NOT paid out instantly: releaseAnchorVesting() releases the claimable
-// delta over ~12 months. These tests prove the schedule is set up (not an instant transfer), that it
-// releases linearly, that supply is never inflated, and that reassignment/edge cases are handled.
+// Anchor seat assignment by CONTRIBUTION with ONE-YEAR LINEAR VESTING (no codes). At genesis the steward
+// anchor-reserve wallet owns every seat; after a USDT contribution confirms, the steward transfers the
+// reserve-held seat to the contributor with transferAnchorPositions(), which opens a one-year linear
+// vesting of the seat's class allocation to the new owner. The allocation is NOT paid out instantly:
+// releaseAnchorVesting() releases the claimable delta over ~12 months. These tests prove the schedule is
+// set up (not an instant transfer), that it releases linearly, that supply is never inflated, and that
+// reassignment/edge cases are handled.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
@@ -64,7 +65,7 @@ function buildAnchorNode(seatCode: string, seatId: string, classCode: "A" | "B" 
   const anchorGenesis = {
     ...standardGenesis("devnet", founder.address, GTS),
     anchors: [{ seatId, classCode, seatIndex: 1, codeHash: hashHex(seatCode) }],
-    anchorOwnership: [],
+    anchorOwnership: [{ seatId, owner: reserve.address }], // steward reserve owns every seat at genesis
   };
   const dir = join(tmpdir(), `zira-anchor-vest-${classCode}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   return new ZiraNode(anchorGenesis, founder, fakeNet(), dir, { anchorReserveKey: reserve.privateKey });
@@ -107,13 +108,11 @@ test("assigning an anchor sets up a one-year vesting, NOT an instant full transf
 
   const supplyBefore = totalAccountedUZIR(node);
 
-  // The owner redeems the real code; the founder assigns the seat.
-  assert.equal(node.submitAnchorRequest(seatCode, requester.address).ok, true);
-  const assign = node.assignAnchor("A-001");
+  // The contribution is confirmed; the steward transfers the reserve-held seat to the contributor.
+  const assign = node.transferAnchorPositions(["A-001"], requester.address);
   assert.equal(assign.ok, true, assign.reason);
   assert.equal(assign.vestingUZIR, seatAllocUZIR, "the full class allocation is scheduled to vest");
   assert.equal(assign.vestEndAt! - assign.vestStartAt!, ANCHOR_VESTING_DURATION_MS, "a one-year window");
-  assert.equal(node.listAnchorRequests().length, 0, "the request is consumed");
 
   // Settle the claim/vest_start/transfer chain.
   advancePast(node, assign.vestStartAt!);
@@ -141,8 +140,7 @@ test("vesting releases linearly over time and never exceeds the allocation; supp
   seedReserve(node, seatAllocUZIR + 100 * PROTOCOL.UZIR_PER_ZIR);
   const supplyAtSeed = totalAccountedUZIR(node);
 
-  assert.equal(node.submitAnchorRequest(seatCode, requester.address).ok, true);
-  const assign = node.assignAnchor("F-001");
+  const assign = node.transferAnchorPositions(["F-001"], requester.address);
   assert.equal(assign.ok, true, assign.reason);
   const start = assign.vestStartAt!;
   advancePast(node, start); // settle the assignment chain
@@ -192,20 +190,18 @@ test("the reserve backs all 512 positions: the genesis anchor reserve covers the
   assert.ok(totalAllocUZIR <= BigInt(PROTOCOL.ANCHOR_RESERVE_UZIR), "the 30% anchor reserve backs every position's allocation");
 });
 
-test("assignAnchor is refused when the anchor-reserve key is not configured", () => {
+test("transferAnchorPositions is refused when the anchor-reserve key is not configured", () => {
   const seatCode = "ZIRA-ANCHOR-B-001-SECRET";
   const anchorGenesis = {
     ...standardGenesis("devnet", founder.address, GTS),
     anchors: [{ seatId: "B-001", classCode: "B" as const, seatIndex: 1, codeHash: hashHex(seatCode) }],
-    anchorOwnership: [],
+    anchorOwnership: [{ seatId: "B-001", owner: reserve.address }],
   };
   const dir = join(tmpdir(), `zira-anchor-noassign-${process.pid}-${Date.now()}`);
   const node = new ZiraNode(anchorGenesis, founder, fakeNet(), dir); // no anchorReserveKey
   const requester = generateKeypair();
 
-  assert.equal(node.submitAnchorRequest(seatCode, requester.address).ok, true);
-  assert.equal(node.listAnchorRequests()[0]!.configured, false);
-  const res = node.assignAnchor("B-001");
+  const res = node.transferAnchorPositions(["B-001"], requester.address);
   assert.equal(res.ok, false);
   assert.match(res.reason ?? "", /not configured/);
 });
@@ -217,17 +213,15 @@ test("a second assignment of an owned seat is refused, and the schedule is not o
   const seatAllocUZIR = node.state.anchorSeat("C-001")!.zirReserveUZIR;
   seedReserve(node, seatAllocUZIR + 100 * PROTOCOL.UZIR_PER_ZIR);
 
-  assert.equal(node.submitAnchorRequest(seatCode, requester.address).ok, true);
-  const firstAssign = node.assignAnchor("C-001");
+  const firstAssign = node.transferAnchorPositions(["C-001"], requester.address);
   assert.equal(firstAssign.ok, true);
   advancePast(node, firstAssign.vestStartAt!);
   const startAt = node.state.anchorSeat("C-001")!.vestStartAt;
 
-  // Once owned, the code no longer matches an available seat: a fresh redemption is refused.
-  assert.equal(node.submitAnchorRequest(seatCode, requester.address).ok, false);
-  // With no pending request, a repeat assignment is a no-op refusal and does not disturb the schedule.
-  const second = node.assignAnchor("C-001");
+  // Once transferred out, the seat is no longer owned by the reserve: a repeat transfer is refused and
+  // does not disturb the original schedule.
+  const second = node.transferAnchorPositions(["C-001"], requester.address);
   assert.equal(second.ok, false);
-  assert.match(second.reason ?? "", /no anchor request/);
+  assert.match(second.reason ?? "", /not owned by the steward reserve/);
   assert.equal(node.state.anchorSeat("C-001")!.vestStartAt, startAt, "the original schedule is untouched");
 });

@@ -268,7 +268,7 @@ function ClassLegend({ anchors, totalStakeUZIR }: { anchors: Anchor[]; totalStak
         <p className="mt-2">Class sets baseline topology load. Behavior, ZTI, uptime, and useful work decide future routing priority. The allocation is a network parameter that vests to each position's owner over one year, never a price.</p>
         <div className="mt-3 rounded-lg border border-hairline bg-base/70 p-2">
           <div className="font-medium text-muted">Anchor reserve · 30% = <span className="mono">8.61B ZIR</span></div>
-          <p className="mt-1">The full anchor reserve sits in the steward-administered anchor-reserve wallet <span className="mono">zira-anchor-reserve</span>, held on behalf of the seat owners rather than as steward funds. It is released to seat owners as they redeem their anchor codes, each release a signed public ledger entry. The per-seat <span className="text-muted">Reserve allocation</span> shown on each seat is that seat&apos;s structural stake, one slice of this 30%, not the whole reserve.</p>
+          <p className="mt-1">The full anchor reserve sits in the steward-administered anchor-reserve wallet <span className="mono">zira-anchor-reserve</span>, held on behalf of the seat owners rather than as steward funds. It is released to seat owners as their seats are assigned, each release a signed public ledger entry. The per-seat <span className="text-muted">Reserve allocation</span> shown on each seat is that seat&apos;s structural stake, one slice of this 30%, not the whole reserve.</p>
         </div>
       </div>
     </Card>

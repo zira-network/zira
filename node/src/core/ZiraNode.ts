@@ -278,7 +278,6 @@ export class ZiraNode {
   private paymentWatchTimer: ReturnType<typeof setInterval> | null = null;
   private paymentWatchBusy = false;
   private anchorReserveKp: Keypair | null = null;
-  private anchorRequests = new Map<string, { seatId: string; code: string; address: string; ts: number }>();
   // Seats with a vesting-release pair already submitted but not yet settled, keyed seatId -> released
   // high-water mark we are driving to. Prevents re-submitting the same release every 1s tick before the
   // 5s epoch settles and advances seat.vestedUZIR. Cleared once the committed vestedUZIR catches up.
@@ -465,65 +464,10 @@ export class ZiraNode {
     return { ok: r.accepted, amountUZIR: r.accepted ? this.eventsClaimUZIR : undefined, reason: r.reason };
   }
 
-  // ---- founder-mediated anchor seat assignment: an owner redeems their secret anchor code to request
-  // a seat; the founder, holding the anchor-reserve key, claims that seat by the same code, transfers
-  // it to the requester, and releases the seat's ZIR. The code is never exposed in any list output. ----
-
-  /** A holder of a secret anchor code requests their seat. Not founder-gated: anyone with a code may ask. */
-  submitAnchorRequest(code: string, address: string): { ok: boolean; reason?: string; seatId?: string; className?: string } {
-    if (!/^zir1[0-9a-z]{6,}$/.test(address)) return { ok: false, reason: "enter a valid ZIR address" };
-    const seat = [...this.state.anchors.values()].find((s) => !s.owner && hashHex(code) === s.codeHash);
-    if (!seat) return { ok: false, reason: "that code does not match an available anchor seat" };
-    this.anchorRequests.set(seat.id, { seatId: seat.id, code, address, ts: Date.now() });
-    return { ok: true, seatId: seat.id, className: seat.className };
-  }
-
-  /** Founder-gated at the RPC layer. The code is never included. */
-  listAnchorRequests(): Array<{ seatId: string; className: string; address: string; ts: number; configured: boolean }> {
-    const configured = Boolean(this.anchorReserveKp);
-    return [...this.anchorRequests.values()].map((r) => {
-      const seat = this.state.anchors.get(r.seatId);
-      return { seatId: r.seatId, className: seat?.className ?? "", address: r.address, ts: r.ts, configured };
-    });
-  }
-
-  /**
-   * Founder-gated at the RPC layer. Settle a requested seat from the anchor-reserve wallet with a
-   * three-tx nonce chain in one epoch: claim the seat by its code (owner becomes the reserve), transfer
-   * the seat to the requester, then OPEN A ONE-YEAR LINEAR VESTING of the seat's class allocation to
-   * the requester. No instant full transfer: the allocation is released in claimable increments by
-   * releaseAnchorVesting() over the next ~12 months. Consensus rules are unchanged; this composes the
-   * existing anchor_claim/anchor_transfer transactions plus the anchor_vest_start accounting record.
-   *
-   * `vestUZIR` overrides the vested total (defaults to the seat's class allocation). The position is a
-   * high-trust Resonator role: its ongoing PoR + coordination earnings are entirely separate from this
-   * one-time allocation vesting and flow through the normal emission/reward path, untouched here.
-   */
-  assignAnchor(seatId: string, vestUZIR?: number): { ok: boolean; reason?: string; vestingUZIR?: number; vestStartAt?: number; vestEndAt?: number } {
-    if (!this.anchorReserveKp) return { ok: false, reason: "anchor reserve key not configured on this node" };
-    const req = this.anchorRequests.get(seatId);
-    if (!req) return { ok: false, reason: "no anchor request for that seat" };
-    const seat = this.state.anchors.get(seatId);
-    if (!seat || seat.owner) return { ok: false, reason: "seat already owned" };
-    const kp = this.anchorReserveKp;
-    const base = this.state.provisionalNonce(kp.address);
-    const total = vestUZIR && vestUZIR > 0 ? Math.round(vestUZIR) : seat.zirReserveUZIR;
-    const startAt = Date.now();
-    const sign = (body: TxBody) => signTx(body, kp.privateKey);
-    const baseBody = { network: this.genesis.network, from: kp.address, fromPubKey: kp.publicKey, parents: [] as string[], timestamp: startAt };
-    // Order matters: claim (reserve becomes owner) -> vest_start (reserve, as owner, opens the schedule
-    // and is recorded as the funder so it can author releases later) -> transfer (ownership moves to the
-    // requester). After this chain settles the requester owns the seat; the reserve keeps vesting authority.
-    const claim = sign({ ...baseBody, to: kp.address, amountUZIR: 0, feeUZIR: PROTOCOL.BASE_FEE_UZIR, nonce: base, kind: "anchor_claim", memo: JSON.stringify({ anchor: "claim", data: { seatId, code: req.code } }) });
-    const vestStart = sign({ ...baseBody, to: kp.address, amountUZIR: 0, feeUZIR: PROTOCOL.BASE_FEE_UZIR, nonce: base + 1, kind: "anchor_vest_start", memo: JSON.stringify({ anchor: "vest_start", data: { seatId, beneficiary: req.address, totalUZIR: total, startAt } }) });
-    const transferOut = sign({ ...baseBody, to: kp.address, amountUZIR: 0, feeUZIR: PROTOCOL.BASE_FEE_UZIR, nonce: base + 2, kind: "anchor_transfer", memo: JSON.stringify({ anchor: "transfer", data: { seatId, to: req.address } }) });
-    for (const tx of [claim, vestStart, transferOut]) {
-      const r = this.submitTx(tx);
-      if (!r.accepted) return { ok: false, reason: r.reason };
-    }
-    this.anchorRequests.delete(seatId);
-    return { ok: true, vestingUZIR: total, vestStartAt: startAt, vestEndAt: startAt + ANCHOR_VESTING_DURATION_MS };
-  }
+  // ---- anchor seats are acquired by CONTRIBUTION, not by code. A contributor pays USDT to the steward's
+  // receiving address (anchor event); once the payment-watcher confirms it, the steward assigns a seat to
+  // the contributor's ZIR address with transferAnchorPositions() below, which transfers a reserve-held seat
+  // and opens its one-year vesting. There is no user-facing code redemption. ----
 
   /**
    * Release any anchor-vesting that has linearly accrued since the last release. For every seat with an

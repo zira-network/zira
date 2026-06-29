@@ -15,7 +15,7 @@ import { useUnlock } from "../store/useUnlock";
 import { makeSignedTx, zirToUzir } from "../lib/tx";
 import { Wallet } from "../lib/keys";
 import { formatZir, shortAddress, timeAgo } from "../lib/format";
-import { NodeApi, type AnchorRequestInfo, type BootstrapSeedCandidate, type EventsStatus, type Treasury } from "../lib/nodeApi";
+import { NodeApi, type BootstrapSeedCandidate, type EventsStatus, type Treasury } from "../lib/nodeApi";
 
 // ---- Local presentation helpers (kept in this file per the section's edit scope) ----
 
@@ -130,7 +130,7 @@ export function Founder() {
       <SectionHead icon={<Crown size={14} className="text-[var(--warn)]" />} title="Treasury & reserve" />
       <Card>
         <div className="flex items-center gap-2"><Crown size={18} className="text-[var(--warn)]" /><h2 className="text-lg font-semibold">Launch reserve</h2></div>
-        <p className="mt-1 text-xs text-muted">The genesis reserve (41% of supply) is pre-allocated transparently and recorded on the public ledger from block 0: 30% to the anchor reserve, a steward-administered wallet released to seat owners as they redeem their anchor codes; 10% to the ecosystem and events reserve for airdrops and grants; and 1% to steward operations. Distribution from the steward operational slice runs through the scheduled reserve distribution below. The anchor reserve is held for the seat owners, and the events reserve is distributed through the events claim. Import an active stewardship wallet only when you need to sign.</p>
+        <p className="mt-1 text-xs text-muted">The genesis reserve (41% of supply) is pre-allocated transparently and recorded on the public ledger from block 0: 30% to the anchor reserve, a steward-administered wallet released to anchor seat owners as their seats are assigned; 10% to the ecosystem and events reserve for airdrops and grants; and 1% to steward operations. Distribution from the steward operational slice runs through the scheduled reserve distribution below. The anchor reserve is held for the seat owners, and the events reserve is distributed through the events claim. Import an active stewardship wallet only when you need to sign.</p>
         <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
           <Stat label="Network genesis reserve" value={`${formatZir(reserveTotal)} ZIR`} hint="anchors 30% · events 10% · steward ops 1%" tone="teal" />
           <Stat label="Allocated (latest 100 grants)" value={`${formatZir(totalGranted)} ZIR`} hint={`${grants.length} grant${grants.length === 1 ? "" : "s"} shown`} />
@@ -146,7 +146,6 @@ export function Founder() {
       </div>
 
       <SectionHead icon={<AnchorIcon size={14} className="text-[var(--teal)]" />} title="Anchor positions" />
-      <AnchorRequestsCard />
       <StewardPositionTransferCard />
       <StewardResonatorSeedCard gated={stewardActionsGated} />
       <StewardSettleCard gated={stewardActionsGated} />
@@ -1017,86 +1016,6 @@ function EventsControl() {
   );
 }
 
-// Founder-mediated anchor seat assignment. Owners redeem their secret code on the Anchors page, which
-// records a request here. The founder assigns each seat: the anchor-reserve wallet claims the seat by
-// its code, transfers ownership to the requester, and opens a ONE-YEAR linear vesting of the seat's
-// class allocation to the owner. The allocation is released gradually, not all at once. Codes are never shown.
-function AnchorRequestsCard() {
-  const toast = useToast();
-  const [requests, setRequests] = useState<AnchorRequestInfo[]>([]);
-  const [configured, setConfigured] = useState(true);
-  const [vestZir, setVestZir] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(false);
-  const [pending, setPending] = useState<AnchorRequestInfo | null>(null);
-  const slow = useSlowHint(!loaded);
-
-  const load = () => {
-    NodeApi.anchorRequests()
-      .then((rows) => { setRequests(rows); setConfigured(rows.length === 0 ? true : Boolean(rows[0]?.configured)); })
-      .catch(() => setRequests([]))
-      .finally(() => setLoaded(true));
-  };
-  usePoll(load, 10000, []);
-
-  async function assign(seatId: string) {
-    setBusy(seatId);
-    try {
-      const amount = Number(vestZir[seatId]);
-      const res = await NodeApi.anchorAssign(seatId, amount > 0 ? amount : undefined);
-      if (!res.ok) throw new Error(res.reason ?? "assignment rejected");
-      toast.push(`Seat ${seatId} assigned. ${formatZir(res.vestingUZIR ?? 0)} ZIR now vests to the owner linearly over one year.`);
-      setPending(null);
-      load();
-    } catch (e) {
-      toast.push(e instanceof Error ? e.message : "could not assign seat", "danger");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  return (
-    <Card>
-      <ConfirmModal
-        open={!!pending}
-        onClose={() => setPending(null)}
-        onConfirm={() => { if (pending) void assign(pending.seatId); }}
-        busy={busy === pending?.seatId}
-        title="Assign anchor seat"
-        confirmLabel="Assign and open vesting"
-      >
-        {pending && (
-          <>
-            <p>Assign seat <Mono>{pending.seatId}</Mono>{pending.className ? ` (${pending.className})` : ""} to <Mono>{shortAddress(pending.address)}</Mono>.</p>
-            <p>The anchor-reserve wallet claims the seat by code, transfers ownership, and opens a one-year linear vesting of {Number(vestZir[pending.seatId]) > 0 ? <Mono>{vestZir[pending.seatId]} ZIR</Mono> : "the seat's default class allocation"} to the owner. This is a signed, public action.</p>
-          </>
-        )}
-      </ConfirmModal>
-      <div className="mb-2 flex items-center gap-2"><AnchorIcon size={16} className="text-[var(--teal)]" /><h3 className="text-sm font-semibold">Anchor requests</h3>{requests.length > 0 && <Badge tone="neutral" className="ml-auto">{requests.length}</Badge>}</div>
-      <p className="text-xs text-muted">Owners redeem their secret anchor code on the Anchors page. Each verified request appears here with its seat and destination wallet. Assigning a seat has the anchor-reserve wallet claim it by code, transfer ownership to the requester, and open a one-year linear vesting of that seat&apos;s class allocation to the owner. The allocation is released gradually as it vests, not all at once; the position also earns ongoing ZIR as a Resonator, separately. The secret code is never shown back. Leave the amount blank to vest the seat&apos;s default class allocation.</p>
-      {!configured && <p className="mt-2 rounded-lg border border-[color-mix(in_srgb,var(--warn)_28%,var(--border))] bg-[color-mix(in_srgb,var(--warn)_7%,transparent)] p-2 text-[11px] text-muted">The anchor-reserve wallet is not loaded on this node. Set <Mono>ZIRA_ANCHOR_RESERVE_KEY</Mono> on the steward node to assign seats.</p>}
-      {!loaded ? <LoadingState label="Reading anchor requests..." slow={slow} /> : requests.length === 0 ? (
-        <p className="mt-2 text-[11px] text-faint">No anchor requests yet. They appear here as owners redeem their codes.</p>
-      ) : (
-        <div className="mt-3 divide-y divide-hairline border-t border-hairline">
-          {requests.map((r) => (
-            <div key={r.seatId} className="rounded-md px-1 py-3 text-xs transition-colors hover:bg-elevated">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-medium text-text">{r.seatId}{r.className ? ` · ${r.className}` : ""}</span>
-                <Badge tone="neutral">{timeAgo(r.ts)}</Badge>
-              </div>
-              <div className="mono mt-1 truncate text-faint">to {shortAddress(r.address)}</div>
-              <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
-                <Input className="mono" placeholder="Vest ZIR over 1yr (blank = class default)" value={vestZir[r.seatId] ?? ""} onChange={(e) => setVestZir({ ...vestZir, [r.seatId]: e.target.value })} />
-                <Button variant="primary" disabled={busy === r.seatId || !configured} onClick={() => setPending(r)}>Assign seat</Button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </Card>
-  );
-}
 
 // Steward direct position assignment. At genesis the steward anchor-reserve wallet owns all 512 positions
 // and their backing ZIR. The steward can transfer one position (single) or many (batch) to a chosen
@@ -1142,7 +1061,7 @@ function StewardPositionTransferCard() {
         <p>Each position carries its class, ZTI standing, weight, and ZIR allocation. A one-year linear vesting of the allocation opens to the new owner from the anchor-reserve wallet. This is a signed, public action and cannot be undone.</p>
       </ConfirmModal>
       <div className="mb-2 flex items-center gap-2"><AnchorIcon size={16} className="text-[var(--teal)]" /><h3 className="text-sm font-semibold">Assign anchor positions</h3></div>
-      <p className="text-xs text-muted">The steward holds all 512 anchor positions at genesis. Transfer one (single) or several (batch) to a chosen wallet in one signed operation. Each position carries its class, ZTI standing, weight, and ZIR allocation; on transfer a one-year linear vesting of the allocation opens to the new owner, released gradually from the anchor-reserve wallet. Separate from the code-redemption queue above.</p>
+      <p className="text-xs text-muted">The steward holds all 512 anchor positions at genesis. Transfer one (single) or several (batch) to a chosen wallet in one signed operation. Each position carries its class, ZTI standing, weight, and ZIR allocation; on transfer a one-year linear vesting of the allocation opens to the new owner, released gradually from the anchor-reserve wallet. Use this to assign a seat to a confirmed contributor from the contributions queue above.</p>
       <div className="mt-3 grid gap-2">
         <Input className="mono" placeholder="Seat ids, e.g. A-009 or A-009, B-017, C-040" value={seatIds} onChange={(e) => setSeatIds(e.target.value)} />
         <div className="grid gap-2 sm:grid-cols-[1fr_auto]">

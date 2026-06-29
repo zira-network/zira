@@ -151,10 +151,7 @@ export interface EventsStatus { configured: boolean; active: boolean; claimUZIR:
 export interface TreasuryWallet { key: string; label: string; address: string; role: string; uZIR: number }
 export interface Treasury { network: string; wallets: TreasuryWallet[] }
 
-// ---- founder-mediated anchor code redemption + assignment ----
-export interface AnchorRequestResult { ok: boolean; reason?: string; seatId?: string; className?: string }
-export interface AnchorRequestInfo { seatId: string; className: string; address: string; ts: number; configured: boolean }
-export interface AnchorAssignResult { ok: boolean; reason?: string; vestingUZIR?: number; vestStartAt?: number; vestEndAt?: number }
+// ---- steward assigns anchor seats by contribution (no codes); see anchorTransferPositions ----
 export interface AnchorPositionTransferResult { ok: boolean; reason?: string; seatIds?: string[]; vestingUZIR?: number; vestStartAt?: number; vestEndAt?: number }
 
 export const NodeApi = {
@@ -264,10 +261,6 @@ export const NodeApi = {
   // owner-authorized position transfer: a SINGLE or BATCH of positions moved in one signed tx
   submitAnchorPositionTransfer: (tx: SignedTx) => rpcPost<{ accepted: boolean; reason?: string }>("/anchors/position-transfer", { tx }),
 
-  // founder-mediated anchor code redemption + assignment
-  anchorRequest: (code: string, address: string) => rpcPost<AnchorRequestResult>("/anchors/request", { code, address }),
-  anchorRequests: () => rpcGet<AnchorRequestInfo[]>("/anchors/requests"),
-  anchorAssign: (seatId: string, vestZir?: number) => rpcPost<AnchorAssignResult>("/anchors/assign", { seatId, vestZir }),
   // steward (founder) transfers positions it owns out: single (seatId) or batch (seatIds) in one op
   anchorTransferPositions: (seatIds: string[], to: string) => rpcPost<AnchorPositionTransferResult>("/anchors/transfer-positions", { seatIds, to }),
 
