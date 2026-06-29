@@ -65,7 +65,7 @@ export class NodeClient implements ZiraClient {
   // from miners/providers running their own models, coordinate them by domain trust, then tip the contributors.
   async askField(args: {
     question: string; history: { role: "user" | "assistant"; content: string }[];
-    asker: Address; paymentTx?: SignedTx; onToken: (t: string) => void; signal?: AbortSignal;
+    asker: Address; paymentTx?: SignedTx; pay?: boolean; onToken: (t: string) => void; signal?: AbortSignal;
   }): Promise<{ answer: string; receipt: AnswerReceipt }> {
     const domain = classify(args.question);
     const id = "q-" + Math.random().toString(36).slice(2) + "-" + Date.now();
@@ -85,17 +85,27 @@ export class NodeClient implements ZiraClient {
 
     // Collect answers long enough for endpoint/native providers. Coordination miners answer quickly,
     // but local endpoint models can need 10-30 seconds on consumer hardware.
-    const providers = await this.get<OnlineProvider[]>("/providers").catch(() => [] as OnlineProvider[]);
+    let providers = await this.get<OnlineProvider[]>("/providers").catch(() => [] as OnlineProvider[]);
     const byKey = new Map(providers.map((p) => [p.pubKey, p]));
-    // Wait long enough for slow endpoint/native providers (10-30s on consumer hardware) — but ONLY when a
-    // provider is actually online. With nobody serving, a 45s wait is pointless and reads as "stuck", so
-    // give up after a short grace and return the "no provider answered" guidance instead.
-    const deadline = Date.now() + (providers.length === 0 ? 6000 : 45000);
+    // Wait long enough for slow endpoint/native providers (10-30s on consumer hardware). A node that just
+    // connected may not have heard a provider's gossiped announce yet, so we DON'T give up fast just
+    // because the first /providers read is empty: we keep a generous floor and re-check the provider list
+    // each loop, extending to the full window the moment one appears. Only a network that stays empty the
+    // whole time returns the "still warming up" guidance.
+    const start = Date.now();
+    const FULL_WAIT = 45000, EMPTY_FLOOR = 20000;
+    let deadline = start + (providers.length === 0 ? EMPTY_FLOOR : FULL_WAIT);
     let answers: FieldAnswer[] = [];
+    let recheck = 0;
     while (Date.now() < deadline) {
       if (args.signal?.aborted) break;
       answers = await this.get<typeof answers>(`/query/answers?id=${id}`).catch(() => []);
       if (answers.some((a) => !isCoordinationFallback(a.answer))) break;
+      // Every ~3s re-read providers; if one is now online, give it the full window to answer.
+      if (++recheck % 6 === 0 && Date.now() - start < EMPTY_FLOOR) {
+        const live = await this.get<OnlineProvider[]>("/providers").catch(() => [] as OnlineProvider[]);
+        if (live.length > 0) { providers = live; for (const p of live) byKey.set(p.pubKey, p); deadline = start + FULL_WAIT; }
+      }
       await new Promise((r) => setTimeout(r, 500));
     }
 
@@ -138,7 +148,9 @@ export class NodeClient implements ZiraClient {
     // that did the work and the 5% founder-ops share, per the field's coordination economy). The
     // contributors share the remaining 95% in proportion to their domain-trust weight. Best effort:
     // requires an unlocked wallet, and settlement is on the now-live ledger path.
-    if (Wallet.isUnlocked()) {
+    // Tip the coordinating miners only on the paid (ZIR) tier. Free-tier questions never move ZIR; the
+    // miners still earn from emission and the network's own coordination, just not a per-question tip.
+    if (args.pay !== false && Wallet.isUnlocked()) {
       try {
         const stats = await this.getStats();
         const founderAddr = stats.founderAddress;

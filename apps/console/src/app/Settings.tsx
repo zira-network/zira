@@ -16,6 +16,7 @@ import { formatZir, timeAgo } from "../lib/format";
 import { NodeApi, type NetInfo } from "../lib/nodeApi";
 import { shortcutDocs } from "../lib/shortcuts";
 import { formatNodeVersion } from "../lib/version-compat";
+import { desktopResetAndRelaunch, isDesktop } from "../lib/platform";
 
 let providerInstance: ProviderMode | null = null;
 
@@ -629,6 +630,10 @@ function WalletTab() {
       const dbs = await (indexedDB as unknown as { databases?: () => Promise<{ name?: string }[]> }).databases?.();
       if (dbs) for (const d of dbs) if (d.name) indexedDB.deleteDatabase(d.name);
     } catch { /* */ }
+    // Desktop: hand off to the app to wipe the node data dir INCLUDING the model cache and relaunch the
+    // whole app clean. Web/mobile have no local node, so the browser-side wipe + reload above is the reset.
+    const relaunch = desktopResetAndRelaunch();
+    if (relaunch) { toast.push("Wiped everything. Restarting ZIRA fresh…"); try { await relaunch; } catch { /* app is exiting */ } return; }
     toast.push("Wiped. Restarting fresh from genesis.");
     setTimeout(() => location.reload(), 2000);
   }
@@ -646,9 +651,9 @@ function WalletTab() {
         <p className="mt-2 text-xs text-faint">Backup and export are on the Wallet page, behind a clear warning. Keys never leave this device.</p>
       </Card>
       <Card className="border-[color-mix(in_srgb,var(--danger)_30%,transparent)]">
-        <h3 className="mb-1 text-sm font-semibold text-[var(--danger)]">Start fresh</h3>
-        <p className="mb-2 text-xs text-muted">One click wipes everything and rebuilds from genesis: your wallet, settings, and chats on this device, and your node's whole ledger (all past transactions). Back up your private key first if you want to keep it.</p>
-        <Button variant="danger" onClick={() => setWipeOpen(true)}>Wipe everything and start fresh</Button>
+        <h3 className="mb-1 text-sm font-semibold text-[var(--danger)]">Reset ZIRA</h3>
+        <p className="mb-2 text-xs text-muted">One click wipes everything and rebuilds from genesis: your wallet, settings, and chats on this device, and your node's whole ledger{isDesktop() ? ", plus the downloaded model cache. The app restarts itself clean (the model re-downloads on next use)." : " (all past transactions)."} Back up your private key first if you want to keep it.</p>
+        <Button variant="danger" onClick={() => setWipeOpen(true)}>Reset ZIRA and start fresh</Button>
       </Card>
 
       <Modal open={wipeOpen} onClose={closeWipe} title="Wipe everything and start fresh">

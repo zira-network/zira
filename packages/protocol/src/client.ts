@@ -29,6 +29,7 @@ export interface ZiraClient {
     history: { role: "user" | "assistant"; content: string }[];
     asker: Address;                       // who pays
     paymentTx?: SignedTx;                 // optional. In P2P the asker tips providers after answers.
+    pay?: boolean;                        // ZIR tier tips the answering miners; Free tier (false) does not.
     onToken: (t: string) => void;
     signal?: AbortSignal;
   }): Promise<{ answer: string; receipt: AnswerReceipt }>;

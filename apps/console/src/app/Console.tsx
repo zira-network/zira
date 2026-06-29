@@ -3,7 +3,7 @@
 // answered by providers' own models, and the answer carries a verifiable receipt.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
-import { Send, Square, ChevronDown, ChevronUp, CheckCircle2, Plus, Trash2, ShieldCheck, Download, Sparkles, Upload, FolderOpen, FileText, X, HelpCircle, Copy, ListChecks, Check, FilePlus, Compass, ArrowRight, Bot, Menu, MessageSquarePlus, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { Send, Square, ChevronDown, ChevronUp, CheckCircle2, Plus, Trash2, ShieldCheck, Download, Sparkles, Upload, FolderOpen, FileText, X, HelpCircle, Copy, ListChecks, Check, FilePlus, Compass, ArrowRight, Bot, Menu, MessageSquarePlus, PanelLeftClose, PanelLeftOpen, Coins, Cpu } from "lucide-react";
 import { PROTOCOL, SPECIAL_ADDRESSES, verify as edVerify, type AnswerReceipt, type ChatMessage, type Conversation } from "@zira/protocol";
 import { Button, Card, Badge, Meter, useToast, Spinner, Select } from "../components/ui";
 import { HexField } from "../components/brand";
@@ -239,6 +239,22 @@ export function Console() {
     const saved = localStorage.getItem("zira.console.answerMode") as ConsoleAnswerMode | null;
     return saved === "local" && isLocalNode() ? "local" : "field";
   });
+  // Field payment tier: "free" uses your newcomer allowance and tips nobody; "zir" always pays the miners
+  // who answered (needs an unlocked wallet). "machine" is the third tier and lives on answerMode === "local".
+  const [payTier, setPayTier] = useState<"free" | "zir">(() => (localStorage.getItem("zira.console.payTier") as "free" | "zir") || "free");
+  useEffect(() => { localStorage.setItem("zira.console.payTier", payTier); }, [payTier]);
+  const tier: "free" | "zir" | "machine" = answerMode === "local" ? "machine" : payTier;
+  // Switch the answer tier. Free/ZIR both answer from the network (field); Machine answers on your own
+  // hardware for your own tasks only (no earning) and works with or without a chosen folder.
+  function setTier(t: "free" | "zir" | "machine") {
+    if (t === "machine") {
+      setAnswerMode("local");
+      if (mode === "node" && mining && !mining.ownTaskInference) void setUseMachine(true);
+    } else {
+      setAnswerMode("field");
+      setPayTier(t);
+    }
+  }
   const [coordinationProfile, setCoordinationProfile] = useState<CoordinationProfile>(() => (localStorage.getItem("zira.console.coordinationProfile") as CoordinationProfile) || "balanced");
   const { simpleMode } = useUi();
   const [attachments, setAttachments] = useState<WorkspaceAttachment[]>([]);
@@ -602,15 +618,18 @@ export function Console() {
       return;
     }
     if (answerMode === "local" && mode === "node" && mining && !mining.ownTaskInference) {
-      toast.push("Local mode runs on your own hardware. Turn on \"Use this machine\" in the row below the composer first.", "warn");
+      toast.push("Machine mode runs on your own hardware. Turning it on…", "neutral");
+      void setUseMachine(true);
       return;
     }
-    if (answerMode === "local" && !workspaceHandleRef.current) {
-      toast.push("Choose a local workspace folder first so ZIRA can build the task there.", "warn");
+    // A folder is OPTIONAL in Machine mode: with one, ZIRA builds/edits files in it; without one, it just
+    // answers you locally. Only block when a folder IS chosen but is read-only (the file path can't work).
+    if (answerMode === "local" && workspaceHandleRef.current && !workspace?.writable) {
+      toast.push("The selected workspace is read-only. Choose it again and allow write permission, or clear it to chat without a folder.", "warn");
       return;
     }
-    if (answerMode === "local" && !workspace?.writable) {
-      toast.push("The selected workspace is read-only. Choose it again and allow write permission.", "warn");
+    if (tier === "zir" && mode === "node" && (!hasWallet || !unlocked)) {
+      toast.push("ZIR mode pays the miners who answer. Unlock a wallet first, or switch to Free.", "warn");
       return;
     }
     const question = raw.trim();
@@ -664,7 +683,7 @@ export function Console() {
       }));
       const { answer, receipt } = answerMode === "local" && client instanceof NodeClient
         ? await client.askLocal({ question: asked, history, onToken, signal: ctrl.signal })
-        : await client!.askField({ question: asked, history, asker: address ?? "zir1coordination", onToken, signal: ctrl.signal });
+        : await client!.askField({ question: asked, history, asker: address ?? "zir1coordination", pay: tier === "zir", onToken, signal: ctrl.signal });
       // In Local mode the answer can carry a plan (turned into the task list) and file proposals (queued
       // for the user's approval). The proposals are stripped from the prose the chat shows, and the agent
       // session is journalled into .zira/tasks/<id>/.
@@ -891,16 +910,19 @@ export function Console() {
             {railCollapsed && <button onClick={() => setRail(false)} title="Show chats" aria-label="Show chats panel" className="hidden shrink-0 rounded-md border border-hairline p-1.5 text-muted transition-colors hover:text-text lg:inline-flex"><PanelLeftOpen size={16} /></button>}
             <button onClick={() => { newConvo(); setSidebarOpen(false); }} title="New chat" aria-label="New chat" className="shrink-0 rounded-md border border-hairline p-1.5 text-muted transition-colors hover:text-text lg:hidden"><MessageSquarePlus size={16} /></button>
             <div role="tablist" aria-label="Answer mode" className="relative inline-flex shrink-0 rounded-lg border border-hairline bg-base/50 p-1">
-              <button role="tab" aria-selected={answerMode === "field"} onClick={() => setAnswerMode("field")} className={`relative z-[1] inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${answerMode === "field" ? "bg-[color-mix(in_srgb,var(--teal)_15%,transparent)] text-[var(--teal)] shadow-[0_1px_0_color-mix(in_srgb,var(--teal)_22%,transparent)]" : "text-faint hover:text-text"}`}>
-                <Sparkles size={13} /> Field
+              <button role="tab" aria-selected={tier === "free"} onClick={() => setTier("free")} title="Answered by the network, using your free allowance." className={`relative z-[1] inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${tier === "free" ? "bg-[color-mix(in_srgb,var(--teal)_15%,transparent)] text-[var(--teal)] shadow-[0_1px_0_color-mix(in_srgb,var(--teal)_22%,transparent)]" : "text-faint hover:text-text"}`}>
+                <Sparkles size={13} /> Free
+              </button>
+              <button role="tab" aria-selected={tier === "zir"} onClick={() => setTier("zir")} title="Answered by the network, paying the miners who answer with ZIR." className={`relative z-[1] inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${tier === "zir" ? "bg-[color-mix(in_srgb,var(--teal)_15%,transparent)] text-[var(--teal)] shadow-[0_1px_0_color-mix(in_srgb,var(--teal)_22%,transparent)]" : "text-faint hover:text-text"}`}>
+                <Coins size={13} /> ZIR
               </button>
               {isLocalNode() && (
-                <button role="tab" aria-selected={answerMode === "local"} onClick={() => setAnswerMode("local")} className={`relative z-[1] inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${answerMode === "local" ? "bg-[color-mix(in_srgb,var(--indigo)_15%,transparent)] text-[var(--indigo)] shadow-[0_1px_0_color-mix(in_srgb,var(--indigo)_22%,transparent)]" : "text-faint hover:text-text"}`}>
-                  <FolderOpen size={13} /> Local
+                <button role="tab" aria-selected={tier === "machine"} onClick={() => setTier("machine")} title="Answered on your own computer, for your own tasks only. Private, earns no ZIR." className={`relative z-[1] inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${tier === "machine" ? "bg-[color-mix(in_srgb,var(--indigo)_15%,transparent)] text-[var(--indigo)] shadow-[0_1px_0_color-mix(in_srgb,var(--indigo)_22%,transparent)]" : "text-faint hover:text-text"}`}>
+                  <Cpu size={13} /> Machine
                 </button>
               )}
             </div>
-            <span className="hidden min-w-0 max-w-xl truncate text-xs text-faint xl:inline">{answerMode === "field" ? (simpleMode ? "Answered by the network. Free to start, or pay a little ZIR to thank the people whose computers answered. Every answer comes with proof you can check." : "Answered by the network. Free within your allowance, or pay ZIR to tip the people whose machines coordinate the answer. Every answer comes with a signed receipt you can verify.") : (simpleMode ? "Runs on your own computer (turn on “Use this machine” below). Private, costs no ZIR. Pick a folder and ZIRA works in it." : "Runs on your own computer (turn on “Use this machine” below). Private, costs no ZIR. Pick a folder and ZIRA builds, edits, or debugs in it.")}</span>
+            <span className="hidden min-w-0 max-w-xl truncate text-xs text-faint xl:inline">{tier === "free" ? (simpleMode ? "Answered by the network, free to start. Every answer comes with proof you can check." : "Answered by the network within your free allowance. Every answer comes with a signed receipt you can verify.") : tier === "zir" ? (simpleMode ? "Answered by the network. You pay a little ZIR to thank the people whose computers answered." : "Answered by the network. Pays the miners who coordinate your answer in ZIR (unlock a wallet first). Signed receipt included.") : (simpleMode ? "Runs on your own computer. Private, costs and earns no ZIR. Pick a folder to let ZIRA work in it (optional)." : "Runs on your own computer for your own tasks only. Private, earns no ZIR (that is Mining). Pick a folder to let ZIRA build, edit, or debug in it, or just chat.")}</span>
           </div>
           {answerMode === "field" && (
             <div className="flex shrink-0 items-center gap-2 text-xs text-muted">
