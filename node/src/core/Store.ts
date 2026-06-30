@@ -18,11 +18,28 @@ export class Store {
   private ztiByAddress = new Map<string, ZtiRow[]>();
   private ztiLoaded = false;
 
+  private anchorStatePath: string;
+
   constructor(private dataDir: string) {
     mkdirSync(dataDir, { recursive: true });
     this.eventsPath = join(dataDir, "events.jsonl");
     this.snapshotPath = join(dataDir, "snapshot.json");
     this.ztiPath = join(dataDir, "zti-history.jsonl");
+    this.anchorStatePath = join(dataDir, "anchor-state.json");
+  }
+
+  // ---- Anchor event + contribution queue (non-consensus, steward-run). Persisted so a node/gateway
+  // restart does not silently switch the event off or drop the steward's contribution queue. ----
+  loadAnchorState(): { event?: object; contributions?: unknown[] } | null {
+    if (!existsSync(this.anchorStatePath)) return null;
+    try { return JSON.parse(readFileSync(this.anchorStatePath, "utf8")); } catch { return null; }
+  }
+
+  saveAnchorState(state: { event: object; contributions: unknown[] }): void {
+    const tmp = this.anchorStatePath + ".tmp";
+    const fd = openSync(tmp, "w");
+    try { writeSync(fd, JSON.stringify(state)); fdatasyncSync(fd); } finally { closeSync(fd); }
+    renameSync(tmp, this.anchorStatePath);
   }
 
   /** Append accepted durable events for replay after restart. Presence/query/answer traffic stays live-only. */

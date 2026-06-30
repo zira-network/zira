@@ -2,12 +2,36 @@
 // Thin helpers for node-specific RPC the ZiraClient interface does not cover: node + provider
 // status (Tier 1/2), provider profiles, query coordination, ZTI history, resonator analytics,
 // anchors, launch-authority model advisory, supply, and consensus.
-import { getApiBase } from "../client/createClient";
+import { getApiBase, isLocalNode, DEFAULT_PUBLIC_GATEWAY } from "../client/createClient";
 import { fetchDedup } from "./fetchDedup";
 import { Wallet } from "./keys";
 import type { HardwareProfile, NodeConfig, ProviderConfig, Domain, Anchor, SignedTx } from "@zira/protocol";
 
 function base(): string { return getApiBase().replace(/\/$/, "") + "/rpc"; }
+
+// The anchor event (status + receiving addresses) and the contribution queue are a single, steward-run,
+// network-wide feature served from the shared public gateway, NOT from a user's own local node. A desktop
+// user's local node would each carry its own off-by-default copy, so reading/writing it there is exactly
+// why the event the steward turned on was invisible to everyone else. These calls therefore always target
+// the gateway: when the Console already talks to a remote node (mobile/web) that IS the gateway; on a local
+// node (desktop) we use the build-time gateway override or the default public gateway.
+function anchorBase(): string {
+  if (!isLocalNode()) return base();
+  const configured = (import.meta as unknown as { env?: Record<string, string | undefined> }).env?.VITE_ZIRA_NODE_URL;
+  const gw = configured && configured.trim() ? configured.trim() : DEFAULT_PUBLIC_GATEWAY;
+  return gw.replace(/\/$/, "") + "/rpc";
+}
+async function rpcGetFrom<T>(baseUrl: string, path: string): Promise<T> {
+  const r = await fetchDedup(baseUrl + path);
+  if (!r.ok) throw new Error(`GET ${path} failed: ${r.status}`);
+  return r.json() as Promise<T>;
+}
+async function rpcPostTo<T>(baseUrl: string, path: string, body: unknown): Promise<T> {
+  const r = await fetch(baseUrl + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((data as { error?: string }).error ?? `POST ${path} failed: ${r.status}`);
+  return data as T;
+}
 
 // Sign a fresh steward challenge with the loaded wallet, so steward actions authorize on ANY node — even a
 // keyless public gateway — by signature rather than by the node holding the key. The node verifies the
@@ -245,11 +269,19 @@ export const NodeApi = {
   anchorClasses: () => rpcGet<AnchorClassInfo[]>("/anchors/classes"),
   // Steward Anchor Event toggle (spec §2.1/§6.2): public read so clients gate the contribute section and
   // show the steward-set USDT receiving addresses (evm = ETH/BSC/Polygon, tron = TRC-20).
-  getAnchorEvent: () => rpcGet<{ enabled: boolean; evm: string; tron: string; wcProjectId: string }>("/anchors/event"),
-  setAnchorEvent: (patch: { enabled?: boolean; evm?: string; tron?: string; wcProjectId?: string }) => rpcPost<{ enabled: boolean; evm: string; tron: string; wcProjectId: string }>("/anchors/event", { ...patch, ...stewardAuth() }),
-  // Anchor contributions: contributor reports a USDT payment (public); steward reviews the queue.
-  recordAnchorContribution: (c: { zirAddress: string; network: string; amountUsdt: number; txHash: string; classCode: string; quantity: number }) => rpcPost<{ ok: boolean }>("/anchors/contribution", c),
-  getAnchorContributions: () => rpcGet<{ zirAddress: string; network: string; amountUsdt: number; txHash: string; classCode: string; quantity: number; ts: number; status: "pending" | "confirmed" | "failed"; confirmations: number; sender: string; reason?: string }[]>("/anchors/contributions"),
+  getAnchorEvent: () => rpcGetFrom<{ enabled: boolean; evm: string; tron: string; wcProjectId: string }>(anchorBase(), "/anchors/event"),
+  setAnchorEvent: (patch: { enabled?: boolean; evm?: string; tron?: string; wcProjectId?: string }) => rpcPostTo<{ enabled: boolean; evm: string; tron: string; wcProjectId: string }>(anchorBase(), "/anchors/event", { ...patch, ...stewardAuth() }),
+  // Anchor contributions: contributor reports a USDT payment (public); steward reviews the queue. Both go to
+  // the shared gateway so contributions converge in one place; the steward read carries a signed challenge
+  // in the query so the gateway authorizes it without the founder key on the server.
+  recordAnchorContribution: (c: { zirAddress: string; network: string; amountUsdt: number; txHash: string; classCode: string; quantity: number }) => rpcPostTo<{ ok: boolean }>(anchorBase(), "/anchors/contribution", c),
+  getAnchorContributions: () => {
+    const a = stewardAuth();
+    const qs = new URLSearchParams();
+    if (a.stewardPubKey && a.stewardChallenge && a.stewardSig) { qs.set("stewardPubKey", a.stewardPubKey); qs.set("stewardChallenge", a.stewardChallenge); qs.set("stewardSig", a.stewardSig); }
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return rpcGetFrom<{ zirAddress: string; network: string; amountUsdt: number; txHash: string; classCode: string; quantity: number; ts: number; status: "pending" | "confirmed" | "failed"; confirmations: number; sender: string; reason?: string }[]>(anchorBase(), `/anchors/contributions${suffix}`);
+  },
   anchorSeats: () => rpcGet<AnchorSeatSummary>("/anchors/seats"),
   anchorListings: () => rpcGet<Anchor[]>("/anchors/listings"),
   myAnchors: (owner: string) => rpcGet<Anchor[]>(`/anchors/mine?owner=${encodeURIComponent(owner)}`),
