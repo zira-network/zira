@@ -275,9 +275,12 @@ export class ZiraNode {
   // is absent for every connected user; when on, the contribute flow is live. Steward-gated at the RPC
   // layer. In-memory like the events toggle: the steward/gateway node holds it and serves it to clients.
   private anchorEventEnabled = false;
-  private anchorEventEvm = "";   // USDT receiving address for ETH/BSC/Polygon (steward-set at runtime)
-  private anchorEventTron = "";  // USDT receiving address for TRON TRC-20 (steward-set at runtime)
-  private anchorEventWcProjectId = ""; // WalletConnect project id for the QR contribution flow (steward-set)
+  // Built-in defaults so the contribution flow is turnkey (the steward only flips the event ON). All public
+  // values: the receiving addresses are meant to be shown to contributors, and a WalletConnect project id
+  // is a public client identifier. The steward can still override any of them at runtime via setAnchorEvent.
+  private anchorEventEvm = "0xA19af8f182D5ea55276F3Eb050B80Ec90635bF9B";   // USDT receiving (ETH/BSC/Polygon)
+  private anchorEventTron = "TAoWupKVG5xivDnPqMGk9A5x5bLfUTietE";          // USDT receiving (TRON TRC-20)
+  private anchorEventWcProjectId = "6ddd349a106a434236f6ae183ac8f62e";    // WalletConnect/Reown project id (public)
   // Anchor contributions: a contributor's wallet posts its tx hash after paying, and the payment watcher
   // verifies it ON-CHAIN (status confirmed/failed, confirmations, the real sender) so the steward assigns
   // a seat only against a confirmed payment. Bounded.
@@ -392,6 +395,7 @@ export class ZiraNode {
     if (typeof patch.tron === "string") this.anchorEventTron = patch.tron.trim();
     if (typeof patch.wcProjectId === "string") this.anchorEventWcProjectId = patch.wcProjectId.trim();
     if (typeof patch.enabled === "boolean") this.anchorEventEnabled = patch.enabled && !!(this.anchorEventEvm || this.anchorEventTron);
+    this.persistAnchorState();
     return this.anchorEventStatus();
   }
   // Public, best-effort: a contributor's app reports its USDT payment so the steward sees it pending.
@@ -404,9 +408,32 @@ export class ZiraNode {
       status: "pending", confirmations: 0, sender: "", checkedAt: 0,
     });
     if (this.anchorContributionLog.length > 500) this.anchorContributionLog.splice(0, this.anchorContributionLog.length - 500);
+    this.persistAnchorState();
     return { ok: true };
   }
   anchorContributions(): typeof this.anchorContributionLog { return [...this.anchorContributionLog].reverse(); }
+
+  // Persist the anchor event + contribution queue (non-consensus, steward-run) so a node/gateway restart
+  // does not silently switch the event off or lose the queue the steward still has to fulfill.
+  private persistAnchorState(): void {
+    try {
+      this.store.saveAnchorState({
+        event: { enabled: this.anchorEventEnabled, evm: this.anchorEventEvm, tron: this.anchorEventTron, wcProjectId: this.anchorEventWcProjectId },
+        contributions: this.anchorContributionLog,
+      });
+    } catch { /* best effort; in-memory state still serves until next restart */ }
+  }
+  // Re-hydrate the anchor event + contributions from disk on start (called by start() after the snapshot).
+  private restoreAnchorState(): void {
+    const saved = this.store.loadAnchorState();
+    if (!saved) return;
+    const e = (saved.event ?? {}) as { enabled?: boolean; evm?: string; tron?: string; wcProjectId?: string };
+    if (typeof e.evm === "string" && e.evm) this.anchorEventEvm = e.evm;
+    if (typeof e.tron === "string" && e.tron) this.anchorEventTron = e.tron;
+    if (typeof e.wcProjectId === "string" && e.wcProjectId) this.anchorEventWcProjectId = e.wcProjectId;
+    if (typeof e.enabled === "boolean") this.anchorEventEnabled = e.enabled && !!(this.anchorEventEvm || this.anchorEventTron);
+    if (Array.isArray(saved.contributions)) this.anchorContributionLog = saved.contributions.slice(-500) as typeof this.anchorContributionLog;
+  }
 
   /**
    * Payment watcher (spec §2.5). Verifies each still-pending contribution ON-CHAIN by its tx hash: it must
@@ -441,6 +468,7 @@ export class ZiraNode {
           c.checkedAt = Date.now(); c.reason = `check failed: ${(e as Error).message}`;   // transient; retry next tick
         }
       }
+      this.persistAnchorState();   // confirmations/senders/status may have changed; keep the queue durable
     } finally {
       this.paymentWatchBusy = false;
     }
@@ -558,6 +586,9 @@ export class ZiraNode {
     let replayed = 0;
     for (const env of this.store.readEvents()) { this.ingest(env, false); replayed++; }
     if (replayed) log.info(`replayed ${replayed} durable events`);
+    // Re-hydrate the steward-run anchor event + contribution queue (non-consensus), so a gateway restart
+    // does not switch the event off for everyone or drop contributions the steward still owes seats for.
+    this.restoreAnchorState();
     // a brand new node (no snapshot, no durable events) is eligible to fast sync from a peer
     this.startedFresh = persisted === null && replayed === 0;
     this.state.advance(Date.now());

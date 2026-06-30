@@ -404,6 +404,10 @@ const PUBLIC_POST_ROUTES = new Set<string>([
   "/tx", "/provider/register", "/provider/answer",
   "/anchors/claim", "/anchors/transfer", "/anchors/list", "/anchors/delist", "/anchors/code-edit",
   "/anchors/position-transfer", "/anchors/activate", "/anchors/contribution", "/events/claim",
+  // steward-signed anchor-event toggle: the handler re-verifies the steward signature, so accepting the
+  // POST on a public gateway is safe (a non-steward POST is rejected 403 by the handler). This lets the
+  // steward turn the event on/off on the shared gateway so every user, on any node, sees the same status.
+  "/anchors/event",
   // publishing soft-state resonators/tasks is signed + validated like the field gossip it mirrors.
   "/resonator", "/task",
 ]);
@@ -419,7 +423,12 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
   if (!isLoopbackHost(opts.host) && !hasAdmin(req, opts.adminToken)) {
     const isPublicGet = req.method === "GET" && PUBLIC_GET_ROUTES.has(route);
     const isPublicSubmit = opts.gateway === true && req.method === "POST" && PUBLIC_POST_ROUTES.has(route);
-    if (!isPublicGet && !isPublicSubmit) {
+    // Steward-signed read of the contributions queue on a public bind: the steward reviews the queue from
+    // the gateway (where all contributions converge) without the founder key on the server. The signature
+    // (carried in the query) is verified here and again in the handler.
+    const isStewardSignedRead = req.method === "GET" && route === "/anchors/contributions"
+      && node.verifyStewardSig(q.get("stewardPubKey") ?? "", q.get("stewardChallenge") ?? "", q.get("stewardSig") ?? "");
+    if (!isPublicGet && !isPublicSubmit && !isStewardSignedRead) {
       return json(res, { error: "admin token required for this route on a public RPC bind", gateway: Boolean(opts.gateway) }, 403);
     }
   }
@@ -445,7 +454,7 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
     // Anchor contributions: a contributor's app reports its USDT payment (public, best-effort); the steward
     // reviews the queue (steward-gated). On-chain detection confirms before a seat is assigned.
     case "POST /anchors/contribution": { const b = await body(req); return json(res, node.recordAnchorContribution(b ?? {})); }
-    case "GET /anchors/contributions": { if (!node.isFounder()) return json(res, { error: "only the steward can view contributions" }, 403); return json(res, node.anchorContributions()); }
+    case "GET /anchors/contributions": { if (!node.isFounder() && !node.verifyStewardSig(q.get("stewardPubKey") ?? "", q.get("stewardChallenge") ?? "", q.get("stewardSig") ?? "")) return json(res, { error: "only the steward can view contributions" }, 403); return json(res, node.anchorContributions()); }
     case "GET /founder/bootstrap-candidates": {
       const host = await bootstrapPublicHost(q);
       const view = node.bootstrapSeedCandidates({

@@ -1,6 +1,7 @@
 // apps/console/src/app/Anchors.tsx
 import { useEffect, useRef, useState } from "react";
-import { ANCHOR_CLASSES, TOTAL_ANCHOR_SEATS, PROTOCOL, type Anchor, type AnchorClass } from "@zira/protocol";
+import { ANCHOR_CLASSES, TOTAL_ANCHOR_SEATS, PROTOCOL, MAINNET_ANCHOR_STEWARD, type Anchor, type AnchorClass } from "@zira/protocol";
+import QRCode from "qrcode";
 import { Card, Badge, Button, Modal, Input, useToast, useSlowHint } from "../components/ui";
 import { useZira } from "../store/useZira";
 import { useUnlock } from "../store/useUnlock";
@@ -9,6 +10,28 @@ import { cn } from "../lib/cn";
 import { payUsdt } from "../lib/usdtPay";
 import { makeSignedTx } from "../lib/tx";
 import { NodeApi } from "../lib/nodeApi";
+
+// A seat is still AVAILABLE to contribute for while the steward holds it (the steward assigns it to a
+// contributor after their payment confirms). A seat counts as ASSIGNED only once it leaves the steward
+// wallet for a real owner. At genesis the steward holds all 512, so availability must not read them as taken.
+const isStewardHeld = (a: Anchor) => a.owner === MAINNET_ANCHOR_STEWARD;
+const isAssigned = (a: Anchor) => !!a.owner && a.owner !== MAINNET_ANCHOR_STEWARD;
+
+// Wallet-agnostic payment QR: encodes the receiving address so a contributor can scan it with ANY wallet
+// (EVM or TRON) and send the shown amount, independent of WalletConnect. Renders nothing until ready.
+function PayQr({ addr }: { addr: string }) {
+  const [src, setSrc] = useState("");
+  useEffect(() => {
+    let alive = true;
+    if (!addr) { setSrc(""); return; }
+    QRCode.toDataURL(addr, { width: 168, margin: 1, color: { dark: "#0b0d24", light: "#ffffff" } })
+      .then((d) => { if (alive) setSrc(d); })
+      .catch(() => { if (alive) setSrc(""); });
+    return () => { alive = false; };
+  }, [addr]);
+  if (!src) return null;
+  return <img src={src} width={168} height={168} alt="Receiving address QR" className="rounded-lg border border-hairline bg-white p-1" />;
+}
 
 // Ink palette: a single teal hue fading to slate-grey encodes class rank (A highest -> F base) without a
 // rainbow, so the seat map stays monochrome and on-brand. Readable on both the light and dark anchor stage.
@@ -54,7 +77,7 @@ export function Anchors() {
   useEffect(() => { mounted.current = true; void load(); return () => { mounted.current = false; }; /* eslint-disable-next-line */ }, [client, address]);
 
   const totalStakeUZIR = CLASS_CODES.reduce((a, c) => a + ANCHOR_CLASSES[c].stakeZIR * ANCHOR_CLASSES[c].seats, 0) * PROTOCOL.UZIR_PER_ZIR;
-  const claimed = anchors.filter((a) => a.owner).length;
+  const claimed = anchors.filter(isAssigned).length;
 
   async function signAnchorTx(kind: "anchor_claim" | "anchor_transfer" | "anchor_position_transfer" | "anchor_activate", data: unknown, submit: (tx: ReturnType<typeof makeSignedTx>) => Promise<{ accepted: boolean; reason?: string }>) {
     if (!address) { toast.push("Create or unlock a wallet first.", "warn"); return; }
@@ -132,7 +155,11 @@ function AnchorEventContribute({ anchors, address }: { anchors: Anchor[]; addres
   const [picked, setPicked] = useState<AnchorClass>("F");
   const [qty, setQty] = useState(1);
   const [net, setNet] = useState<(typeof USDT_NETWORKS)[number]>("Ethereum");
-  const seatsLeft = (code: AnchorClass) => Math.max(0, ANCHOR_CLASSES[code].seats - anchors.filter((a) => a.classCode === code && a.owner).length);
+  // Available = seats the steward still holds in this class (assignable to a contributor). Until the anchors
+  // list has loaded, fall back to the full class size so the contribute controls are not dead on first paint.
+  const seatsLeft = (code: AnchorClass) => anchors.length === 0
+    ? ANCHOR_CLASSES[code].seats
+    : anchors.filter((a) => a.classCode === code && isStewardHeld(a)).length;
   const left = seatsLeft(picked);
   const [paying, setPaying] = useState(false);
   const total = CLASS_USDT[picked] * Math.max(1, qty);
@@ -195,7 +222,14 @@ function AnchorEventContribute({ anchors, address }: { anchors: Anchor[]; addres
           <Button variant="primary" onClick={contribute} disabled={!addr || left < qty || paying}>{paying ? "Opening QR…" : "Contribute"}</Button>
         </div>
         {addr
-          ? <div className="mt-2 text-[11px] text-faint">Contribute opens a WalletConnect QR to scan with your wallet and confirm <span className="mono text-text">{total.toLocaleString()} USDT</span> on {net}. Receiving address: <span className="mono break-all text-muted">{addr}</span>.</div>
+          ? <div className="mt-3 grid gap-3 sm:grid-cols-[auto_1fr] sm:items-center">
+              <PayQr addr={addr} />
+              <div className="text-[11px] text-faint">
+                <div className="mb-1">Scan with any wallet to send <span className="mono text-text">{total.toLocaleString()} USDT</span> on <span className="text-text">{net}</span> to:</div>
+                <button type="button" title="Copy address" onClick={() => { void navigator.clipboard?.writeText(addr).catch(() => {}); toast.push("Receiving address copied."); }} className="mono break-all text-left text-muted transition-colors hover:text-text">{addr}</button>
+                <div className="mt-2">Or tap <span className="text-text">Contribute</span> for a one-tap WalletConnect transfer{net === "TRON TRC-20" ? " (EVM wallets only; for TRON, scan the QR above and enter the amount)" : " that pre-fills the exact amount"}.</div>
+              </div>
+            </div>
           : <div className="mt-2 text-[11px] text-faint">The steward is finalizing the receiving address for {net}.</div>}
       </div>
       <p className="mt-2 text-[11px] text-faint">Seat assignment is a reviewed steward step after your on-chain payment confirms. Anchors are infrastructure positions under uncertainty, not an investment; read the risk notes before contributing.</p>
@@ -247,7 +281,7 @@ function ClassLegend({ anchors, totalStakeUZIR }: { anchors: Anchor[]; totalStak
       <div className="space-y-2">
         {CLASS_CODES.map((code) => {
           const c = ANCHOR_CLASSES[code];
-          const taken = anchors.filter((a) => a.classCode === code && a.owner).length;
+          const taken = anchors.filter((a) => a.classCode === code && isAssigned(a)).length;
           return (
             <div key={code} className="rounded-lg border border-hairline bg-base/70 p-2 text-xs">
               <div className="flex items-center justify-between">
