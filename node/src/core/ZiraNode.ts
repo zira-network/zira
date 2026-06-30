@@ -1527,9 +1527,9 @@ export class ZiraNode {
   private finalizedProgressAt = 0;
   private resyncInFlight = false;
   private lastResyncAt = 0;
-  private readonly resyncStallMs = 60_000;     // finalizedEpoch must stay frozen this long to count as stalled
-  private readonly resyncMinGap = 20;          // and the processed head must be at least this far ahead
-  private readonly resyncCooldownMs = 120_000; // and at most one resync attempt per this window
+  private readonly resyncStallMs = 30_000;     // finalizedEpoch must stay frozen this long to count as stalled
+  private readonly resyncMinGap = 5;           // and the processed head must be at least this far ahead
+  private readonly resyncCooldownMs = 90_000;  // and at most one resync attempt per this window
 
   /** Serve our finalized state snapshot to a joining peer, with the finalized checkpoint it sits on. */
   private async *serveSnapshot(): AsyncIterable<Uint8Array> {
