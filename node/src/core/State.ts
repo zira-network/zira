@@ -819,10 +819,24 @@ export class State {
     return computeStateRoot(this.accountLeaves(), this.supply, this.activeFounderAddresses(), this.anchorSeats());
   }
 
-  /** Total active master trust, for the checkpoint finality denominator. */
+  /**
+   * Total active master trust, for the checkpoint finality denominator. When the network defines a genesis
+   * master set (mainnet), finality rests ONLY on those fixed bootstrap masters: their trust is the
+   * denominator, so losing one of four still leaves 3/4 = 0.75 >= 0.67 and finality never stalls on a single
+   * master restarting. Counting every account that merely reached MASTER_NODE_ZTI would inflate the
+   * denominator with non-voting earned/anchor masters, so a single drop (e.g. 4 voters of 5 known masters)
+   * would fall below the threshold and freeze the whole mesh. Earned-master finality decentralization is
+   * gated separately and re-enabled once its determinism is proven. Devnet/test (no genesis masters) keeps
+   * the all-masters fallback, where the steward is the sole seeded bootstrap master.
+   */
   totalMasterTrust(): number {
+    const gated = this.genesisMasters.size > 0;
     let t = 0;
-    for (const a of this.accounts.values()) if (a.isMaster) t += a.zti;
+    for (const a of this.accounts.values()) {
+      if (!a.isMaster) continue;
+      if (gated && !this.genesisMasters.has(a.address)) continue;
+      t += a.zti;
+    }
     return t;
   }
   masters(): Account[] {
@@ -835,8 +849,16 @@ export class State {
    * self-declared `voterZti`, so a forged high voterZti from a non-master cannot manufacture finality.
    */
   masterZtiMap(): Map<string, number> {
+    // Mirrors totalMasterTrust: on a network with a genesis master set, only those fixed masters' votes
+    // count toward finality, so the numerator and denominator stay consistent and a single master drop
+    // cannot wedge the mesh. Devnet/test falls back to all masters (steward-only bootstrap).
+    const gated = this.genesisMasters.size > 0;
     const m = new Map<string, number>();
-    for (const a of this.accounts.values()) if (a.isMaster && a.pubkey) m.set(a.pubkey, a.zti);
+    for (const a of this.accounts.values()) {
+      if (!a.isMaster || !a.pubkey) continue;
+      if (gated && !this.genesisMasters.has(a.address)) continue;
+      m.set(a.pubkey, a.zti);
+    }
     return m;
   }
 

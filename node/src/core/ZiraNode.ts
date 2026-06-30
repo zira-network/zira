@@ -198,25 +198,29 @@ export function verifyFastSyncSnapshot(best: Snap, genesis: GenesisDoc): boolean
   );
   if (root !== best.finalizedRoot) return false;
 
-  // Masters in the snapshot are the electorate; their ZTI is the finality denominator.
-  const masterByPub = new Map<string, SnapAccount>();
-  let totalMaster = 0;
-  for (const a of best.snapshot.accounts) {
-    if (a.isMaster && a.pubkey) {
-      masterByPub.set(a.pubkey, a);
-      totalMaster += a.zti;
-    }
-  }
-  if (totalMaster <= 0) return false;
-
   // Anchor: a finalized snapshot must be co-signed by at least one genesis-designated master, so a forged
   // checkpoint signed only by self-promoted accounts cannot be adopted. On mainnet that is the genesis master
   // quorum; on networks without an explicit master set it falls back to just the genesis founder — which is
   // the only account the constructor actually seeds as a bootstrap master there, so the anchor set matches
   // what can really sign.
+  const gatedMasters = (genesis.masters?.length ?? 0) > 0;
   const genesisMasterAddrs = new Set<string>(
     genesis.masters?.length ? genesis.masters.map((m) => m.address) : [genesis.founder],
   );
+
+  // Masters in the snapshot are the electorate; their ZTI is the finality denominator. Mirror live finality:
+  // when the network has a genesis master set, ONLY those fixed masters are the electorate, so a checkpoint
+  // finalized by 3 of 4 genesis masters (0.75) still verifies and a non-voting earned/anchor master cannot
+  // inflate the denominator and make an honest 3-of-4 snapshot un-adoptable.
+  const masterByPub = new Map<string, SnapAccount>();
+  let totalMaster = 0;
+  for (const a of best.snapshot.accounts) {
+    if (!a.isMaster || !a.pubkey) continue;
+    if (gatedMasters && !genesisMasterAddrs.has(a.address)) continue;
+    masterByPub.set(a.pubkey, a);
+    totalMaster += a.zti;
+  }
+  if (totalMaster <= 0) return false;
 
   const counted = new Set<string>();
   let supporting = 0;
@@ -1029,6 +1033,7 @@ export class ZiraNode {
     const now = Date.now();
     const advanced = this.state.advance(now);
     if (advanced > 0) this.voteCheckpoints(now);
+    this.maybeResyncOnStall(now);   // finality watchdog: self-heal if finalizedEpoch freezes behind the mesh
     this.soft.prune(now);
     // periodically re-gossip pending events so peers converge despite gossipsub mesh races and
     // late joiners. Cheap: the pool is small and drains every epoch.
@@ -1515,6 +1520,16 @@ export class ZiraNode {
   private fastSynced = false;
   private fastSyncStarted = false;
   private startedFresh = false;
+  // Finality watchdog (auto-resync). If finalizedEpoch freezes while the chain clock keeps moving, the node
+  // re-adopts a current, verified peer snapshot, the same self-heal a fresh node uses on join. Conservative
+  // thresholds avoid false triggers during normal brief settling.
+  private lastFinalizedSeen = -1;
+  private finalizedProgressAt = 0;
+  private resyncInFlight = false;
+  private lastResyncAt = 0;
+  private readonly resyncStallMs = 60_000;     // finalizedEpoch must stay frozen this long to count as stalled
+  private readonly resyncMinGap = 20;          // and the processed head must be at least this far ahead
+  private readonly resyncCooldownMs = 120_000; // and at most one resync attempt per this window
 
   /** Serve our finalized state snapshot to a joining peer, with the finalized checkpoint it sits on. */
   private async *serveSnapshot(): AsyncIterable<Uint8Array> {
@@ -1582,6 +1597,61 @@ export class ZiraNode {
       // If we did not actually adopt (no snapshot available yet), release the guard so a later peer
       // connect can retry the negotiation. Once adopted, fastSynced stays true and this is a no-op.
       if (!this.fastSynced) this.fastSyncStarted = false;
+    }
+  }
+
+  /**
+   * Finality watchdog. If finalizedEpoch has not advanced for a sustained window while the chain clock keeps
+   * moving, the node is stalled: either its state diverged from the mesh (its votes never match quorum) or it
+   * restarted into a backfill gap that live gossip cannot fill. The cure is the same as a fresh join: adopt a
+   * current, cryptographically-verified snapshot from an advanced peer. This is the self-heal that lets a node
+   * restart or rejoin without manual intervention. Idempotent and trustless: the snapshot must pass the same
+   * >=67%-master, genesis-anchored checkpoint proof as initial fast-sync.
+   */
+  private maybeResyncOnStall(now: number): void {
+    if (!this.opts.fastSync || process.env.ZIRA_FULL_SYNC === "1") return;
+    const fin = this.checkpoints.lastFinalizedEpoch;
+    if (fin > this.lastFinalizedSeen) { this.lastFinalizedSeen = fin; this.finalizedProgressAt = now; return; }
+    if (this.finalizedProgressAt === 0) { this.finalizedProgressAt = now; return; } // arm on first observation
+    if (now - this.finalizedProgressAt < this.resyncStallMs) return;
+    if (this.state.lastProcessedEpoch - fin < this.resyncMinGap) return;
+    if (this.net.peerCount() === 0) return;
+    if (this.resyncInFlight || now - this.lastResyncAt < this.resyncCooldownMs) return;
+    this.lastResyncAt = now;
+    log.warn(`finality stalled: finalizedEpoch ${fin} unchanged for ${Math.round((now - this.finalizedProgressAt) / 1000)}s (processed ${this.state.lastProcessedEpoch}); attempting resync from peers`);
+    void this.attemptResyncFromPeers();
+  }
+
+  /** Adopt the most-advanced verified peer snapshot to recover from a finality stall. See maybeResyncOnStall. */
+  private async attemptResyncFromPeers(): Promise<void> {
+    if (this.resyncInFlight) return;
+    this.resyncInFlight = true;
+    try {
+      const got: Snap[] = [];
+      for (const p of this.net.peers().slice(0, 5)) {
+        try {
+          const frames = await this.net.request(p, SNAPSHOT_PROTOCOL, enc.encode("{}"));
+          if (frames[0]) got.push(JSON.parse(dec.decode(frames[0])) as Snap);
+        } catch { /* try the next peer */ }
+      }
+      if (got.length === 0) return;
+      got.sort((a, b) => (b.finalizedEpoch ?? -1) - (a.finalizedEpoch ?? -1));
+      const best = got[0]!;
+      if (!best.snapshot || !Array.isArray(best.snapshot.accounts) || best.snapshot.accounts.length === 0) return;
+      // Only adopt a peer genuinely ahead of our stuck point, and only if its snapshot is bound to a real
+      // finalized checkpoint (same gate as initial fast-sync; a forked or older snapshot cannot pass).
+      if (best.finalizedEpoch <= this.checkpoints.lastFinalizedEpoch + this.resyncMinGap) return;
+      if (!this.verifyFastSyncSnapshot(best)) { log.warn("resync: peer snapshot failed checkpoint verification; staying put"); return; }
+      const dropped = this.state.adoptFastSyncSnapshot(best.snapshot);
+      // Move our finalized marker up to the adopted checkpoint so finality resumes forward from here (live
+      // votes for newer epochs finalize on top), instead of re-finalizing a gap it never had votes for.
+      this.checkpoints.lastFinalizedEpoch = best.finalizedEpoch;
+      this.checkpoints.lastFinalizedRoot = best.finalizedRoot;
+      this.lastFinalizedSeen = best.finalizedEpoch;
+      this.finalizedProgressAt = Date.now();
+      log.info(`resynced past finality stall: adopted verified snapshot at finalized epoch ${best.finalizedEpoch} (dropped ${dropped.txs} txs/${dropped.observations} obs already in snapshot); finality resuming`);
+    } finally {
+      this.resyncInFlight = false;
     }
   }
 
