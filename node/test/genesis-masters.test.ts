@@ -77,6 +77,38 @@ test("A2: three of four genesis masters finalize a checkpoint with the founder o
   assert.ok(fin!.supportingTrust >= PROTOCOL.FINALITY_THRESHOLD);
 });
 
+test("A2: an earned (non-genesis) master cannot inflate the finality denominator and wedge a 3-of-4 finalize", () => {
+  const founder = keypairFromPrivate("0c".repeat(32));
+  const masterKps = [generateKeypair(), generateKeypair(), generateKeypair(), generateKeypair()];
+  const g: GenesisDoc = {
+    ...standardGenesis("devnet", founder.address, GTS),
+    masters: masterKps.map((k) => ({ address: k.address, pubKey: k.publicKey })),
+  };
+  const s = new State(g);
+  // An account that climbed to master ZTI on-ledger (e.g. an anchor resonator or miner) but is NOT a genesis
+  // bootstrap master and does not run a coordinator vote. In production this 5th master inflated the
+  // denominator: 4 voters of 5 known masters = 0.80, so a single genesis master dropping fell to 3/5 = 0.60
+  // < 0.67 and froze the whole mesh. Finality must count ONLY the genesis masters.
+  const earned = generateKeypair();
+  s.accounts.set(earned.address, {
+    address: earned.address, pubkey: earned.publicKey, balance: 0, nonce: 0, zti: 1.0, ztiByDomain: {},
+    accuracy: 0, consistency: 1, uptime: 0, isMaster: true, firstSeenEpoch: -1, activeEpochs: 0,
+    lastActiveEpoch: -1, lastWorkEpoch: -1,
+  });
+  assert.equal(s.totalMasterTrust(), 4.0, "denominator excludes the earned non-genesis master");
+  assert.equal(s.masterZtiMap().size, 4, "the finality master map is the four genesis masters only");
+  assert.equal(s.isGenesisMaster(earned.address), false);
+
+  // With the earned master correctly excluded, three of the four genesis masters still finalize (0.75).
+  const cp = new Checkpoints(g.network);
+  const epoch = 9, root = s.stateRoot(), total = s.totalMasterTrust(), map = s.masterZtiMap();
+  let fin = cp.receiveVote(cp.createVote(epoch, root, s.supply, masterKps[0]!, 1.0, GTS + 1), total, map);
+  fin = cp.receiveVote(cp.createVote(epoch, root, s.supply, masterKps[1]!, 1.0, GTS + 2), total, map);
+  assert.equal(fin, null, "two of four is 0.50, not final");
+  fin = cp.receiveVote(cp.createVote(epoch, root, s.supply, masterKps[2]!, 1.0, GTS + 3), total, map);
+  assert.ok(fin, "three of four genesis masters finalize even with an earned master present");
+});
+
 test("B2: a fresh accurate node reaches the ZTI threshold but is not promoted to master before tenure", () => {
   const founder = keypairFromPrivate("0b".repeat(32));
   const g = standardGenesis("devnet", founder.address, GTS); // no genesis master set on devnet
