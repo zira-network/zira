@@ -279,6 +279,20 @@ export class ModelService {
     const entry = this.registry.get(id);
     if (!entry) throw new Error("unknown model");
 
+    // 0) Reliable bootstrap: if the model has an authorized source link, fetch from it FIRST. P2P chunk
+    //    transfer from NAT'd home machines to the coordinators is unreliable at launch — a peer accepts the
+    //    stream then never sends bytes, so the download would stall at 0 B for minutes. The link is the
+    //    authoritative, hash-verified source (importUrl rejects a mismatched file), so this makes "enable
+    //    Mine -> hold the model" actually work for every new user. Peers still serve each other afterward for
+    //    redundancy and the storage bonus; models WITHOUT a link fall straight to the P2P path below.
+    if (entry.meta.url) {
+      try {
+        const meta = await this.store.importUrl(entry.meta.url, entry.meta.name, { arch: entry.meta.arch, quant: entry.meta.quant, type: entry.meta.type, domains: entry.meta.domains, tags: entry.meta.tags, version: entry.meta.version });
+        if (meta.id === id) return this.adopt(id, entry, "the link");
+        log.warn(`model link content did not match the authorized hash; trying peers instead`);
+      } catch (e) { log.debug("link fetch failed, trying peers", (e as Error).message); }
+    }
+
     // 1) try connected peers that have it — in turn, with per-chunk retry. Progress is saved on disk
     //    (receivedChunks), so if one peer stalls we resume from the next peer instead of abandoning a
     //    multi-GB transfer back to a full re-download. This is what makes big-model P2P distribution
