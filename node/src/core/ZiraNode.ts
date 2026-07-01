@@ -143,6 +143,7 @@ export interface MiningStatus {
   storageCapBytes: number;
   storageLimitGb: number;
   storageUsedBytes: number;
+  storageDownloadingBytes: number;
   known: { meta: import("../models/types.js").ModelMeta; providers: number; targetHosts: number; distributionProgress: number; ready: boolean; local: boolean }[];
 }
 
@@ -967,6 +968,7 @@ export class ZiraNode {
       storageCapBytes: this.models.storageCapBytes(),
       storageLimitGb: s.mining.storageLimitGb ?? Math.max(1, Math.round(this.models.storageCapBytes() / 1024 ** 3)),
       storageUsedBytes: s.storageBytes,
+      storageDownloadingBytes: s.storageDownloadingBytes,
       known: s.known,
     };
   }
@@ -1885,7 +1887,7 @@ export class ZiraNode {
     return {
       // Release version, exposed so the Console can negotiate features against older nodes (upgrade
       // without ruptures). Tracks the node package version / installer release.
-      version: "1.9.11",
+      version: "1.9.12",
       network: this.genesis.network,
       phase: "live",
       providersOnline: this.soft.onlineProviders(now).length,

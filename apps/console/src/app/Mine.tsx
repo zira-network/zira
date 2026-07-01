@@ -1025,7 +1025,7 @@ export function Mine() {
             <Field label="Storage cap" hint="GB. Default is 1 GB. The node never stores more than this; when full it stops taking new bytes and keeps serving what fits.">
               <Input className="mono" value={storageLimit} onChange={(e) => setStorageLimit(e.target.value)} onBlur={() => updateStorage(mining?.storageEnabled ?? false)} disabled={busy} />
             </Field>
-            <Stat label="Used of cap" value={<span className="text-sm">{formatBytes(mining?.storageUsedBytes ?? 0)} / {formatBytes(mining?.storageCapBytes ?? (mining?.storageLimitGb ?? 1) * 1024 ** 3)}</span>} />
+            <Stat label="Used of cap" value={<span className="text-sm">{formatBytes(mining?.storageUsedBytes ?? 0)} / {formatBytes(mining?.storageCapBytes ?? (mining?.storageLimitGb ?? 1) * 1024 ** 3)}{(mining?.storageDownloadingBytes ?? 0) > 0 ? <span className="text-faint"> (+{formatBytes(mining?.storageDownloadingBytes ?? 0)} downloading)</span> : null}</span>} />
             <Stat label="Mode" value={<span className="text-sm">{mining?.storageEnabled ? "storage peer" : "light node"}</span>} />
           </div>
           {mining?.storageEnabled && (mining?.storageUsedBytes ?? 0) >= (mining?.storageCapBytes ?? (mining?.storageLimitGb ?? 1) * 1024 ** 3) && (
@@ -1112,9 +1112,13 @@ function MiningReadyBanner({ mining, earning }: { mining: MiningStatus | null | 
   const pending = (mining.known ?? []).filter((m) => !m.local && (m.meta.sizeBytes ?? 0) > 0);
   const targetBytes = pending.reduce((n, m) => Math.max(n, m.meta.sizeBytes ?? 0), 0);
   const used = mining.storageUsedBytes ?? 0;
+  // In-flight partial bytes (dl-*.part / data.part) so progress moves instead of sitting at 0
+  // while a multi-minute download is running (finalized bytes only count once verified).
+  const inflight = mining.storageDownloadingBytes ?? 0;
+  const have = used + inflight;
   const downloading = pending.length > 0 && used < targetBytes;
   if (downloading) {
-    const pct = targetBytes > 0 ? Math.max(1, Math.min(99, Math.round((used / targetBytes) * 100))) : 0;
+    const pct = targetBytes > 0 ? Math.max(1, Math.min(99, Math.round((have / targetBytes) * 100))) : (inflight > 0 ? 1 : 0);
     return (
       <Card className="border-[color-mix(in_srgb,var(--indigo)_35%,transparent)]">
         <div className="flex items-center justify-between gap-3">
@@ -1124,7 +1128,7 @@ function MiningReadyBanner({ mining, earning }: { mining: MiningStatus | null | 
           </div>
           <div className="shrink-0 rounded-lg border border-hairline bg-base px-3 py-2 text-center">
             <div className="mono text-lg text-[var(--teal)]">{pct}%</div>
-            <div className="text-[11px] text-faint">{formatBytes(used)} / {formatBytes(targetBytes)}</div>
+            <div className="text-[11px] text-faint">{formatBytes(have)} / {formatBytes(targetBytes)}</div>
           </div>
         </div>
         <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-base">
