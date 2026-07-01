@@ -775,7 +775,7 @@ export class ModelService {
     throw new Error("no local model is available yet. Load an authorized model on this node (storage peer) or set a local endpoint like Ollama.");
   }
 
-  async status(): Promise<{ mining: MiningConfig; engineAvailable: boolean; loadedModel: string | null; serving: boolean; ownTaskReady: boolean; ownTaskLabel: string; isFounder: boolean; local: ModelMeta[]; storageBytes: number; known: { meta: ModelMeta; providers: number; targetHosts: number; distributionProgress: number; ready: boolean; local: boolean }[] }> {
+  async status(): Promise<{ mining: MiningConfig; engineAvailable: boolean; loadedModel: string | null; serving: boolean; ownTaskReady: boolean; ownTaskLabel: string; isFounder: boolean; local: ModelMeta[]; storageBytes: number; storageDownloadingBytes: number; known: { meta: ModelMeta; providers: number; targetHosts: number; distributionProgress: number; ready: boolean; local: boolean }[] }> {
     return {
       mining: this.mining,
       engineAvailable: await this.inference.isAvailable(),
@@ -786,6 +786,7 @@ export class ModelService {
       isFounder: this.isFounder(),
       local: this.store.list(),
       storageBytes: this.store.totalBytes(),
+      storageDownloadingBytes: this.store.downloadingBytes(),
       known: this.knownModels(),
     };
   }

@@ -59,6 +59,24 @@ export class ModelStore {
     return this.list().reduce((sum, m) => sum + (m.sizeBytes ?? 0), 0);
   }
 
+  /** Bytes of models currently DOWNLOADING (partial .part files not yet finalized). totalBytes() counts
+   * only finished models, so during a multi-minute fetch the cap looks frozen at 0; this exposes real
+   * progress so the UI shows the download moving instead of "0 B". Covers both the per-model P2P partial
+   * (models/<id>/data.part) and the URL-import partial (models/dl-*.part). */
+  downloadingBytes(): number {
+    let n = 0;
+    try {
+      for (const entry of readdirSync(this.dir)) {
+        try {
+          if (entry.startsWith("dl-") && entry.endsWith(".part")) { n += statSync(join(this.dir, entry)).size; continue; }
+          const p = this.partPath(entry);
+          if (existsSync(p)) n += statSync(p).size;
+        } catch { /* skip an entry that vanished mid-scan */ }
+      }
+    } catch { /* models dir not readable yet */ }
+    return n;
+  }
+
   /** Evict a cached model's heavy bytes (and any partial download) to free storage. Keeps the tiny
    * manifest sibling untouched: the model stays field-known and re-fetchable, only its bytes are dropped.
    * Returns true if bytes were present and removed. Best-effort and safe to call when nothing is cached. */

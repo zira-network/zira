@@ -90,6 +90,7 @@ export interface MiningStatus {
   storageCapBytes: number;
   storageLimitGb: number;
   storageUsedBytes: number;
+  storageDownloadingBytes: number;
   known: FieldModel[];
 }
 export interface MiningPatch { enabled?: boolean; mode?: "auto" | "select"; modelId?: string | null; endpoint?: string; endpointModel?: string; gpuLayers?: number; threads?: number; useRecommendedHardware?: boolean; localTaskPermission?: boolean; ownTaskInference?: boolean; storageEnabled?: boolean; storageCapBytes?: number; storageLimitGb?: number }
