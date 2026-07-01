@@ -182,7 +182,7 @@ export class ModelService {
     if (!meta || meta.chunkCount <= 0) return false;
     const index = Math.floor(Math.random() * meta.chunkCount);
     try {
-      const frames = await this.net.request(peerId, MODEL_PROTOCOL, enc.encode(JSON.stringify({ id: modelId, index })));
+      const frames = await this.net.request(peerId, MODEL_PROTOCOL, enc.encode(JSON.stringify({ id: modelId, index })), 8_000);
       const got = frames[0];
       const mine = new Uint8Array(this.store.readChunk(modelId, index));
       if (!got || got.length !== mine.length || mine.length === 0) return false;
@@ -287,7 +287,7 @@ export class ModelService {
     const peers = [...entry.peerIds].filter((p) => connected.has(p));
     for (const peer of peers) {
       try {
-        const manFrames = await this.net.request(peer, MODEL_PROTOCOL, enc.encode(JSON.stringify({ id })));
+        const manFrames = await this.net.request(peer, MODEL_PROTOCOL, enc.encode(JSON.stringify({ id })), 12_000);
         const meta: ModelMeta = JSON.parse(dec.decode(manFrames[0]!));
         if (meta.id !== id) continue;
         this.store.beginDownload(meta);
@@ -297,7 +297,7 @@ export class ModelService {
           if (have.has(i)) continue;
           let chunk: Uint8Array | undefined;
           for (let attempt = 0; attempt < 3 && !chunk; attempt++) {
-            try { const frames = await this.net.request(peer, MODEL_PROTOCOL, enc.encode(JSON.stringify({ id, index: i }))); chunk = frames[0]; }
+            try { const frames = await this.net.request(peer, MODEL_PROTOCOL, enc.encode(JSON.stringify({ id, index: i })), 20_000); chunk = frames[0]; }
             catch { /* transient; retry, then fall through to the next peer */ }
           }
           if (!chunk) { complete = false; break; } // this peer stalled on a chunk; resume from another peer
