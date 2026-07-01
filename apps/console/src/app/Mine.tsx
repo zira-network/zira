@@ -785,6 +785,10 @@ export function Mine() {
         </div>
       </Card>
 
+      {/* Onboarding-critical: while the field model is downloading, mining shows 0 earnings. Explain the
+          exact phase so users don't think it's broken. Hidden once the node is holding+earning. */}
+      <MiningReadyBanner mining={mining} earning={(balanceUZIR ?? 0) > 0} />
+
       {/* Field convergence: the 3-contributor earning gate, the single fact that decides whether mining pays. */}
       <ConvergencePanel
         converged={convergedContributors}
@@ -1096,6 +1100,48 @@ function FieldModelsView({ models, recommendedId }: { models: FieldModel[]; reco
 
 function distributionPct(m: FieldModel): number {
   return Math.round(Math.max(0, Math.min(1, m.distributionProgress ?? (m.providers / Math.max(1, m.targetHosts ?? 1)))) * 100);
+}
+
+// Onboarding status banner for mining. A new user enables Mine, then wonders why they see 0 earnings for
+// the first few minutes. The truth is that the node must hold model bytes to be storage-vouched by a
+// coordinator, and that download is quiet. Surface exactly what phase the node is in so the user has a
+// concrete answer instead of "mining is broken". Hidden entirely when mining is off or already earning.
+function MiningReadyBanner({ mining, earning }: { mining: MiningStatus | null | undefined; earning: boolean }) {
+  if (!mining?.enabled || !mining.storageEnabled) return null;
+  // The largest known model that this node does not yet hold locally is the one it is trying to fetch.
+  const pending = (mining.known ?? []).filter((m) => !m.local && (m.meta.sizeBytes ?? 0) > 0);
+  const targetBytes = pending.reduce((n, m) => Math.max(n, m.meta.sizeBytes ?? 0), 0);
+  const used = mining.storageUsedBytes ?? 0;
+  const downloading = pending.length > 0 && used < targetBytes;
+  if (downloading) {
+    const pct = targetBytes > 0 ? Math.max(1, Math.min(99, Math.round((used / targetBytes) * 100))) : 0;
+    return (
+      <Card className="border-[color-mix(in_srgb,var(--indigo)_35%,transparent)]">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-text">Downloading the field model</div>
+            <div className="mt-1 text-xs text-muted">Your node is fetching the authorized model bytes it needs to earn. Earnings start once the download finishes and a coordinator verifies the copy (a further 30 to 60 seconds after that).</div>
+          </div>
+          <div className="shrink-0 rounded-lg border border-hairline bg-base px-3 py-2 text-center">
+            <div className="mono text-lg text-[var(--teal)]">{pct}%</div>
+            <div className="text-[11px] text-faint">{formatBytes(used)} / {formatBytes(targetBytes)}</div>
+          </div>
+        </div>
+        <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-base">
+          <div className="h-full bg-[var(--teal)] transition-[width]" style={{ width: pct + "%" }} />
+        </div>
+      </Card>
+    );
+  }
+  if (used > 0 && !earning) {
+    return (
+      <Card className="border-[color-mix(in_srgb,var(--indigo)_35%,transparent)]">
+        <div className="text-sm font-semibold text-text">Model ready. Waiting for a coordinator to verify storage.</div>
+        <div className="mt-1 text-xs text-muted">Coordinators probe storage every 20 seconds. Once yours is verified, they include you in the next signed heartbeat and your first earnings arrive within a minute.</div>
+      </Card>
+    );
+  }
+  return null;
 }
 
 function FounderStorage() {
