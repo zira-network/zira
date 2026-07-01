@@ -726,8 +726,8 @@ export class State {
         const score = accuracyScore(c.value, median);
         // Verifiable-work gate, scoped to the farmable liveness beacon. On FIELD_HEARTBEAT_SUBJECT a node
         // earns round emission only if a genesis master recently VOUCHED it (lastWorkEpoch): the master
-        // confirmed it is either a real, directly-reachable coordinating peer (liveness probe — baseline) or
-        // a storage-serving peer (random-chunk challenge — earns more via storageRewardMultiplier), or it did
+        // confirmed it is either a real, directly-reachable coordinating peer (liveness probe, baseline) or
+        // a storage-serving peer (random-chunk challenge, earns more via storageRewardMultiplier), or it did
         // a settled coordination payout. Genesis masters (bootstrap infrastructure) are always eligible. A
         // bare gossip heartbeat with no master vouch still converges for liveness and lifts ZTI but mints
         // nothing, so a node cannot farm emission without a master attesting it is a genuine participant. On
