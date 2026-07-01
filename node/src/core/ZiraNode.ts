@@ -29,7 +29,7 @@ import { startMiner } from "../provider/loop.js";
 import { type Envelope, envelopeId, type ProviderAnnounce, type QueryMsg, type AnswerMsg } from "./types.js";
 import type { ModelAnnounce } from "../models/types.js";
 import type { ZiraNetwork } from "../p2p/Network.js";
-import { topics as buildTopics, SNAPSHOT_PROTOCOL } from "../p2p/topics.js";
+import { topics as buildTopics, SNAPSHOT_PROTOCOL, LIVENESS_PROTOCOL } from "../p2p/topics.js";
 import { detectHardware } from "../hardware/detect.js";
 import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -605,6 +605,7 @@ export class ZiraNode {
     });
     // fast sync: a joining node adopts a finalized snapshot from a peer instead of replaying history
     this.net.handle(SNAPSHOT_PROTOCOL, () => this.serveSnapshot());
+    this.net.handle(LIVENESS_PROTOCOL, (req) => this.serveLiveness(req));
     this.net.onPeerConnect((peer) => {
       this.models.announceLocal();
       void this.models.reconcileStorage();
@@ -1107,21 +1108,31 @@ export class ZiraNode {
     if (this.storageProbeBusy) return;
     const me = this.state.accounts.get(this.identity.address);
     if (!(this.state.isGenesisMaster(this.identity.address) || (me?.isMaster ?? false))) return;  // only masters vouch
-    const modelId = this.models.localHeldModelId();
-    if (!modelId) { log.debug("storage-proof: no model held locally yet; skipping probe"); return; }
-    const peers = this.models.peersServing(modelId).slice(0, 16);   // bound work per round
-    if (peers.length === 0) { log.debug(`storage-proof: no peers advertising model ${modelId.slice(0, 12)} to probe yet`); return; }
     this.storageProbeBusy = true;
     try {
       const now = Date.now();
-      let verified = 0;
-      for (const { peerId, address } of peers) {
-        try { if (await this.models.verifyPeerStorage(peerId, modelId)) { this.verifiedMiners.set(address, now); verified++; } }
-        catch { /* unreachable peer: skip */ }
+      let live = 0, stored = 0;
+      // 1) COORDINATION baseline. Any directly-connected peer that answers a fresh liveness challenge is a
+      //    real, reachable, participating node. Mining/coordination alone earns the baseline emission — no
+      //    model download required — so a new user starts earning the moment they are a live peer of the
+      //    field. Bounded per round; each probe is timeout-guarded so a stalled peer never blocks the set.
+      for (const peerId of this.net.peers().slice(0, 24)) {
+        const addr = await this.verifyPeerLive(peerId);
+        if (addr && addr !== this.identity.address) { this.verifiedMiners.set(addr, now); live++; }
+      }
+      // 2) STORAGE serving (earns MORE via storageRewardMultiplier). Peers advertising the model that pass a
+      //    random-chunk challenge prove they actually hold+serve the bytes. Same freshness stamp; the extra
+      //    reward comes from their storage weight in the split. Only when we hold a model to probe against.
+      const modelId = this.models.localHeldModelId();
+      if (modelId) {
+        for (const { peerId, address } of this.models.peersServing(modelId).slice(0, 16)) {
+          try { if (await this.models.verifyPeerStorage(peerId, modelId)) { this.verifiedMiners.set(address, now); stored++; } }
+          catch { /* unreachable peer: skip */ }
+        }
       }
       // prune stale entries so the vouch set stays current and bounded
       for (const [a, ts] of this.verifiedMiners) if (now - ts > ZiraNode.VOUCH_FRESH_MS) this.verifiedMiners.delete(a);
-      if (verified > 0) log.info(`storage-proof: verified ${verified} peer(s) hold model ${modelId.slice(0, 12)} -> vouching in heartbeat`);
+      if (live > 0 || stored > 0) log.info(`vouch probe: ${live} live coordinating peer(s), ${stored} storage-serving -> vouching ${this.verifiedMiners.size} in heartbeat`);
     } finally {
       this.storageProbeBusy = false;
     }
@@ -1530,6 +1541,35 @@ export class ZiraNode {
   private readonly resyncStallMs = 30_000;     // finalizedEpoch must stay frozen this long to count as stalled
   private readonly resyncMinGap = 5;           // and the processed head must be at least this far ahead
   private readonly resyncCooldownMs = 90_000;  // and at most one resync attempt per this window
+
+  private liveNonce = 0;
+  /** Answer a liveness/coordination challenge: return our address + a signature over the master's nonce, so
+   * the master can confirm we are a real, directly-reachable, participating peer (the baseline coordination
+   * work that earns even without holding model bytes). */
+  private async *serveLiveness(req: Uint8Array): AsyncIterable<Uint8Array> {
+    let nonce = "";
+    try { nonce = String((JSON.parse(dec.decode(req)) as { nonce?: unknown }).nonce ?? "").slice(0, 96); } catch { /* empty nonce still signs */ }
+    yield enc.encode(JSON.stringify({
+      address: this.identity.address,
+      pubKey: this.identity.publicKey,
+      sig: edSign("zira-live:" + nonce, this.identity.privateKey),
+    }));
+  }
+
+  /** Probe a directly-connected peer's liveness. Returns its verified ZIR address, or null if it did not
+   * answer a fresh signed challenge. Bounded by the request timeout so a stalled peer never blocks. */
+  private async verifyPeerLive(peerId: string): Promise<string | null> {
+    const nonce = `${Date.now()}:${this.liveNonce++}:${peerId.slice(0, 10)}`;
+    try {
+      const frames = await this.net.request(peerId, LIVENESS_PROTOCOL, enc.encode(JSON.stringify({ nonce })), 8_000);
+      if (!frames[0]) return null;
+      const r = JSON.parse(dec.decode(frames[0])) as { address?: string; pubKey?: string; sig?: string };
+      if (!r.address || !r.pubKey || !r.sig) return null;
+      if (addressFromPubKey(r.pubKey) !== r.address) return null;
+      if (!edVerify("zira-live:" + nonce, r.sig, r.pubKey)) return null;
+      return r.address;
+    } catch { return null; }
+  }
 
   /** Serve our finalized state snapshot to a joining peer, with the finalized checkpoint it sits on. */
   private async *serveSnapshot(): AsyncIterable<Uint8Array> {

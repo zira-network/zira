@@ -310,20 +310,35 @@ export class Libp2pNetwork implements ZiraNetwork {
     });
   }
 
-  async request(peerIdStr: string, protocol: string, req: Uint8Array): Promise<Uint8Array[]> {
+  async request(peerIdStr: string, protocol: string, req: Uint8Array, timeoutMs = 25_000): Promise<Uint8Array[]> {
     if (!this.node) return [];
     const conn = this.node.getConnections().find((c) => c.remotePeer.toString() === peerIdStr);
     if (!conn) throw new Error("not connected to peer " + peerIdStr);
     const stream = await conn.newStream(protocol);
     const frames: Uint8Array[] = [];
-    await pipe(
+    // A peer can open the stream and then stall forever (accepts the request, never responds). Without a
+    // timeout the caller hangs indefinitely — this is exactly what froze the P2P model download at 0 B and
+    // never let it fall through to the URL fallback. Bound every request: on timeout, abort the stream and
+    // throw so the caller moves to the next peer / source.
+    const run = pipe(
       [req],
       (s) => lp.encode(s),
       stream,
       (s) => lp.decode(s),
       async (source) => { for await (const f of source) frames.push(f.subarray()); },
     );
-    return frames;
+    run.catch(() => {});   // a late error after a timeout-abort must not surface as an unhandled rejection
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error(`request to ${peerIdStr.slice(0, 8)} timed out after ${timeoutMs}ms`)), timeoutMs); });
+    try {
+      await Promise.race([run, timeout]);
+      return frames;
+    } catch (e) {
+      try { stream.abort(e as Error); } catch { /* best effort */ }
+      throw e;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   async dial(addr: string): Promise<void> {

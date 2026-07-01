@@ -14,8 +14,9 @@ export interface ZiraNetwork {
 
   /** Register a direct request/response protocol (used for peer to peer model transfer). */
   handle(protocol: string, handler: (req: Uint8Array) => AsyncIterable<Uint8Array>): void;
-  /** Send one request to a specific peer over a protocol and collect the response frames. */
-  request(peerId: string, protocol: string, req: Uint8Array): Promise<Uint8Array[]>;
+  /** Send one request to a specific peer over a protocol and collect the response frames. A stalled peer is
+   * abandoned after timeoutMs (default in the implementation) so a caller never hangs indefinitely. */
+  request(peerId: string, protocol: string, req: Uint8Array, timeoutMs?: number): Promise<Uint8Array[]>;
   /** Called with the peer id whenever a new peer connects (used to trigger fast sync). */
   onPeerConnect(cb: (peerId: string) => void): void;
   /** Dial a peer by multiaddr at runtime (used to connect to a node a user pasted in). */

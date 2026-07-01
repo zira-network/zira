@@ -725,12 +725,13 @@ export class State {
         if (!a.pubkey) a.pubkey = c.observer;
         const score = accuracyScore(c.value, median);
         // Verifiable-work gate, scoped to the farmable liveness beacon. On FIELD_HEARTBEAT_SUBJECT a node
-        // earns round emission and accrues master tenure only if it did real, on-ledger work recently (a
-        // settled coordination payout) — genesis masters (bootstrap infrastructure) are always eligible.
-        // Empty heartbeats still converge for liveness and lift ZTI but mint nothing and build no tenure,
-        // so a node cannot farm emission or vault to master standing without serving real demand. On real
-        // measurement subjects the accurate observation IS the work, so those earn directly (gate off).
-        // Full storage-possession proofs are a roadmap tightening.
+        // earns round emission only if a genesis master recently VOUCHED it (lastWorkEpoch): the master
+        // confirmed it is either a real, directly-reachable coordinating peer (liveness probe — baseline) or
+        // a storage-serving peer (random-chunk challenge — earns more via storageRewardMultiplier), or it did
+        // a settled coordination payout. Genesis masters (bootstrap infrastructure) are always eligible. A
+        // bare gossip heartbeat with no master vouch still converges for liveness and lifts ZTI but mints
+        // nothing, so a node cannot farm emission without a master attesting it is a genuine participant. On
+        // real measurement subjects the accurate observation IS the work, so those earn directly (gate off).
         const eligible = subject !== PROTOCOL.FIELD_HEARTBEAT_SUBJECT
           || this.isGenesisMaster(addr)
           || (a.lastWorkEpoch >= 0 && epoch - a.lastWorkEpoch <= PROTOCOL.WORK_VALIDITY_EPOCHS);
