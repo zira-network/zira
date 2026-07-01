@@ -317,7 +317,7 @@ export class Libp2pNetwork implements ZiraNetwork {
     const stream = await conn.newStream(protocol);
     const frames: Uint8Array[] = [];
     // A peer can open the stream and then stall forever (accepts the request, never responds). Without a
-    // timeout the caller hangs indefinitely — this is exactly what froze the P2P model download at 0 B and
+    // timeout the caller hangs indefinitely. This is exactly what froze the P2P model download at 0 B and
     // never let it fall through to the URL fallback. Bound every request: on timeout, abort the stream and
     // throw so the caller moves to the next peer / source.
     const run = pipe(

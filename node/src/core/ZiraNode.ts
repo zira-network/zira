@@ -1113,8 +1113,8 @@ export class ZiraNode {
       const now = Date.now();
       let live = 0, stored = 0;
       // 1) COORDINATION baseline. Any directly-connected peer that answers a fresh liveness challenge is a
-      //    real, reachable, participating node. Mining/coordination alone earns the baseline emission — no
-      //    model download required — so a new user starts earning the moment they are a live peer of the
+      //    real, reachable, participating node. Mining/coordination alone earns the baseline emission (no
+      //    model download required), so a new user starts earning the moment they are a live peer of the
       //    field. Bounded per round; each probe is timeout-guarded so a stalled peer never blocks the set.
       for (const peerId of this.net.peers().slice(0, 24)) {
         const addr = await this.verifyPeerLive(peerId);
