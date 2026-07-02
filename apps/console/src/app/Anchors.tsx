@@ -118,7 +118,7 @@ export function Anchors() {
       {/* Anchor event (spec §2.1): the USDT contribute section is shown ONLY here on the Anchors page, and
           ONLY while the steward has the event enabled. When the steward turns it off, it disappears with no
           trace for every user. */}
-      {anchorEvent.enabled && <AnchorEventContribute anchors={anchors} address={address} />}
+      {anchorEvent.enabled && (anchorEvent.evm || anchorEvent.tron) && <AnchorEventContribute anchors={anchors} address={address} />}
 
       {error && (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[color-mix(in_srgb,var(--danger)_35%,transparent)] bg-[color-mix(in_srgb,var(--danger)_8%,transparent)] p-3 text-xs text-muted">

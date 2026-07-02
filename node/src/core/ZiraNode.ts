@@ -1178,16 +1178,22 @@ export class ZiraNode {
     if (payees.length === 0) return;
     const per = Math.floor(FIELD_PARTICIPATION_BUDGET_UZIR / payees.length);
     if (per <= 0) return;
-    const needed = payees.length * (per + PROTOCOL.BASE_FEE_UZIR);
+    // Whole budget (per*N + remainder) + one base fee per payee.
+    const needed = FIELD_PARTICIPATION_BUDGET_UZIR + payees.length * PROTOCOL.BASE_FEE_UZIR;
     if (this.state.balanceOf(this.identity.address) < needed) return; // not enough base emission accrued yet
     this.lastParticipationBucket = bucket;
     let nonce = this.state.provisionalNonce(this.identity.address);
     const tag = String(bucket);
+    // Distribute the whole pool exactly: the floor-division remainder goes to the first (sorted) payee, so
+    // `sum(amounts) == per * payees.length + remainder == budget` and no dust is left undistributed.
+    let remainder = FIELD_PARTICIPATION_BUDGET_UZIR - per * payees.length;
     let paid = 0;
     for (const to of payees) {
+      const amt = per + (remainder > 0 ? remainder : 0);
+      remainder = 0;
       const tx = signTx({
         network: this.genesis.network, from: this.identity.address, fromPubKey: this.identity.publicKey, to,
-        amountUZIR: per, feeUZIR: PROTOCOL.BASE_FEE_UZIR, nonce: nonce++, kind: "agent_spend",
+        amountUZIR: amt, feeUZIR: PROTOCOL.BASE_FEE_UZIR, nonce: nonce++, kind: "agent_spend",
         parents: [], timestamp: now, memo: `field participation ${tag}`,
       }, this.identity.privateKey);
       if (this.submitTx(tx).accepted) paid++;
