@@ -308,14 +308,17 @@ export const useZira = create<ZiraState>((set, get) => ({
       };
       // Node-custody wallet: on a local node, keep the active wallet pinned to the node's mining identity
       // (covers the case where the node was not reachable at init and only came up now). Adopt the key in
-      // memory once so signed actions work. The wallet the user sees is exactly the wallet the node earns into.
-      if (isLocalNode() && st.address) {
-        if (!Wallet.isUnlocked()) {
-          try { const w = await NodeApi.walletExport(); if (w?.privateKey) Wallet.adoptInMemory(w.privateKey); } catch { /* retry next poll */ }
-        }
+      // memory once so signed actions work. IMPORTANT: only flip to nodeWallet once the key is actually
+      // adopted (unlocked) — otherwise a transient /wallet/export failure would leave a node-wallet card
+      // with no unlock path and a send that can never sign. If the adopt fails we leave the wallet state
+      // untouched and simply retry on the next poll.
+      if (isLocalNode() && st.address && !Wallet.isUnlocked()) {
+        try { const w = await NodeApi.walletExport(); if (w?.privateKey) Wallet.adoptInMemory(w.privateKey); } catch { /* retry next poll */ }
+      }
+      if (isLocalNode() && st.address && Wallet.isUnlocked()) {
         patch.address = st.address;
         patch.hasWallet = true;
-        patch.unlocked = Wallet.isUnlocked();
+        patch.unlocked = true;
         patch.nodeWallet = true;
         if (typeof st.balanceUZIR === "number") patch.balanceUZIR = st.balanceUZIR;
       }

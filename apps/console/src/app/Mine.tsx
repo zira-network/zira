@@ -544,19 +544,25 @@ export function Mine() {
   useEffect(() => {
     if (!client || !address) { setEarned24hUZIR(0); return; }
     let live = true;
-    client.getTxHistory(address, 200)
-      .then((h) => {
-        if (!live) return;
-        const now = Date.now();
-        const total = h.filter((tx) => (tx.to === address || tx.kind === "reward" || tx.kind === "reserve_grant")
-          && tx.kind !== "bond_burn" && (tx.amountUZIR ?? 0) > 0
-          && typeof tx.timestamp === "number" && now - tx.timestamp <= 24 * 60 * 60 * 1000)
-          .reduce((s, tx) => s + (tx.amountUZIR ?? 0), 0);
-        setEarned24hUZIR(total);
-      })
-      .catch(() => { if (live) setEarned24hUZIR(0); });
-    return () => { live = false; };
-  }, [client, address, balanceUZIR]);
+    const pull = () => {
+      client.getTxHistory(address, 200)
+        .then((h) => {
+          if (!live) return;
+          const now = Date.now();
+          const total = h.filter((tx) => (tx.to === address || tx.kind === "reward" || tx.kind === "reserve_grant")
+            && tx.kind !== "bond_burn" && (tx.amountUZIR ?? 0) > 0
+            && typeof tx.timestamp === "number" && now - tx.timestamp <= 24 * 60 * 60 * 1000)
+            .reduce((s, tx) => s + (tx.amountUZIR ?? 0), 0);
+          setEarned24hUZIR(total);
+        })
+        .catch(() => { /* keep last value */ });
+    };
+    pull();
+    // Refresh on a slow, fixed cadence instead of on every balance tick, so a steadily-earning miner does
+    // not re-pull the full history several times a second.
+    const t = setInterval(pull, 30_000);
+    return () => { live = false; clearInterval(t); };
+  }, [client, address]);
   const [busy, setBusy] = useState(false);
   const [hardwareBusy, setHardwareBusy] = useState(false);
   const [advanced, setAdvanced] = useState(false);
