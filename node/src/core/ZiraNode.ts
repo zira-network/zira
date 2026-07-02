@@ -81,6 +81,16 @@ const AUTONOMOUS_RESONANCE_TASK_UZIR = envInt("ZIRA_AUTONOMOUS_RESONANCE_TASK_UZ
 // steward-ops share). It moves already-allocated founder-ops ZIR — it mints no new ZIR, so emission and
 // the supply cap are untouched. Set to 0 to disable automatic coordination payouts.
 const AUTONOMOUS_COORDINATION_REWARD_UZIR = envInt("ZIRA_AUTONOMOUS_COORDINATION_REWARD_UZIR", 500_000); // 0.5 ZIR default
+// Field participation pool. Each cycle the network settler splits this budget among the miners it has
+// VERIFIED are genuinely participating this window (a live, directly-reachable coordinating peer, or a
+// storage-serving peer that passed a random-chunk challenge — see runStorageProbe), paying from the base
+// emission it earns. This is what makes "mining is on" actually earn: a real, connected, contributing node
+// is paid for participating even when it does not win a coordination answer. A FIXED per-cycle pool split
+// among participants means more nodes dilute each share (so spinning up sybils just splits the same pool)
+// and bounds the settler's spend. One settler funds it, so the payout txs are deterministic and finality
+// holds. Answering coordination queries (the 77% split) still earns MORE, on top of this. Set 0 to disable.
+const FIELD_PARTICIPATION_BUDGET_UZIR = envInt("ZIRA_FIELD_PARTICIPATION_BUDGET_UZIR", 2_000_000); // 2 ZIR/cycle pool
+const FIELD_PARTICIPATION_MAX_PAYEES = envInt("ZIRA_FIELD_PARTICIPATION_MAX_PAYEES", 64);
 // Field heartbeat: how often a contributing (mining or storage) node attests it is up + serving, so the
 // PoR field forms Locks and the round emission flows to contributors. Frequent enough that every
 // contributor always has a fresh in-window observation. This is the inference-free "mining/storage earns"
@@ -1067,7 +1077,7 @@ export class ZiraNode {
       this.seedAnchorResonators();
     }
     // task reaper: expire undelivered tasks, auto-release silently-verified ones.
-    if (now - this.lastReapAt >= this.opts.taskReapMs) { this.lastReapAt = now; this.reapTasks(now); this.coordinateAutonomousResonance(now); }
+    if (now - this.lastReapAt >= this.opts.taskReapMs) { this.lastReapAt = now; this.reapTasks(now); this.coordinateAutonomousResonance(now); this.settleFieldParticipation(now); }
     // Field heartbeat: contributing (mining/storage) nodes attest participation so PoR Locks form and the
     // round emission flows to them (storage-weighted). Self-throttled to FIELD_HEARTBEAT_INTERVAL_MS.
     this.contributeFieldHeartbeat(now);
@@ -1145,7 +1155,45 @@ export class ZiraNode {
     return out;
   }
   private lastAutonomousResonanceBucket = -1;
+  private lastParticipationBucket = -1;
   private lastHeartbeatBucket = -1;
+
+  /**
+   * Field participation payout. Once per cycle the network settler splits FIELD_PARTICIPATION_BUDGET_UZIR
+   * among the miners it has VERIFIED are genuinely participating (freshVouchedMiners: a live, reachable
+   * coordinating peer, or a storage-serving peer that passed a chunk challenge). This is what makes turning
+   * mining ON actually earn: a real, connected, contributing node is paid for taking part even when it does
+   * not win a coordination answer. Paid from the settler's base emission as ordinary transfers. One settler
+   * funds it, so the txs are a single deterministic set and finality never diverges. Genesis masters (they
+   * already earn base emission) and the settler itself are excluded.
+   */
+  private settleFieldParticipation(now: number): void {
+    if (FIELD_PARTICIPATION_BUDGET_UZIR <= 0 || !this.isNetworkSettler()) return;
+    const bucket = Math.floor(now / AUTONOMOUS_RESONANCE_CYCLE_MS);
+    if (this.lastParticipationBucket === bucket) return;
+    const payees = this.freshVouchedMiners(now)
+      .filter((a) => /^zir1[0-9a-z]{6,}$/.test(a) && a !== this.identity.address && !this.state.isGenesisMaster(a))
+      .sort()
+      .slice(0, FIELD_PARTICIPATION_MAX_PAYEES);
+    if (payees.length === 0) return;
+    const per = Math.floor(FIELD_PARTICIPATION_BUDGET_UZIR / payees.length);
+    if (per <= 0) return;
+    const needed = payees.length * (per + PROTOCOL.BASE_FEE_UZIR);
+    if (this.state.balanceOf(this.identity.address) < needed) return; // not enough base emission accrued yet
+    this.lastParticipationBucket = bucket;
+    let nonce = this.state.provisionalNonce(this.identity.address);
+    const tag = String(bucket);
+    let paid = 0;
+    for (const to of payees) {
+      const tx = signTx({
+        network: this.genesis.network, from: this.identity.address, fromPubKey: this.identity.publicKey, to,
+        amountUZIR: per, feeUZIR: PROTOCOL.BASE_FEE_UZIR, nonce: nonce++, kind: "agent_spend",
+        parents: [], timestamp: now, memo: `field participation ${tag}`,
+      }, this.identity.privateKey);
+      if (this.submitTx(tx).accepted) paid++;
+    }
+    if (paid > 0) log.info(`field participation payout: ${paid} contributing miner(s) x ${per} uZIR (bucket ${tag})`);
+  }
 
   /**
    * Field heartbeat (the network-liveness beacon). A contributing node — a genesis master, or any node that
