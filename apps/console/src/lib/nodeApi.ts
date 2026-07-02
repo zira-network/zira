@@ -293,6 +293,8 @@ export const NodeApi = {
   submitAnchorActivate: (tx: SignedTx) => rpcPost<{ accepted: boolean; reason?: string }>("/anchors/activate", { tx }),
   // owner-authorized position transfer: a SINGLE or BATCH of positions moved in one signed tx
   submitAnchorPositionTransfer: (tx: SignedTx) => rpcPost<{ accepted: boolean; reason?: string }>("/anchors/position-transfer", { tx }),
+  // owner opens/closes one or more positions for user contributions
+  submitAnchorSetContributions: (tx: SignedTx) => rpcPost<{ accepted: boolean; reason?: string }>("/anchors/set-contributions", { tx }),
 
   // steward (founder) transfers positions it owns out: single (seatId) or batch (seatIds) in one op
   anchorTransferPositions: (seatIds: string[], to: string) => rpcPost<AnchorPositionTransferResult>("/anchors/transfer-positions", { seatIds, to }),

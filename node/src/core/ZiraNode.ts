@@ -63,13 +63,11 @@ function envInt(name: string, fallback: number): number {
   return Number.isInteger(n) && n > 0 ? n : fallback;
 }
 
-// Master-created earning txs (storage_attest credit + autonomous coordination payout from genesis masters)
-// are OFF by default. They are created continuously per-master from local soft state and, in practice,
-// make the per-epoch state diverge across masters (different masters include slightly different tx sets per
-// epoch), which breaks quorum finality (it freezes once the chain catches up to real time). Until the
-// credit is carried deterministically inside the heartbeat observation (verified identically by every node),
-// keep these off so finality stays byte-identical and real-time. The founder/steward path is unaffected.
-const MASTER_EARN_TX = (process.env.ZIRA_MASTER_EARN_TX ?? "0") === "1";
+// Autonomous-coordination payouts are created by a SINGLE network settler (isNetworkSettler): the first
+// genesis master on mainnet, the founder on devnet/test. One funder means one deterministic tx set per epoch,
+// so masters never diverge and quorum finality stays byte-identical. If EVERY master minted payout txs from
+// its own soft state, the per-epoch tx sets would differ and freeze finality — which is why settling is
+// funnelled to one node rather than spread across the master set.
 const AUTONOMOUS_RESONATOR_DELIVER_MS = envMs("ZIRA_AUTONOMOUS_RESONATOR_DELIVER_MS", 10_000);
 const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS", 5 * 60_000);
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
@@ -1286,11 +1284,12 @@ export class ZiraNode {
    */
   private settleAutonomousCoordination(resonatorId: string, bucket: number): void {
     if (AUTONOMOUS_COORDINATION_REWARD_UZIR <= 0) return;
-    // The founder/steward always may settle. A genesis master may too, but ONLY when master-earn txs are
-    // enabled — by default they are off, because master-created payout txs diverge per-epoch across masters
-    // and freeze quorum finality. The founder/steward path stays available (single funder = deterministic).
-    const isMasterFunder = this.state.isGenesisMaster(this.identity.address);
-    if (this.identity.address !== this.genesis.founder && !(isMasterFunder && MASTER_EARN_TX)) return;
+    // Exactly ONE node settles autonomous coordination — the network settler — so the payout transactions are
+    // created by a single funder and never diverge across masters (which would freeze quorum finality). On
+    // mainnet that funder is the first genesis master (an always-on, keyless coordinator that pays from the
+    // base emission it earns); on devnet/test it is the founder. Every other node earns by ANSWERING these
+    // queries, never by settling. This is what lets miners earn coordination pay with no steward online.
+    if (!this.isNetworkSettler()) return;
     const queryId = this.autonomousResonanceQueryId(resonatorId, bucket);
     if (this.settledCoordinationQueries.has(queryId)) return;
     const raw = this.soft.answers.get(queryId) ?? [];
@@ -1299,7 +1298,10 @@ export class ZiraNode {
       if (raw.length > 0) log.debug(`autonomous coordination: ${queryId.slice(0, 16)} has ${raw.length} answer(s), ${answers.length} model-backed; need ${AUTONOMOUS_RESONANCE_MIN_ANSWERS} to pay`);
       return;
     }
-    const result = this.settleQueryCoordination(queryId, AUTONOMOUS_COORDINATION_REWARD_UZIR);
+    // The resonator that drove this query is autonomous AI-to-AI work owned by a user, so its owner earns the
+    // resonator-pool slice of the settlement (instead of the shared pool wallet). Miners still earn the 77%.
+    const owner = this.soft.resonators.get(resonatorId)?.owner;
+    const result = this.settleQueryCoordination(queryId, AUTONOMOUS_COORDINATION_REWARD_UZIR, { poolBeneficiary: owner });
     if (result.ok) {
       this.settledCoordinationQueries.add(queryId);
       // bound the dedup set: keep only the most recent ids (autonomous queries are bucketed, so this is
@@ -1320,12 +1322,27 @@ export class ZiraNode {
   }
 
   /**
-   * The subset of eligible resonators THIS node funds. The founder/steward drives all of them; a genesis
-   * master drives only its own shard (resonator hashed to this master's index in the genesis master set),
-   * so the masters split the work and never settle the same query twice. Any other node drives none.
+   * The single node that funds and settles autonomous-coordination payouts. Keeping it to ONE funder makes
+   * the payout transactions deterministic (like the steward path) so no two masters ever create conflicting
+   * payout txs and quorum finality never diverges. On mainnet (a defined genesis master set) that funder is
+   * the FIRST genesis master — an always-on, keyless coordinator that pays miners and resonator owners from
+   * the base emission it earns, so earning works with no steward online. On devnet/test (no master set) the
+   * founder settles. Every other node earns by answering the resonance queries, never by settling.
+   */
+  private isNetworkSettler(): boolean {
+    const masters = this.genesis.masters ?? [];
+    if (masters.length > 0) return masters[0]!.address === this.identity.address;
+    return this.identity.address === this.genesis.founder;
+  }
+
+  /**
+   * The subset of eligible resonators THIS node drives (publishes resonance queries for). The network settler
+   * drives all of them (it is the sole settler); every other genesis master drives only its own shard so the
+   * queries keep flowing even when the settler is briefly busy. Publishing is idempotent (queries dedupe by
+   * id), and only the settler pays, so redundant driving never double-settles. Non-master nodes drive none.
    */
   private autonomousResonanceDriven(eligible: Resonator[]): Resonator[] {
-    if (this.identity.address === this.genesis.founder) return eligible;
+    if (this.isNetworkSettler()) return eligible;
     const masters = (this.genesis.masters ?? []).map((m) => m.address);
     const idx = masters.indexOf(this.identity.address);
     if (idx < 0 || masters.length === 0) return [];
@@ -1793,7 +1810,7 @@ export class ZiraNode {
    * emission and the supply cap are untouched. Founder-gated at the RPC layer (the funding wallet is the
    * node identity, which must hold the budget). Returns the split.
    */
-  settleQueryCoordination(queryId: string, budgetUZIR: number): { ok: boolean; reason?: string; payouts?: { address: string; amountUZIR: number }[]; networkUZIR?: number; resonatorPoolUZIR?: number; burnUZIR?: number; confidenceScore?: number } {
+  settleQueryCoordination(queryId: string, budgetUZIR: number, opts: { poolBeneficiary?: string } = {}): { ok: boolean; reason?: string; payouts?: { address: string; amountUZIR: number }[]; networkUZIR?: number; resonatorPoolUZIR?: number; burnUZIR?: number; confidenceScore?: number } {
     const query = this.soft.queries.get(queryId);
     const domain: Domain = query?.domain ?? "general";
     const answers = this.soft.answers.get(queryId) ?? [];
@@ -1821,11 +1838,16 @@ export class ZiraNode {
     const split = settleCoordination(budgetUZIR, contributions);
     const wallets = settlementWalletsFor(this.genesis.network);
     const tag = queryId.slice(0, 12);
+    // The resonator-pool slice normally accrues to the shared pool wallet, but for autonomous coordination the
+    // caller passes the driving resonator's OWNER, so the owner of that autonomous agent earns the pool slice
+    // directly (its resonator did the coordination work). Guard it to a real, non-funder address.
+    const poolTarget = (opts.poolBeneficiary && /^zir1[0-9a-z]{6,}$/.test(opts.poolBeneficiary))
+      ? opts.poolBeneficiary : wallets.resonatorPool;
     // The protocol slices (§9): network wallet, resonator pool. The funder is the asker; when a target
     // equals the funder the slice simply stays put, so we skip that transfer.
     const protocolTransfers: { to: string; amountUZIR: number; memo: string }[] = [];
     if (split.networkUZIR > 0 && wallets.network !== funder.address) protocolTransfers.push({ to: wallets.network, amountUZIR: split.networkUZIR, memo: `coordination network ${tag}` });
-    if (split.resonatorPoolUZIR > 0 && wallets.resonatorPool !== funder.address) protocolTransfers.push({ to: wallets.resonatorPool, amountUZIR: split.resonatorPoolUZIR, memo: `coordination resonator-pool ${tag}` });
+    if (split.resonatorPoolUZIR > 0 && poolTarget !== funder.address) protocolTransfers.push({ to: poolTarget, amountUZIR: split.resonatorPoolUZIR, memo: `coordination resonator-pool ${tag}` });
     const payoutTxs = split.payouts.filter((p) => p.amountUZIR > 0).length;
     const willBurn = split.burnUZIR > 0;
     // Every outgoing tx (payouts + protocol transfers + the burn) carries one base fee; the funder must
@@ -1925,7 +1947,7 @@ export class ZiraNode {
     return {
       // Release version, exposed so the Console can negotiate features against older nodes (upgrade
       // without ruptures). Tracks the node package version / installer release.
-      version: "1.9.15",
+      version: "1.9.17",
       network: this.genesis.network,
       phase: "live",
       providersOnline: this.soft.onlineProviders(now).length,

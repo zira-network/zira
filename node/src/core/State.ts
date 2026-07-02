@@ -90,6 +90,9 @@ export class State {
     }
   }
   lastProcessedEpoch: number;
+  // The last epoch base emission has been credited through. Advances deterministically with processing so
+  // supply.emitted is a pure function of the epoch reached (see emitBaseThrough). Snapshot-persisted.
+  private lastEmittedEpoch: number;
   /**
    * Fast-sync convergence floor. -1 except on a node that ADOPTED a verified peer snapshot, where it is
    * set to the adopted epoch. While set, ingest refuses to POOL any event at or below it (their effects
@@ -128,6 +131,7 @@ export class State {
     this.supply = { ...seeded.supply };
     this.loadGenesisAnchors(genesis);
     this.lastProcessedEpoch = epochOf(genesis.timestamp);
+    this.lastEmittedEpoch = epochOf(genesis.timestamp);
   }
 
   /**
@@ -320,6 +324,22 @@ export class State {
       seat.listedPriceUZIR = undefined;
       seat.listedAt = undefined;
       applyFee();
+      return true;
+    }
+
+    if (tx.kind === "anchor_set_contributions" && payload.anchor === "set_contributions") {
+      // The anchor OWNER opens or closes one or more of their positions for user contributions. Owner-only,
+      // per seat; a non-owned or wrong-owner seat is silently skipped. Deterministic (fields are in the tx).
+      const { seatIds, open } = payload.data;
+      if (!Array.isArray(seatIds) || seatIds.length === 0 || seatIds.length > 64) return true;
+      let changed = false;
+      for (const seatId of seatIds) {
+        const seat = this.anchors.get(String(seatId));
+        if (!seat || seat.owner !== tx.from) continue;
+        seat.contributionsOpen = !!open;
+        changed = true;
+      }
+      if (changed) applyFee();
       return true;
     }
 
@@ -617,10 +637,17 @@ export class State {
     this.record({ ...tx, committedEpoch: epoch });
   }
 
-  /** Proof of Resonance over the window: seal Locks, update ZTI, mint rewards. Deterministic. */
+  /** Proof of Resonance over the window: seal Locks, update ZTI. Base emission is credited separately in
+   *  emitBaseThrough (a pure function of the epoch, independent of observations). Deterministic. */
   private runField(epoch: number): void {
+    // Base per-epoch emission runs FIRST, and unconditionally: it must not depend on the observation window
+    // (an empty or gossip-lagged window must not change how much was emitted), or supply.emitted would differ
+    // across nodes and fork the chain. See emitBaseThrough — it catches up every epoch since the last emission
+    // so the empty-epoch fast-forward and any per-node skew never leave a gap.
+    this.emitBaseThrough(epoch);
+
     // Read a SETTLED trailing window (see SETTLE_ROUNDS): the evidence ends SETTLE_ROUNDS epochs back so the
-    // converged contributor set — and thus the reward split and state root — is identical on every node.
+    // converged contributor set — and thus ZTI updates — is identical on every node.
     const head = epoch - SETTLE_ROUNDS;
     const minEpoch = head - WINDOW_ROUNDS + 1;
     const inWindow = [...this.obsPool.values()].filter((o) => {
@@ -636,20 +663,13 @@ export class State {
       bySubject.set(o.subject, arr);
     }
 
-    // Base per-epoch emission is credited to the fixed genesis-master set in the master-emission block AFTER
-    // this convergence loop, never to the live-observed contributor set. Distributing to whoever a node
-    // happened to observe this window (and scaling the budget by the node-local converged-subject count via a
-    // demand multiplier) made supply.emitted and per-account balances depend on gossip propagation, so the
-    // state root diverged across masters and quorum finality stalled. Crediting the fixed masters by a budget
-    // that is a pure function of supply.emitted makes every node compute an identical root. Miners and
-    // resonators do NOT earn from base emission; they earn from coordination settlement (the 77 percent
-    // split, settled through the tx pool) and tasks, which is real paid work. The loop below still seals Locks
-    // and updates ZTI (soft state, not in the state root) so trust and master admission keep working.
+    // Base emission was already credited above (emitBaseThrough), independent of these observations. The loop
+    // below only seals Locks and updates ZTI (soft state, not in the state root) so trust and master admission
+    // keep working. Miners and resonators earn from coordination settlement and tasks, never from base emission.
 
     // Walk subjects in a deterministic (sorted) order. Observer ZTI
-    // is EMA-updated as the loop runs, so iterating in Map/gossip-arrival order would make emission and
-    // trust depend on ingest order and diverge state roots across nodes. Sorting by subject fixes both.
-    let sealedAny = false; // did the field converge on at least one subject this epoch (gate for base emission)
+    // is EMA-updated as the loop runs, so iterating in Map/gossip-arrival order would make trust depend on
+    // ingest order and diverge across nodes. Sorting by subject fixes that.
     const subjectsSorted = [...bySubject.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
     for (const [subject, obsAll] of subjectsSorted) {
       // latest observation per observer, deterministic
@@ -691,7 +711,6 @@ export class State {
       // one lock per subject per epoch
       if (this.locks.get(subject)?.epoch === epoch) continue;
       this.locks.set(subject, lock);
-      sealedAny = true;
       this.lockLog.unshift(lock);
       if (this.lockLog.length > State.LOCK_CAP) this.lockLog.pop();
 
@@ -772,25 +791,36 @@ export class State {
       }
     }
 
-    // Base per-epoch emission: credit the fixed genesis-master set deterministically. The budget is a pure
-    // function of supply.emitted (no demand multiplier, which depended on the node-local converged-subject
-    // count), and the recipients are the genesis masters from the genesis doc, so supply.emitted and every
-    // master balance grow identically on every node and the state root stays byte-identical for quorum
-    // finality. Split by floor division in sorted address order; the sub-uZIR remainder is dropped, which is
-    // deterministic. Emission runs only on epochs where the field actually converged (sealedAny), so idle
-    // spans and the empty-epoch fast-forward mint nothing and stay state-neutral.
+  }
+
+  /**
+   * Deterministic base emission. Credits the fixed genesis-master set a per-epoch reward for every epoch from
+   * the last emission up to `epoch`, so supply.emitted is a PURE FUNCTION of the epoch reached — identical on
+   * every node regardless of which epochs each one skipped in the empty-epoch fast-forward or which heartbeats
+   * it had observed. This is the property finality needs: two nodes at the same epoch always hold the same
+   * emitted and the same master balances. Catching up the whole span (rather than emitting one epoch inside
+   * runField) is what closes the gap the fast-forward opens. Reward per epoch is perRoundReward(emitted) with
+   * NO demand multiplier (that depended on the observed subject count and forked the chain). Miners and
+   * resonators do not earn base emission; they earn from coordination settlement and tasks. Bounded by the
+   * earned-share cap. One aggregated ledger entry per master per catch-up keeps history lean.
+   */
+  private emitBaseThrough(epoch: number): void {
     const masters = [...this.genesisMasters].sort();
-    if (sealedAny && masters.length > 0) {
+    if (masters.length === 0) { this.lastEmittedEpoch = Math.max(this.lastEmittedEpoch, epoch); return; }
+    const cap = PROTOCOL.MAX_SUPPLY_UZIR * PROTOCOL.EARNED_SHARE;
+    const credited = new Map<Address, number>();
+    for (let e = this.lastEmittedEpoch + 1; e <= epoch; e++) {
       const per = Math.floor(perRoundReward(this.supply.emitted, 1) / masters.length);
-      if (per > 0) {
-        for (const m of masters) {
-          if (this.supply.emitted + per > PROTOCOL.MAX_SUPPLY_UZIR * PROTOCOL.EARNED_SHARE) break;
-          this.acct(m).balance += per;
-          this.supply.emitted += per;
-          this.record(this.rewardEntry(m, per, PROTOCOL.FIELD_HEARTBEAT_SUBJECT, epoch));
-        }
+      if (per <= 0) break;                                          // schedule exhausted / too small to split
+      if (this.supply.emitted + per * masters.length > cap) break;  // would cross the earned-share cap
+      for (const m of masters) {
+        this.acct(m).balance += per;
+        this.supply.emitted += per;
+        credited.set(m, (credited.get(m) ?? 0) + per);
       }
     }
+    this.lastEmittedEpoch = Math.max(this.lastEmittedEpoch, epoch);
+    for (const [m, amt] of credited) if (amt > 0) this.record(this.rewardEntry(m, amt, PROTOCOL.FIELD_HEARTBEAT_SUBJECT, epoch));
   }
 
   private rewardEntry(to: Address, amount: number, subject: string, epoch: number): LedgerEntry {
@@ -944,6 +974,7 @@ export class State {
   snapshot(): object {
     return {
       lastProcessedEpoch: this.lastProcessedEpoch,
+      lastEmittedEpoch: this.lastEmittedEpoch,
       accounts: [...this.accounts.values()],
       founders: this.activeFounderAddresses(),
       supply: this.supply,
@@ -954,6 +985,9 @@ export class State {
   loadSnapshot(snap: any): void {
     if (!snap) return;
     this.lastProcessedEpoch = snap.lastProcessedEpoch ?? this.lastProcessedEpoch;
+    // Restore the emission cursor. Fall back to lastProcessedEpoch for snapshots written before this field
+    // existed, so emission neither double-counts nor re-runs the whole history after a restore.
+    this.lastEmittedEpoch = snap.lastEmittedEpoch ?? this.lastProcessedEpoch;
     this.setAuthorizedFounders(Array.isArray(snap.founders) ? snap.founders : (this.genesis.founders ?? [this.founder]));
     if (Array.isArray(snap.accounts)) {
       this.accounts.clear();

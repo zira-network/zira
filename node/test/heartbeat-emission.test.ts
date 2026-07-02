@@ -93,12 +93,23 @@ test("no genesis masters: converging heartbeats mint NOTHING", () => {
   assert.equal(s.balanceOf(m1.address), 0);
 });
 
-test("a single contributor seals no Lock and mints nothing (needs >= MIN_OBSERVATIONS)", () => {
+test("base emission accrues to the masters every epoch, independent of convergence", () => {
+  // A single observer seals no Lock (needs >= MIN_OBSERVATIONS), but base emission is a per-epoch schedule to
+  // the fixed masters that does NOT depend on the observation window — so the masters still earn, deterministically.
   const s = new State(masterGenesis);
   const e = epochOf(GTS) + 1;
   assert.equal(s.ingestObservation(heartbeat(m1, 50, e * EPOCH_MS + 10)).ok, true);
-  const before = s.supply.emitted;
   s.advance(at(e));
-  assert.equal(s.supply.emitted, before, "one observer is below MIN_OBSERVATIONS, so no Lock and no mint");
-  assert.equal(s.balanceOf(m1.address), 0);
+  assert.equal(s.valueOf("ZIRA_FIELD_HEARTBEAT"), null, "one observer seals no Lock");
+  assert.ok(s.supply.emitted > 0, "base emission still accrues to the masters (not Lock-gated)");
+  assert.equal(s.balanceOf(m1.address), s.balanceOf(m2.address), "masters earn an equal base split");
+});
+
+test("with no observations at all, base emission still accrues to the masters", () => {
+  // The purest determinism check: emission is a function of the epoch reached, not of any observation.
+  const s = new State(masterGenesis);
+  const e = epochOf(GTS) + 1;
+  s.advance(at(e));
+  assert.ok(s.supply.emitted > 0, "masters earn base emission with zero observations");
+  assert.equal(s.balanceOf(m1.address), s.balanceOf(m3.address), "equal split across masters");
 });

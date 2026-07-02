@@ -147,6 +147,7 @@ export type TxKind =
   | "transfer" | "reward" | "agent_spend" | "bond_post" | "bond_return" | "bond_burn" | "reserve_grant" | "founder_delegate" | "founder_revoke"
   | "anchor_claim" | "anchor_transfer" | "anchor_list" | "anchor_delist" | "anchor_code_edit"
   | "anchor_vest_start" | "anchor_vest_release" | "anchor_activate" | "anchor_position_transfer"
+  | "anchor_set_contributions"
   | "storage_attest";
 export interface TxBody {
   network: NetworkId; from: Address; fromPubKey: PublicKey; to: Address;
@@ -261,12 +262,17 @@ export interface Anchor {
   status: AnchorStatus;
   claimedAt?: number;
   activatedAt?: number;
+  /** Owner-controlled: when true, the owner has opened this position for user contributions (others may
+   *  contribute compute/storage under it). Default closed. Toggled by the owner via anchor_set_contributions. */
+  contributionsOpen?: boolean;
 }
 export interface AnchorClaimPayload { seatId: string; code: string; }
 export interface AnchorTransferPayload { seatId: string; to: Address; }
 export interface AnchorListPayload { seatId: string; priceUZIR: uZIR; }
 export interface AnchorDelistPayload { seatId: string; }
 export interface AnchorCodeEditPayload { seatId: string; codeHash: Hex; }
+/** Owner opens or closes one or more of their anchor positions for user contributions. */
+export interface AnchorSetContributionsPayload { seatIds: string[]; open: boolean; }
 /** Begin a one-year linear vesting of `totalUZIR` to `beneficiary` for a seat. */
 export interface AnchorVestStartPayload { seatId: string; beneficiary: Address; totalUZIR: uZIR; startAt: number; durationMs?: number; }
 /** Record that `releasedUZIR` cumulative has now been released for a seat's vesting schedule. */
@@ -293,6 +299,7 @@ export type AnchorTxPayload =
   | { anchor: "vest_start"; data: AnchorVestStartPayload }
   | { anchor: "vest_release"; data: AnchorVestReleasePayload }
   | { anchor: "position_transfer"; data: AnchorPositionTransferPayload }
+  | { anchor: "set_contributions"; data: AnchorSetContributionsPayload }
   | { anchor: "activate"; data: { seatId: string } };
 
 /**

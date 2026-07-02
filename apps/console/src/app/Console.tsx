@@ -959,7 +959,7 @@ export function Console() {
         </div>
         <div className="flex-1 overflow-auto p-4">
           {!active || active.messages.length === 0 ? (
-            <EmptyHero mode={answerMode} onPick={setInput} />
+            <EmptyHero mode={answerMode} onPick={setInput} workspaceChosen={!!workspace} onChooseFolder={() => void chooseWorkspaceFolder()} />
           ) : (
             <div className="mx-auto flex max-w-3xl flex-col gap-6 py-2">
               {active.messages.map((m) => (
@@ -1109,7 +1109,7 @@ export function Console() {
 
 // A welcoming first-run state. Mode-aware: it explains in plain language what Field and Local do,
 // then invites the first question with a few tappable examples that fill the composer.
-function EmptyHero({ mode, onPick }: { mode: ConsoleAnswerMode; onPick: (v: string) => void }) {
+function EmptyHero({ mode, onPick, workspaceChosen, onChooseFolder }: { mode: ConsoleAnswerMode; onPick: (v: string) => void; workspaceChosen?: boolean; onChooseFolder?: () => void }) {
   const isField = mode === "field";
   const examples = isField
     ? ["Compare two approaches and recommend one with reasons.", "Explain how ZIRA agrees on an answer, in plain words.", "Draft a clear answer I can send to a non-technical reader."]
@@ -1147,6 +1147,11 @@ function EmptyHero({ mode, onPick }: { mode: ConsoleAnswerMode; onPick: (v: stri
         ))}
       </div>
       {isField && <ThreeWaysToAsk />}
+      {!isField && (
+        workspaceChosen
+          ? <div className="rounded-full border border-[color-mix(in_srgb,var(--indigo)_35%,transparent)] bg-[color-mix(in_srgb,var(--indigo)_10%,transparent)] px-4 py-1.5 text-xs text-[var(--indigo)]">Folder ready. Describe what to build, fix, or plan.</div>
+          : <button onClick={onChooseFolder} className="inline-flex items-center gap-2 rounded-lg border border-[color-mix(in_srgb,var(--indigo)_45%,transparent)] bg-[color-mix(in_srgb,var(--indigo)_14%,transparent)] px-4 py-2 text-sm font-medium text-[var(--indigo)] transition-colors hover:bg-[color-mix(in_srgb,var(--indigo)_20%,transparent)]"><FolderOpen size={15} /> Choose a project folder to build in</button>
+      )}
       <div className="flex flex-col items-center gap-2">
         <span className="text-[11px] uppercase tracking-wider text-faint">Try asking</span>
         <div className="flex flex-wrap justify-center gap-2">

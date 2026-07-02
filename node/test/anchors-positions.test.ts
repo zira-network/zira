@@ -254,3 +254,55 @@ function seedStewardTo(node: ZiraNode, to: string, amountUZIR: number, e: number
   assert.equal(node.submitTx(seed).accepted, true);
   advancePast(node, e * EPOCH_MS + 5);
 }
+
+test("anchor owner opens and closes a position for user contributions", () => {
+  const seats = [{ seatId: "A-001", classCode: "A" as AnchorClass, seatIndex: 1, code: "code-A-001" }];
+  const node = buildStewardNode(seats);
+  seedSteward(node, 5_000_000);
+  const seat0 = node.state.anchorSeats().find((a) => a.id === "A-001");
+  assert.equal(seat0?.owner, steward.address, "steward owns the seat at genesis");
+  assert.notEqual(seat0?.contributionsOpen, true, "contributions closed by default");
+
+  const setContrib = (open: boolean, ts: number) => signTx(buildTxBody({
+    network: "devnet", from: steward.address, fromPubKey: steward.publicKey, to: steward.address,
+    amountUZIR: 0, feeUZIR: PROTOCOL.BASE_FEE_UZIR, nonce: node.state.provisionalNonce(steward.address),
+    kind: "anchor_set_contributions", parents: [], timestamp: ts,
+    memo: JSON.stringify({ anchor: "set_contributions", data: { seatIds: ["A-001"], open } }),
+  }), steward.privateKey);
+
+  const e = epochOf(GTS) + 3;
+  assert.equal(node.submitTx(setContrib(true, e * EPOCH_MS + 10)).accepted, true);
+  advancePast(node, e * EPOCH_MS + 10);
+  assert.equal(node.state.anchorSeats().find((a) => a.id === "A-001")?.contributionsOpen, true, "owner opened contributions");
+
+  const e2 = e + 1;
+  assert.equal(node.submitTx(setContrib(false, e2 * EPOCH_MS + 10)).accepted, true);
+  advancePast(node, e2 * EPOCH_MS + 10);
+  assert.equal(node.state.anchorSeats().find((a) => a.id === "A-001")?.contributionsOpen, false, "owner closed contributions");
+});
+
+test("a non-owner cannot open an anchor position for contributions", () => {
+  const seats = [{ seatId: "A-002", classCode: "A" as AnchorClass, seatIndex: 2, code: "code-A-002" }];
+  const node = buildStewardNode(seats);
+  seedSteward(node, 5_000_000);
+  // fund a non-owner so it can pay the fee, then have it try to open the steward's seat
+  const other = keypairFromPrivate("0f".repeat(32));
+  const e = epochOf(GTS) + 3;
+  const fund = signTx(buildTxBody({
+    network: "devnet", from: steward.address, fromPubKey: steward.publicKey, to: other.address,
+    amountUZIR: 2_000_000, feeUZIR: PROTOCOL.BASE_FEE_UZIR, nonce: node.state.provisionalNonce(steward.address),
+    kind: "transfer", parents: [], timestamp: e * EPOCH_MS + 5,
+  }), steward.privateKey);
+  assert.equal(node.submitTx(fund).accepted, true);
+  advancePast(node, e * EPOCH_MS + 5);
+  const e2 = e + 1;
+  const badTx = signTx(buildTxBody({
+    network: "devnet", from: other.address, fromPubKey: other.publicKey, to: other.address,
+    amountUZIR: 0, feeUZIR: PROTOCOL.BASE_FEE_UZIR, nonce: node.state.provisionalNonce(other.address),
+    kind: "anchor_set_contributions", parents: [], timestamp: e2 * EPOCH_MS + 10,
+    memo: JSON.stringify({ anchor: "set_contributions", data: { seatIds: ["A-002"], open: true } }),
+  }), other.privateKey);
+  node.submitTx(badTx);
+  advancePast(node, e2 * EPOCH_MS + 10);
+  assert.notEqual(node.state.anchorSeats().find((a) => a.id === "A-002")?.contributionsOpen, true, "non-owner cannot open contributions");
+});

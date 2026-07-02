@@ -403,7 +403,7 @@ const PUBLIC_POST_ROUTES = new Set<string>([
   // signed-tx submission paths: the body is a signed transaction; invalid signatures are rejected by state.
   "/tx", "/provider/register", "/provider/answer",
   "/anchors/claim", "/anchors/transfer", "/anchors/list", "/anchors/delist", "/anchors/code-edit",
-  "/anchors/position-transfer", "/anchors/activate", "/anchors/contribution", "/events/claim",
+  "/anchors/position-transfer", "/anchors/activate", "/anchors/set-contributions", "/anchors/contribution", "/events/claim",
   // steward-signed anchor-event toggle: the handler re-verifies the steward signature, so accepting the
   // POST on a public gateway is safe (a non-steward POST is rejected 403 by the handler). This lets the
   // steward turn the event on/off on the shared gateway so every user, on any node, sees the same status.
@@ -683,6 +683,7 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
     case "POST /anchors/delist":
     case "POST /anchors/code-edit":
     case "POST /anchors/position-transfer":
+    case "POST /anchors/set-contributions":
     case "POST /anchors/activate": { const b = await body(req); return json(res, node.submitTx(b.tx)); }
 
     // ---- steward assigns anchor seats by CONTRIBUTION (no codes): transfer a reserve-held position to the

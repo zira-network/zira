@@ -79,7 +79,7 @@ export function Anchors() {
   const totalStakeUZIR = CLASS_CODES.reduce((a, c) => a + ANCHOR_CLASSES[c].stakeZIR * ANCHOR_CLASSES[c].seats, 0) * PROTOCOL.UZIR_PER_ZIR;
   const claimed = anchors.filter(isAssigned).length;
 
-  async function signAnchorTx(kind: "anchor_claim" | "anchor_transfer" | "anchor_position_transfer" | "anchor_activate", data: unknown, submit: (tx: ReturnType<typeof makeSignedTx>) => Promise<{ accepted: boolean; reason?: string }>) {
+  async function signAnchorTx(kind: "anchor_claim" | "anchor_transfer" | "anchor_position_transfer" | "anchor_activate" | "anchor_set_contributions", data: unknown, submit: (tx: ReturnType<typeof makeSignedTx>) => Promise<{ accepted: boolean; reason?: string }>) {
     if (!address) { toast.push("Create or unlock a wallet first.", "warn"); return; }
     if (mode === "node") { const ok = await request(); if (!ok) return; }
     setBusy(true);
@@ -139,6 +139,7 @@ export function Anchors() {
       </div>
       <OwnedSeats seats={owned} busy={busy} onRefresh={load} onTransfer={(seatId, to) => signAnchorTx("anchor_transfer", { seatId, to }, NodeApi.submitAnchorTransfer)}
         onBatchTransfer={(seatIds, to) => signAnchorTx("anchor_position_transfer", { seatIds, to }, NodeApi.submitAnchorPositionTransfer)}
+        onSetContributions={(seatIds, open) => signAnchorTx("anchor_set_contributions", { seatIds, open }, NodeApi.submitAnchorSetContributions)}
         onActivate={(seatId) => signAnchorTx("anchor_activate", { seatId }, NodeApi.submitAnchorActivate)} />
       {picked && <SeatDetail anchor={picked} onClose={() => setPicked(null)} />}
     </div>
@@ -309,10 +310,11 @@ function ClassLegend({ anchors, totalStakeUZIR }: { anchors: Anchor[]; totalStak
   );
 }
 
-function OwnedSeats({ seats, busy, onRefresh, onTransfer, onBatchTransfer, onActivate }: {
+function OwnedSeats({ seats, busy, onRefresh, onTransfer, onBatchTransfer, onSetContributions, onActivate }: {
   seats: Anchor[]; busy: boolean; onRefresh: () => Promise<void>;
   onTransfer: (seatId: string, to: string) => Promise<void>;
   onBatchTransfer: (seatIds: string[], to: string) => Promise<void>;
+  onSetContributions: (seatIds: string[], open: boolean) => Promise<void>;
   onActivate: (seatId: string) => Promise<void>;
 }) {
   const [transferTo, setTransferTo] = useState<Record<string, string>>({});
@@ -368,6 +370,11 @@ function OwnedSeats({ seats, busy, onRefresh, onTransfer, onBatchTransfer, onAct
                   <Button disabled={busy || !(transferTo[a.id] ?? "").startsWith("zir1")} onClick={() => onTransfer(a.id, transferTo[a.id] ?? "")}>Transfer</Button>
                 </div>
                 <p className="mt-1 text-[11px] text-faint">Transferring a position moves its class, ZTI, weight, and remaining one-year vesting to the new owner in one signed operation.</p>
+                <div className="mt-3 flex items-center justify-between rounded-lg border border-hairline bg-base/70 px-2.5 py-2">
+                  <span className="text-[11px] text-faint">User contributions {a.contributionsOpen ? <span className="text-[var(--teal)]">open</span> : <span className="text-muted">closed</span>}</span>
+                  <Button variant={a.contributionsOpen ? "ghost" : "primary"} disabled={busy} onClick={() => void onSetContributions([a.id], !a.contributionsOpen)}>{a.contributionsOpen ? "Close" : "Open"}</Button>
+                </div>
+                <p className="mt-1 text-[11px] text-faint">Open a position to let other participants contribute machines and storage under it. You can close it any time.</p>
                 <Button variant="ghost" className="mt-2 w-full" disabled onClick={() => onActivate(a.id)}>Activation disabled until all 512 positions are secured</Button>
               </div>
             ))}

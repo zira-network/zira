@@ -36,7 +36,7 @@ export function computeStateRoot(accounts: AccountLeaf[], supply: SupplyState, f
   const anchorLeaves = anchors
     .map((a) => ({
       id: a.id, c: a.classCode, i: a.seatIndex, h: a.codeHash, o: a.owner ?? "",
-      p: a.listedPriceUZIR ?? 0, s: a.status, z: a.zti,
+      p: a.listedPriceUZIR ?? 0, s: a.status, z: a.zti, co: a.contributionsOpen ? 1 : 0,
     }))
     .sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
   return hashHex(canonical({ accounts: leaves, anchors: anchorLeaves, founders: founderLeaves, supply: { e: supply.emitted, b: supply.burned, r: supply.reserve } }));
