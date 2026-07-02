@@ -1708,6 +1708,18 @@ export class ZiraNode {
     if (r.ok && r.isNew) { this.store.appendEvent({ t: "tx", data: tx }); this.publish(this.topics.events, { t: "tx", data: tx }); }
     return { accepted: r.ok, reason: r.reason };
   }
+
+  /**
+   * Export the node's own (mining) wallet: address + the private key. The node's identity IS the wallet
+   * a self-run operator earns into, so the local desktop Console adopts it as its active wallet (in
+   * memory, never persisted in the browser) and can then sign sends, query fees, resonator and anchor
+   * actions with it. The RPC route that calls this is loopback-ONLY (see server.ts), so the key never
+   * crosses the network: it is only ever handed to the Console running on the same machine, and
+   * identity.json already sits in plaintext in the data dir on that same disk.
+   */
+  exportWallet(): { address: string; privateKey: string; publicKey: string; balanceUZIR: number } {
+    return { address: this.identity.address, privateKey: this.identity.privateKey, publicKey: this.identity.publicKey, balanceUZIR: this.state.balanceOf(this.identity.address) };
+  }
   submitObservation(o: SignedObservation): { accepted: boolean; reason?: string } {
     const r = this.state.ingestObservation(o);
     if (r.ok && r.isNew) { this.store.appendEvent({ t: "observation", data: o }); this.publish(this.topics.events, { t: "observation", data: o }); }
@@ -1887,7 +1899,7 @@ export class ZiraNode {
     return {
       // Release version, exposed so the Console can negotiate features against older nodes (upgrade
       // without ruptures). Tracks the node package version / installer release.
-      version: "1.9.12",
+      version: "1.9.13",
       network: this.genesis.network,
       phase: "live",
       providersOnline: this.soft.onlineProviders(now).length,

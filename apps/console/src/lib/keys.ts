@@ -109,6 +109,16 @@ export const Wallet = {
     return kp;
   },
 
+  // Adopt a private key as the in-memory unlocked wallet WITHOUT persisting it to IndexedDB. Used for the
+  // node-custody wallet on a local node: the Console loads the node's own mining key (fetched over the
+  // loopback-only /wallet/export) so every signed action works, but the key is never written to browser
+  // storage and is gone when the tab closes. No auto-lock timer, so the session stays usable.
+  adoptInMemory(privateKey: string): Keypair {
+    unlocked = keypairFromPrivate(privateKey);
+    if (lockTimer) { clearTimeout(lockTimer); lockTimer = null; }
+    return unlocked;
+  },
+
   async unlock(passphrase: string, autoLockMs = 10 * 60 * 1000): Promise<Keypair> {
     const blob = (await get(BLOB_KEY)) as EncryptedBlob | undefined;
     if (!blob) throw new Error("no wallet found");

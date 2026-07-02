@@ -472,6 +472,14 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
     case "GET /balance": return json(res, { uZIR: s.provisionalBalance(q.get("address") ?? "") });
     case "GET /nonce": return json(res, { nonce: s.provisionalNonce(q.get("address") ?? "") });
     case "POST /tx": { const b = await body(req); return json(res, node.submitTx(b.tx)); }
+    // The node's own (mining) wallet key, so the local Console can adopt it as the active wallet (the
+    // wallet the node earns into). LOOPBACK-ONLY: even a valid admin token over a public bind is refused,
+    // because the raw private key must never cross the network. The desktop app runs the node on 127.0.0.1,
+    // so the key is only ever handed to the Console on the same machine.
+    case "GET /wallet/export": {
+      if (!isLoopbackHost(opts.host)) return json(res, { error: "wallet export is only available on a loopback node" }, 403);
+      return json(res, node.exportWallet());
+    }
     case "GET /history": return json(res, history(node, q));
     case "GET /events": return json(res, s.recentHistory(null, int(q, "limit", 100)));
     case "GET /locks": return json(res, s.recentLocks(int(q, "limit", 50)));

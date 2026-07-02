@@ -7,7 +7,7 @@ import { Modal, Button, Input, Textarea } from "../components/ui";
 import { HexField } from "../components/brand";
 import { Wallet } from "../lib/keys";
 import { useZira } from "../store/useZira";
-import { setClientMode } from "../client/createClient";
+import { setClientMode, isLocalNode } from "../client/createClient";
 
 const KEY = "zira.onboarded";
 // Bump this on a major privacy/terms change to re-show the gate to everyone (spec §1).
@@ -117,12 +117,15 @@ export function Onboarding() {
             <input type="checkbox" checked={analytics} onChange={(e) => setAnalytics(e.target.checked)} className="mt-0.5" />
             <span>Share anonymous usage analytics to help improve ZIRA. Optional, and changeable any time in Settings.</span>
           </label>
-          <Button variant="primary" onClick={() => {
+          <Button variant="primary" onClick={async () => {
             const now = new Date().toISOString();
             localStorage.setItem("zira.terms.accepted", now);
             localStorage.setItem("zira.privacy.version", PRIVACY_VERSION);
             localStorage.setItem("zira.privacy.accepted.date", now);
             localStorage.setItem("zira.analytics", analytics ? "on" : "off");
+            // On your own node (desktop app), the wallet is the node's mining identity, adopted
+            // automatically. No browser wallet to create, so go straight to the app.
+            if (isLocalNode()) { await refreshIdentity(); finish(); return; }
             setStep(3);
           }} disabled={!termsAccepted}>Accept and continue</Button>
         </div>

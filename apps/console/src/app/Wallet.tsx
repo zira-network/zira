@@ -17,6 +17,7 @@ import { featureEnabled } from "../lib/phase";
 
 export function WalletPage() {
   const hasWallet = useZira((s) => s.hasWallet);
+  const nodeWallet = useZira((s) => s.nodeWallet);
   const address = useZira((s) => s.address);
   const unlocked = useZira((s) => s.unlocked);
   const client = useZira((s) => s.client);
@@ -65,27 +66,43 @@ export function WalletPage() {
       <TrustCard />
       <div className="grid gap-4 md:grid-cols-2">
         <SendForm />
-        <Card>
-          <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-semibold">Your key</h3>
-            {unlocked ? <Badge tone="teal"><Unlock size={11} /> unlocked</Badge> : <Badge tone="neutral"><Lock size={11} /> locked</Badge>}
-          </div>
-          <div className="text-xs text-faint">Address</div>
-          <div className="mono mb-3 flex items-center gap-2 break-all text-sm">
-            {address}
-            <button onClick={() => { navigator.clipboard.writeText(address ?? ""); toast.push("Address copied"); }}><Copy size={13} className="text-muted hover:text-text" /></button>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {unlocked
-              ? <Button variant="secondary" onClick={() => { Wallet.lock(); setUnlocked(false); toast.push("Wallet locked"); }}><Lock size={14} /> Lock</Button>
-              : <Button variant="secondary" onClick={async () => { if (await request()) toast.push("Unlocked"); }}><Unlock size={14} /> Unlock</Button>}
-            <Button variant="ghost" onClick={async () => { if (await request()) setShowBackup(true); }}><Download size={14} /> Back up</Button>
-          </div>
-        </Card>
+        {nodeWallet ? (
+          <Card>
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-sm font-semibold">Your node wallet</h3>
+              <Badge tone="teal"><ShieldCheck size={11} /> on this machine</Badge>
+            </div>
+            <div className="text-xs text-faint">Address</div>
+            <div className="mono mb-3 flex items-center gap-2 break-all text-sm">
+              {address}
+              <button onClick={() => { navigator.clipboard.writeText(address ?? ""); toast.push("Address copied"); }}><Copy size={13} className="text-muted hover:text-text" /></button>
+            </div>
+            <p className="text-xs text-muted">This is the wallet your node mines into. Its key stays on your machine and never enters the browser, so there is nothing to unlock here. Mining and coordination earnings arrive at this address directly.</p>
+            <p className="mt-2 text-xs text-faint">To back it up, save the file <span className="mono">identity.json</span> in your ZIRA data folder. Anyone with that file controls this wallet.</p>
+          </Card>
+        ) : (
+          <Card>
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-sm font-semibold">Your key</h3>
+              {unlocked ? <Badge tone="teal"><Unlock size={11} /> unlocked</Badge> : <Badge tone="neutral"><Lock size={11} /> locked</Badge>}
+            </div>
+            <div className="text-xs text-faint">Address</div>
+            <div className="mono mb-3 flex items-center gap-2 break-all text-sm">
+              {address}
+              <button onClick={() => { navigator.clipboard.writeText(address ?? ""); toast.push("Address copied"); }}><Copy size={13} className="text-muted hover:text-text" /></button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {unlocked
+                ? <Button variant="secondary" onClick={() => { Wallet.lock(); setUnlocked(false); toast.push("Wallet locked"); }}><Lock size={14} /> Lock</Button>
+                : <Button variant="secondary" onClick={async () => { if (await request()) toast.push("Unlocked"); }}><Unlock size={14} /> Unlock</Button>}
+              <Button variant="ghost" onClick={async () => { if (await request()) setShowBackup(true); }}><Download size={14} /> Back up</Button>
+            </div>
+          </Card>
+        )}
       </div>
 
-      {showBackup && <BackupPanel onClose={() => setShowBackup(false)} />}
-      <ImportWalletCard />
+      {showBackup && !nodeWallet && <BackupPanel onClose={() => setShowBackup(false)} />}
+      {!nodeWallet && <ImportWalletCard />}
       <TxHistory history={history} address={address} loading={historyLoading} error={historyError} onRefresh={loadHistory} />
     </div>
   );
@@ -210,6 +227,8 @@ function SendForm() {
   async function submit() {
     if (!client || !address) return;
     if (!isValidAddress(to)) { toast.push("That is not a valid ZIR address.", "warn"); return; }
+    // A node-custody wallet is already unlocked in memory, so request() short-circuits; a browser wallet
+    // prompts for the passphrase. Either way the tx is signed locally with the active key.
     if (mode === "node") { const ok = await request(); if (!ok) return; }
     setBusy(true);
     try {

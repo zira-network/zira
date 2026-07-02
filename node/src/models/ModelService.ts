@@ -616,17 +616,21 @@ export class ModelService {
   }
 
   async setMining(patch: Partial<MiningConfig>): Promise<MiningConfig> {
+    const prevEnabled = Boolean(this.mining.enabled);
+    const prevStorage = Boolean(this.mining.storageEnabled);
     const next = { ...patch };
     if (next.gpuLayers !== undefined) next.gpuLayers = Math.max(0, Math.min(100, Math.floor(Number(next.gpuLayers) || 0)));
     if (next.threads !== undefined) next.threads = Math.max(1, Math.min(256, Math.floor(Number(next.threads) || 1)));
     if ((patch.gpuLayers !== undefined || patch.threads !== undefined) && patch.useRecommendedHardware === undefined) next.useRecommendedHardware = false;
     this.mining = { ...this.mining, ...next };
-    // Mining IMPLIES storage. A contributing node must hold the model bytes to serve them and to be
-    // storage-credited (the desktop build can't run native inference, so holding+serving the bytes is how it
-    // earns at all). So enabling mining auto-enables storage — "turn on Mine" is all a normal user needs.
-    // Turning mining OFF leaves storage on its own setting (a node can be a pure storage peer).
-    const storageJustForcedOn = patch.enabled === true && !this.mining.storageEnabled;
-    if (this.mining.enabled) this.mining.storageEnabled = true;
+    // Storage is OPTIONAL but ON BY DEFAULT. Mining earns coordination-first: a node earns for live
+    // coordination even without serving model storage; serving storage earns MORE. So when a user first
+    // turns Mine on we default storage on (one switch is all a normal user needs), but they can turn
+    // storage off and keep mining, still earning via coordination. An explicit storageEnabled in the patch
+    // always wins, so the toggle is real.
+    const miningJustEnabled = patch.enabled === true && !prevEnabled;
+    if (miningJustEnabled && patch.storageEnabled === undefined) this.mining.storageEnabled = true;
+    const storageJustForcedOn = this.mining.storageEnabled && !prevStorage;
     // A GB-only patch (older Console) updates the byte cap too, so the authoritative value tracks it.
     if (patch.storageLimitGb !== undefined && patch.storageCapBytes === undefined) {
       this.mining.storageCapBytes = Math.max(1, Math.min(4096, Number(patch.storageLimitGb) || 1)) * 1024 ** 3;

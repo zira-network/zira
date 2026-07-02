@@ -5,7 +5,7 @@
 import { create } from "zustand";
 import type { ZiraClient, NetworkStats, Lock, SignedTx, NetworkId, NetworkPhase, Domain, HardwareProfile, NodeConfig, ProviderConfig } from "@zira/protocol";
 import { DEFAULT_NODE_CONFIG, DEFAULT_PROVIDER_CONFIG, MAINNET_ANCHOR_STEWARD, MAINNET_NETWORK_RESONATOR_OWNER } from "@zira/protocol";
-import { createClient, getClientMode, type ClientMode } from "../client/createClient";
+import { createClient, getClientMode, isLocalNode, type ClientMode } from "../client/createClient";
 import { NodeApi, type StatusInfo, type ProviderStatus, type MiningStatus, type MiningPatch, type LocalLaunchMinerSummary } from "../lib/nodeApi";
 import { Wallet } from "../lib/keys";
 import { hasNodeFeature } from "../lib/version-compat";
@@ -61,6 +61,11 @@ interface ZiraState {
   hasWallet: boolean;
   unlocked: boolean;
   balanceUZIR: number;
+  // Node-custody wallet: on a local node (desktop app, or a browser pointed at a node on this machine)
+  // the active wallet IS the node's own identity, i.e. the wallet it mines into. The key stays on the
+  // node; the Console shows its address/balance and spends via the loopback-gated /wallet/send RPC. On
+  // web/mobile against a remote gateway this is false and the self-custodial browser wallet is used.
+  nodeWallet: boolean;
 
   stats: NetworkStats | null;
   locks: Lock[];
@@ -145,6 +150,7 @@ export const useZira = create<ZiraState>((set, get) => ({
   base: "",
   address: null,
   hasWallet: false,
+  nodeWallet: false,
   unlocked: false,
   balanceUZIR: 0,
   minerAddress: null,
@@ -176,10 +182,31 @@ export const useZira = create<ZiraState>((set, get) => ({
   polling: false,
 
   init: async () => {
+    // Local node (desktop app or a browser pointed at a node on this machine): the wallet IS the node's
+    // own mining identity. Adopt its address from the loopback-gated /wallet RPC so mining earnings show
+    // in the wallet, with the key never leaving the node. Falls back to the self-custodial browser wallet
+    // if the node is unreachable or this is a remote gateway (web/mobile).
+    if (isLocalNode()) {
+      const info = await createClient();
+      set({ client: info.client, mode: info.mode, base: info.base });
+      try {
+        const w = await NodeApi.walletExport();
+        if (w?.address && w.privateKey) {
+          Wallet.adoptInMemory(w.privateKey); // in memory only, never persisted in the browser
+          set({ address: w.address, hasWallet: true, unlocked: true, nodeWallet: true, balanceUZIR: w.balanceUZIR ?? 0 });
+          await get().refresh();
+          await get().refreshStatus();
+          await get().probeConnection();
+          set({ ready: true });
+          get().startPolling();
+          return;
+        }
+      } catch { /* node not reachable yet; fall through to the browser wallet path */ }
+    }
     const hasWallet = await Wallet.exists();
     const address = await Wallet.address();
     const info = await createClient(address ?? undefined);
-    set({ client: info.client, mode: info.mode, base: info.base, hasWallet, address, unlocked: Wallet.isUnlocked() });
+    set({ client: info.client, mode: info.mode, base: info.base, hasWallet, address, unlocked: Wallet.isUnlocked(), nodeWallet: false });
     await get().refresh();
     await get().refreshStatus();
     await get().probeConnection();
@@ -196,9 +223,15 @@ export const useZira = create<ZiraState>((set, get) => ({
   },
 
   refreshIdentity: async () => {
+    if (isLocalNode()) {
+      try {
+        const w = await NodeApi.walletExport();
+        if (w?.address && w.privateKey) { Wallet.adoptInMemory(w.privateKey); set({ address: w.address, hasWallet: true, unlocked: true, nodeWallet: true, balanceUZIR: w.balanceUZIR ?? 0 }); await get().refresh(); return; }
+      } catch { /* fall through to browser wallet */ }
+    }
     const hasWallet = await Wallet.exists();
     const address = await Wallet.address();
-    set({ hasWallet, address, unlocked: Wallet.isUnlocked() });
+    set({ hasWallet, address, unlocked: Wallet.isUnlocked(), nodeWallet: false });
     await get().refresh();
   },
 
@@ -273,6 +306,19 @@ export const useZira = create<ZiraState>((set, get) => ({
         minerAddress: st.address ?? null,
         minerBalanceUZIR: typeof st.balanceUZIR === "number" ? st.balanceUZIR : prev.minerBalanceUZIR,
       };
+      // Node-custody wallet: on a local node, keep the active wallet pinned to the node's mining identity
+      // (covers the case where the node was not reachable at init and only came up now). Adopt the key in
+      // memory once so signed actions work. The wallet the user sees is exactly the wallet the node earns into.
+      if (isLocalNode() && st.address) {
+        if (!Wallet.isUnlocked()) {
+          try { const w = await NodeApi.walletExport(); if (w?.privateKey) Wallet.adoptInMemory(w.privateKey); } catch { /* retry next poll */ }
+        }
+        patch.address = st.address;
+        patch.hasWallet = true;
+        patch.unlocked = Wallet.isUnlocked();
+        patch.nodeWallet = true;
+        if (typeof st.balanceUZIR === "number") patch.balanceUZIR = st.balanceUZIR;
+      }
       if (st.address) {
         try {
           const z = await NodeApi.zti(st.address);

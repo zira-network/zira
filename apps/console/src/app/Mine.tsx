@@ -1016,10 +1016,10 @@ export function Mine() {
         <div className="mt-3 rounded-lg border border-hairline bg-base p-3">
           <div className="flex items-center justify-between gap-3">
             <div className="text-xs">
-              <div className="flex items-center gap-2 font-medium text-text"><Link2 size={14} className="text-[var(--indigo)]" /> Storage (peer-to-peer) <span className="font-normal text-faint">{mining?.enabled ? "on with mining" : "you control this"}</span></div>
-              <div className="mt-0.5 text-faint">{mining?.enabled ? "Mining needs storage to hold and serve the model, so it stays on while you mine. Storage peers pass authorized model bytes to each other, so models reach any peer without a central host." : "Storage peers hold authorized model bytes and pass them to each other, so models reach any storage-enabled peer without a central host. Turning it off keeps this node working for consensus and queries; it just stops replicating peer storage."}</div>
+              <div className="flex items-center gap-2 font-medium text-text"><Link2 size={14} className="text-[var(--indigo)]" /> Storage (peer-to-peer) <span className="font-normal text-faint">optional, on by default</span></div>
+              <div className="mt-0.5 text-faint">Serving authorized model bytes earns a bonus on top of coordination, and passes models to other peers without a central host. It is optional: turn it off and this node still mines and earns from coordination, it just stops holding and serving heavy model bytes.</div>
             </div>
-            <Toggle on={(mining?.storageEnabled ?? false) || (mining?.enabled ?? false)} onClick={() => updateStorage(!(mining?.storageEnabled ?? false))} disabled={busy || (mining?.enabled ?? false)} />
+            <Toggle on={mining?.storageEnabled ?? false} onClick={() => updateStorage(!(mining?.storageEnabled ?? false))} disabled={busy} />
           </div>
           <div className="mt-2 grid gap-2 sm:grid-cols-3">
             <Field label="Storage cap" hint="GB. Default is 1 GB. The node never stores more than this; when full it stops taking new bytes and keeps serving what fits.">
@@ -1123,8 +1123,8 @@ function MiningReadyBanner({ mining, earning }: { mining: MiningStatus | null | 
       <Card className="border-[color-mix(in_srgb,var(--indigo)_35%,transparent)]">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <div className="text-sm font-semibold text-text">Downloading the field model</div>
-            <div className="mt-1 text-xs text-muted">Your node is fetching the authorized model bytes it needs to earn. Earnings start once the download finishes and a coordinator verifies the copy (a further 30 to 60 seconds after that).</div>
+            <div className="text-sm font-semibold text-text">Serving a field model (optional bonus)</div>
+            <div className="mt-1 text-xs text-muted">You are already earning from coordination. In the background your node is fetching an authorized model so it can also serve storage, which earns a bonus on top. This is optional; mining does not wait for it.</div>
           </div>
           <div className="shrink-0 rounded-lg border border-hairline bg-base px-3 py-2 text-center">
             <div className="mono text-lg text-[var(--teal)]">{pct}%</div>
@@ -1140,8 +1140,8 @@ function MiningReadyBanner({ mining, earning }: { mining: MiningStatus | null | 
   if (used > 0 && !earning) {
     return (
       <Card className="border-[color-mix(in_srgb,var(--indigo)_35%,transparent)]">
-        <div className="text-sm font-semibold text-text">Model ready. Waiting for a coordinator to verify storage.</div>
-        <div className="mt-1 text-xs text-muted">Coordinators probe storage every 20 seconds. Once yours is verified, they include you in the next signed heartbeat and your first earnings arrive within a minute.</div>
+        <div className="text-sm font-semibold text-text">Storage ready. A coordinator will add your bonus shortly.</div>
+        <div className="mt-1 text-xs text-muted">You earn from coordination as soon as mining is on. Serving this model adds a storage bonus: coordinators verify it every 20 seconds and include it in the next signed round.</div>
       </Card>
     );
   }

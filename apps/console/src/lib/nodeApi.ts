@@ -303,6 +303,11 @@ export const NodeApi = {
   settleQueryCoordination: (queryId: string, budgetZir: number) =>
     rpcPost<{ ok: boolean; reason?: string; payouts?: { address: string; amountUZIR: number }[]; networkUZIR?: number; resonatorPoolUZIR?: number; ecosystemUZIR?: number; burnUZIR?: number; confidenceScore?: number }>("/query/settle", { queryId, budgetUZIR: Math.round(budgetZir * 1_000_000) }),
 
+  // The node's own mining-wallet key (loopback-only on the node). The local Console adopts it as the
+  // active wallet so mining earnings land in the wallet the user sees. The key is held in memory for the
+  // session only, never persisted in the browser.
+  walletExport: () => rpcGet<{ address: string; privateKey: string; publicKey: string; balanceUZIR: number }>("/wallet/export"),
+
   net: () => rpcGet<NetInfo>("/net"),
   addPeer: (multiaddr: string) => rpcPost<{ ok: boolean; reason?: string }>("/peers/add", { multiaddr }),
 

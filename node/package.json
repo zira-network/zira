@@ -1,6 +1,6 @@
 {
   "name": "@zira/node",
-  "version": "1.9.12",
+  "version": "1.9.13",
   "description": "ZIRA Core. A peer to peer node: gossips signed events over libp2p, validates every rule, computes Proof of Resonance Locks and checkpoint finality, and serves the Console GUI.",
   "type": "module",
   "bin": {
