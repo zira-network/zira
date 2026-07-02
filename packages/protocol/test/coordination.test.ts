@@ -34,11 +34,11 @@ describe("model-type taxonomy + routing", () => {
   });
 });
 
-describe("settleCoordination (§9 five-way split)", () => {
+describe("settleCoordination (§9 four-way split)", () => {
   const sum = (s: ReturnType<typeof settleCoordination>) =>
-    s.payouts.reduce((a, p) => a + p.amountUZIR, 0) + s.networkUZIR + s.resonatorPoolUZIR + s.ecosystemUZIR + s.burnUZIR;
+    s.payouts.reduce((a, p) => a + p.amountUZIR, 0) + s.networkUZIR + s.resonatorPoolUZIR + s.burnUZIR;
 
-  it("splits a budget into contributors/network/pool/ecosystem/burn with exact sums and no minting", () => {
+  it("splits a budget into contributors/network/pool/burn with exact sums and no minting", () => {
     const budget = 1_000_000;
     const split = settleCoordination(budget, [
       { address: "zir1aaa", domainZti: 0.9, confidence: 1.0 },
@@ -46,11 +46,10 @@ describe("settleCoordination (§9 five-way split)", () => {
     ]);
     expect(split.networkUZIR).toBe(Math.floor(budget * PROTOCOL.COORD_SPLIT.NETWORK));         // 80_000
     expect(split.resonatorPoolUZIR).toBe(Math.floor(budget * PROTOCOL.COORD_SPLIT.RESONATOR_POOL)); // 100_000
-    expect(split.ecosystemUZIR).toBe(Math.floor(budget * PROTOCOL.COORD_SPLIT.ECOSYSTEM));     // 50_000
     expect(split.burnUZIR).toBe(Math.floor(budget * PROTOCOL.COORD_SPLIT.BURN));               // 50_000
     const paid = split.payouts.reduce((s, p) => s + p.amountUZIR, 0);
-    expect(paid).toBe(budget - split.networkUZIR - split.resonatorPoolUZIR - split.ecosystemUZIR - split.burnUZIR); // 720_000
-    // all five slices sum to exactly the budget (no minting, no dust lost)
+    expect(paid).toBe(budget - split.networkUZIR - split.resonatorPoolUZIR - split.burnUZIR); // 770_000
+    // all four slices sum to exactly the budget (no minting, no dust lost)
     expect(sum(split)).toBe(budget);
     // the higher-trust contributor earns more
     const a = split.payouts.find((p) => p.address === "zir1aaa")!;

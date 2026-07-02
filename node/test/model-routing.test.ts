@@ -114,9 +114,9 @@ test("settleQueryCoordination splits a funded budget across answerers with the �
   const pay1 = result.payouts!.find((p) => p.address === p1.address)!;
   const pay2 = result.payouts!.find((p) => p.address === p2.address)!;
   assert.ok(pay1.amountUZIR > pay2.amountUZIR, "the higher-trust provider earns the larger share");
-  assert.ok((result.networkUZIR ?? 0) > 0 && (result.resonatorPoolUZIR ?? 0) > 0 && (result.ecosystemUZIR ?? 0) > 0 && (result.burnUZIR ?? 0) > 0, "the §9 protocol slices are carved off");
-  // contributor payouts + the four protocol slices equal the funded budget (no minting).
+  assert.ok((result.networkUZIR ?? 0) > 0 && (result.resonatorPoolUZIR ?? 0) > 0 && (result.burnUZIR ?? 0) > 0, "the §9 protocol slices are carved off");
+  // contributor payouts + the three protocol slices equal the funded budget (no minting).
   const paid = result.payouts!.reduce((s, p) => s + p.amountUZIR, 0);
-  const slices = (result.networkUZIR ?? 0) + (result.resonatorPoolUZIR ?? 0) + (result.ecosystemUZIR ?? 0) + (result.burnUZIR ?? 0);
+  const slices = (result.networkUZIR ?? 0) + (result.resonatorPoolUZIR ?? 0) + (result.burnUZIR ?? 0);
   assert.equal(paid + slices, budget, "payouts + protocol slices == budget, no ZIR minted");
 });

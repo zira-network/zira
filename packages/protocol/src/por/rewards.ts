@@ -76,15 +76,13 @@ export interface CoordinationContribution {
   agreement?: number;
 }
 export interface CoordinationSplit {
-  /** Per-contributor payouts in µZIR (the 72% contributors slice), summing with the four protocol
+  /** Per-contributor payouts in µZIR (the 77% contributors slice), summing with the three protocol
    *  slices below to exactly totalUZIR. */
   payouts: { address: string; weight: number; amountUZIR: uZIR }[];
   /** Network wallet slice (8%): long-term protocol sustainability and operations. */
   networkUZIR: uZIR;
   /** Resonator pool slice (10%): distributed to active anchor holders by lattice weight. */
   resonatorPoolUZIR: uZIR;
-  /** Ecosystem treasury slice (5%): grants and community programs. */
-  ecosystemUZIR: uZIR;
   /** Burn slice (5%): destroyed via bond_burn, permanently removed from circulation. */
   burnUZIR: uZIR;
   /** A coordinated-confidence score in [0,1]: the weight-weighted mean domain ZTI. */
@@ -92,12 +90,12 @@ export interface CoordinationSplit {
 }
 
 /**
- * Split a funded coordination budget into the five §9 slices (whitepaper "Coordination settlement").
- * The network/pool/ecosystem/burn slices are each floor(total*share); the contributors slice is the
- * remainder, so the five parts ALWAYS sum to exactly totalUZIR with no minting. The contributors slice
- * is divided by domainZti*confidence (clamped to a small floor so a brand-new contributor still earns a
- * sliver), with deterministic dust handling (dust to the highest weight, ties by address). If no one
- * contributed, the contributors slice folds into the network wallet so the sum stays exact.
+ * Split a funded coordination budget into the four §9 slices (whitepaper "Coordination settlement").
+ * The network/pool/burn slices are each floor(total*share); the contributors slice is the remainder, so
+ * the four parts ALWAYS sum to exactly totalUZIR with no minting. The contributors slice is divided by
+ * domainZti*confidence (clamped to a small floor so a brand-new contributor still earns a sliver), with
+ * deterministic dust handling (dust to the highest weight, ties by address). If no one contributed, the
+ * contributors slice folds into the network wallet so the sum stays exact.
  */
 export function settleCoordination(
   totalUZIR: uZIR,
@@ -106,13 +104,12 @@ export function settleCoordination(
   const total = Math.max(0, Math.floor(totalUZIR));
   const networkUZIR = Math.floor(total * PROTOCOL.COORD_SPLIT.NETWORK);
   const resonatorPoolUZIR = Math.floor(total * PROTOCOL.COORD_SPLIT.RESONATOR_POOL);
-  const ecosystemUZIR = Math.floor(total * PROTOCOL.COORD_SPLIT.ECOSYSTEM);
   const burnUZIR = Math.floor(total * PROTOCOL.COORD_SPLIT.BURN);
-  // Contributors get the remainder (>= 72%), which absorbs all rounding so the five slices sum exactly.
-  const contributorsPool = total - networkUZIR - resonatorPoolUZIR - ecosystemUZIR - burnUZIR;
+  // Contributors get the remainder (>= 77%), which absorbs all rounding so the four slices sum exactly.
+  const contributorsPool = total - networkUZIR - resonatorPoolUZIR - burnUZIR;
   if (total <= 0 || contributors.length === 0) {
     // No contributors answered: their slice funds the network wallet. Sum stays exact.
-    return { payouts: [], networkUZIR: networkUZIR + Math.max(0, contributorsPool), resonatorPoolUZIR, ecosystemUZIR, burnUZIR, confidenceScore: 0 };
+    return { payouts: [], networkUZIR: networkUZIR + Math.max(0, contributorsPool), resonatorPoolUZIR, burnUZIR, confidenceScore: 0 };
   }
   // Weight = domain trust x self-confidence x agreement-with-consensus. The agreement factor means a
   // divergent (likely wrong) answer earns little even if the contributor claims high confidence.
@@ -148,7 +145,7 @@ export function settleCoordination(
   let k = 0;
   while (dust > 0 && order.length > 0) { rows[order[k % order.length]!.i]!.amountUZIR += 1; dust -= 1; k += 1; }
   const confidenceScore = rows.reduce((s, r, i) => s + r.weight * Math.max(0, contributors[i]!.domainZti), 0);
-  return { payouts: rows, networkUZIR, resonatorPoolUZIR, ecosystemUZIR, burnUZIR, confidenceScore: Number(confidenceScore.toFixed(4)) };
+  return { payouts: rows, networkUZIR, resonatorPoolUZIR, burnUZIR, confidenceScore: Number(confidenceScore.toFixed(4)) };
 }
 
 /**

@@ -301,7 +301,7 @@ export const NodeApi = {
   seedStewardResonators: () => rpcPost<{ networkResonators: number; anchorResonators: number; error?: string }>("/founder/seed-resonators", {}),
   // steward: settle a funded query's multi-LLM coordination payout across the models that answered
   settleQueryCoordination: (queryId: string, budgetZir: number) =>
-    rpcPost<{ ok: boolean; reason?: string; payouts?: { address: string; amountUZIR: number }[]; networkUZIR?: number; resonatorPoolUZIR?: number; ecosystemUZIR?: number; burnUZIR?: number; confidenceScore?: number }>("/query/settle", { queryId, budgetUZIR: Math.round(budgetZir * 1_000_000) }),
+    rpcPost<{ ok: boolean; reason?: string; payouts?: { address: string; amountUZIR: number }[]; networkUZIR?: number; resonatorPoolUZIR?: number; burnUZIR?: number; confidenceScore?: number }>("/query/settle", { queryId, budgetUZIR: Math.round(budgetZir * 1_000_000) }),
 
   // The node's own mining-wallet key (loopback-only on the node). The local Console adopts it as the
   // active wallet so mining earnings land in the wallet the user sees. The key is held in memory for the

@@ -1759,14 +1759,14 @@ export class ZiraNode {
   publishAnswer(a: AnswerMsg): boolean { const ok = this.soft.addAnswer(a); if (ok) { this.minerAnswered++; this.publish(this.topics.app, { t: "answer", data: a }); } return ok; }
 
   /**
-   * Settle a coordinated query with the §9 five-way split: contributors (72%, by domain ZTI x confidence),
-   * the network wallet (8%), the resonator pool (10%), an ecosystem slice (5%), and a burn (5%). This is
-   * the multi-LLM coordination money path: many contributors share one query's pay. It moves already-held
-   * ZIR from the funding wallet (the asker/founder) via real transfers and a bond_burn for the burn slice;
-   * it mints no new ZIR, so PoR emission and the supply cap are untouched. Founder-gated at the RPC layer
-   * (the funding wallet is the node identity, which must hold the budget). Returns the split.
+   * Settle a coordinated query with the §9 four-way split: contributors (77%, by domain ZTI x confidence),
+   * the network wallet (8%), the resonator pool (10%), and a burn (5%). This is the multi-LLM coordination
+   * money path: many contributors share one query's pay. It moves already-held ZIR from the funding wallet
+   * (the asker/founder) via real transfers and a bond_burn for the burn slice; it mints no new ZIR, so PoR
+   * emission and the supply cap are untouched. Founder-gated at the RPC layer (the funding wallet is the
+   * node identity, which must hold the budget). Returns the split.
    */
-  settleQueryCoordination(queryId: string, budgetUZIR: number): { ok: boolean; reason?: string; payouts?: { address: string; amountUZIR: number }[]; networkUZIR?: number; resonatorPoolUZIR?: number; ecosystemUZIR?: number; burnUZIR?: number; confidenceScore?: number } {
+  settleQueryCoordination(queryId: string, budgetUZIR: number): { ok: boolean; reason?: string; payouts?: { address: string; amountUZIR: number }[]; networkUZIR?: number; resonatorPoolUZIR?: number; burnUZIR?: number; confidenceScore?: number } {
     const query = this.soft.queries.get(queryId);
     const domain: Domain = query?.domain ?? "general";
     const answers = this.soft.answers.get(queryId) ?? [];
@@ -1794,12 +1794,11 @@ export class ZiraNode {
     const split = settleCoordination(budgetUZIR, contributions);
     const wallets = settlementWalletsFor(this.genesis.network);
     const tag = queryId.slice(0, 12);
-    // The protocol slices (§9): network wallet, resonator pool, ecosystem treasury. The funder is the
-    // asker; when a target equals the funder the slice simply stays put, so we skip that transfer.
+    // The protocol slices (§9): network wallet, resonator pool. The funder is the asker; when a target
+    // equals the funder the slice simply stays put, so we skip that transfer.
     const protocolTransfers: { to: string; amountUZIR: number; memo: string }[] = [];
     if (split.networkUZIR > 0 && wallets.network !== funder.address) protocolTransfers.push({ to: wallets.network, amountUZIR: split.networkUZIR, memo: `coordination network ${tag}` });
     if (split.resonatorPoolUZIR > 0 && wallets.resonatorPool !== funder.address) protocolTransfers.push({ to: wallets.resonatorPool, amountUZIR: split.resonatorPoolUZIR, memo: `coordination resonator-pool ${tag}` });
-    if (split.ecosystemUZIR > 0 && wallets.ecosystem !== funder.address) protocolTransfers.push({ to: wallets.ecosystem, amountUZIR: split.ecosystemUZIR, memo: `coordination ecosystem ${tag}` });
     const payoutTxs = split.payouts.filter((p) => p.amountUZIR > 0).length;
     const willBurn = split.burnUZIR > 0;
     // Every outgoing tx (payouts + protocol transfers + the burn) carries one base fee; the funder must
@@ -1821,7 +1820,7 @@ export class ZiraNode {
     for (const t of protocolTransfers) this.submitTx(tx(t.to, t.amountUZIR, t.memo));
     // The burn slice is destroyed via a bond_burn (debits the funder, credits no one, increases burned).
     if (willBurn) this.submitTx(tx(funder.address, split.burnUZIR, `coordination burn ${tag}`, "bond_burn"));
-    return { ok: true, payouts: paid, networkUZIR: split.networkUZIR, resonatorPoolUZIR: split.resonatorPoolUZIR, ecosystemUZIR: split.ecosystemUZIR, burnUZIR: split.burnUZIR, confidenceScore: split.confidenceScore };
+    return { ok: true, payouts: paid, networkUZIR: split.networkUZIR, resonatorPoolUZIR: split.resonatorPoolUZIR, burnUZIR: split.burnUZIR, confidenceScore: split.confidenceScore };
   }
   private publishModelAnnounce(a: ModelAnnounce): void {
     const env: Envelope = { t: "model", data: a };
@@ -1899,7 +1898,7 @@ export class ZiraNode {
     return {
       // Release version, exposed so the Console can negotiate features against older nodes (upgrade
       // without ruptures). Tracks the node package version / installer release.
-      version: "1.9.13",
+      version: "1.9.14",
       network: this.genesis.network,
       phase: "live",
       providersOnline: this.soft.onlineProviders(now).length,

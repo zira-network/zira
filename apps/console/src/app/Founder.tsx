@@ -1156,7 +1156,6 @@ function StewardSettleCard({ gated }: { gated: boolean }) {
     { label: "Contributors", share: split.CONTRIBUTORS },
     { label: "Network", share: split.NETWORK },
     { label: "Resonator pool", share: split.RESONATOR_POOL },
-    { label: "Ecosystem", share: split.ECOSYSTEM },
     { label: "Burn", share: split.BURN },
   ].map((s) => ({ ...s, zir: b * s.share })) : [];
 

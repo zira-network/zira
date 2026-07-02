@@ -75,18 +75,19 @@ export const PROTOCOL = {
   RESONATOR_FEE_SHARE: 0.05,
 
   // Coordination settlement split (whitepaper "Coordination settlement"). When a funded query/task
-  // budget settles, it divides into five slices that always sum to the whole: contributors
+  // budget settles, it divides into four slices that always sum to the whole: contributors
   // (miners/providers, weighted by domain ZTI x confidence), the network wallet (long-term protocol
-  // sustainability), the resonator pool (active anchor holders by lattice weight), a permanent burn, and
-  // the ecosystem treasury. Replaces the prior single 5% steward-ops carve-off for coordination
-  // settlements. Mints no ZIR (pure division of an already-funded budget); the burn slice is destroyed
-  // via a bond_burn, increasing `burned` and shrinking circulating supply. The five shares sum to 1.0.
+  // sustainability, governance-spent, fully auditable), the resonator pool (active anchor holders by
+  // lattice weight), and a permanent burn. Mints no ZIR (pure division of an already-funded budget); the
+  // burn slice is destroyed via a bond_burn, increasing `burned` and shrinking circulating supply. The
+  // four shares sum to 1.0. (The former separate 5% ecosystem slice was folded into contributors so the
+  // people whose machines produce the answer take the large majority; grants run from the community/events
+  // reserve, not a separate coordination carve-off.)
   COORD_SPLIT: {
-    CONTRIBUTORS: 0.72,
+    CONTRIBUTORS: 0.77,
     NETWORK: 0.08,
     RESONATOR_POOL: 0.10,
     BURN: 0.05,
-    ECOSYSTEM: 0.05,
   },
   // When two or more contributors coordinate on a query, no single one may take more than this fraction of
   // the contributors slice, so coordination pay is genuinely shared and one model cannot dominate it by
@@ -180,9 +181,15 @@ export function adaptiveTaskPriceUZIR(ctx: {
   return Math.round(PRICING.TASK_BASE_UZIR * mult);
 }
 
-// ----- Emission schedule (formal tapering curve) -----
-// The 59% earned supply enters the world only as earned rewards. Per epoch reward follows a
-// geometric decay (a halving curve) split three ways across the participation tiers.
+// ----- Emission schedule -----
+// CANONICAL LIVE CURVE: the network emits via `perRoundReward` in por/rewards.ts, a smooth
+// fraction-of-remaining taper over the 59% earned pool (reward = max(floor, FRACTION x remaining) x
+// demand), scaled by live coordination demand. Being a fraction of what REMAINS, it decays slowly and
+// pays out over decades with no cliff, and idle periods conserve the pool; a small floor keeps a
+// perpetual tail until the earned cap is reached, after which miners are sustained by coordination
+// settlement (redistribution of real spending, not new minting). The geometric-halving numbers BELOW are
+// a formal reference approximation only and are NOT wired into runField; the fraction taper is the source
+// of truth. (Kept for documentation and supply-audit cross-checks; do not compute live emission from it.)
 export const EMISSION = {
   /** Total earned supply: 59% of 28.7B ZIR, in µZIR. */
   TOTAL_EARNED_UZIR: 16_933_000_000_000_000n,
