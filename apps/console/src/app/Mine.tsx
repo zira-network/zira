@@ -820,20 +820,6 @@ export function Mine() {
           onPick={setHardwareMode}
         />
 
-        {hardwareMode === "field" && (
-          <div className="mt-3 rounded-lg border border-[color-mix(in_srgb,var(--indigo)_26%,var(--border))] bg-[color-mix(in_srgb,var(--indigo)_7%,transparent)] p-3">
-            <div className="mb-2 text-xs font-medium text-text">How this machine serves the field</div>
-            <EndpointEditor
-              hint="If this node has an authorized model in its local cache and the native engine is installed, it serves the field on your GPU/CPU automatically. Otherwise, point at a local OpenAI-compatible server on this machine (for example Ollama or LM Studio). Leave the endpoint blank to use the native engine."
-              endpoint={endpoint}
-              model={endpointModel}
-              onEndpoint={setEndpoint}
-              onModel={setEndpointModel}
-              onSave={saveEndpoint}
-              busy={busy}
-            />
-          </div>
-        )}
       </Card>
 
       {/* Live, demand-driven economics. */}

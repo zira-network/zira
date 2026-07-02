@@ -1114,20 +1114,22 @@ export class ZiraNode {
     try {
       const now = Date.now();
       let live = 0, stored = 0;
-      // 1) COORDINATION baseline. Any directly-connected peer that answers a fresh liveness challenge is a
-      //    real, reachable, participating node. Mining/coordination alone earns the baseline emission (no
-      //    model download required), so a new user starts earning the moment they are a live peer of the
-      //    field. Bounded per round; each probe is timeout-guarded so a stalled peer never blocks the set.
+      // 1) COORDINATION baseline. Any directly-connected peer that is MINING answers a fresh liveness
+      //    challenge (a node with mining off refuses, so it is never vouched and earns nothing). Coordination
+      //    alone earns the baseline emission, no model download required, so a mining user starts earning the
+      //    moment they are a live peer. Bounded per round; each probe is timeout-guarded.
+      const liveAddrs = new Set<string>();
       for (const peerId of this.net.peers().slice(0, 24)) {
         const addr = await this.verifyPeerLive(peerId);
-        if (addr && addr !== this.identity.address) { this.verifiedMiners.set(addr, now); live++; }
+        if (addr && addr !== this.identity.address) { this.verifiedMiners.set(addr, now); liveAddrs.add(addr); live++; }
       }
-      // 2) STORAGE serving (earns MORE via storageRewardMultiplier). Peers advertising the model that pass a
-      //    random-chunk challenge prove they actually hold+serve the bytes. Same freshness stamp; the extra
-      //    reward comes from their storage weight in the split. Only when we hold a model to probe against.
+      // 2) STORAGE serving (earns MORE via storageRewardMultiplier). A bonus ON TOP of mining: we only
+      //    storage-vouch a peer that ALSO passed the liveness (mining) check this round, so storage is never
+      //    a way to earn while mining is off. Passing a random-chunk challenge proves it holds+serves bytes.
       const modelId = this.models.localHeldModelId();
       if (modelId) {
         for (const { peerId, address } of this.models.peersServing(modelId).slice(0, 16)) {
+          if (!liveAddrs.has(address)) continue; // not a live mining peer -> no storage bonus
           try { if (await this.models.verifyPeerStorage(peerId, modelId)) { this.verifiedMiners.set(address, now); stored++; } }
           catch { /* unreachable peer: skip */ }
         }
@@ -1160,7 +1162,7 @@ export class ZiraNode {
    */
   private contributeFieldHeartbeat(now: number): void {
     if (this.isFounder()) return;                                   // the launch authority does not farm emission
-    if (!this.models.miningEnabled() && !this.models.storageState().enabled) return; // only contributing nodes
+    if (!this.models.miningEnabled()) return;                       // earning requires mining ON (storage is a bonus on top, not a substitute)
     const bucket = Math.floor(now / FIELD_HEARTBEAT_INTERVAL_MS);
     if (bucket === this.lastHeartbeatBucket) return;                // one heartbeat per interval
     if (this.lastHeartbeatBucket === -1) {
@@ -1549,11 +1551,15 @@ export class ZiraNode {
    * the master can confirm we are a real, directly-reachable, participating peer (the baseline coordination
    * work that earns even without holding model bytes). */
   private async *serveLiveness(req: Uint8Array): AsyncIterable<Uint8Array> {
+    // Earning requires mining to be ON. A node that is not mining does not present itself as a
+    // participating coordinator, so masters do not vouch it and it earns nothing while mining is off.
+    if (!this.models.miningEnabled()) { yield enc.encode(JSON.stringify({ mining: false })); return; }
     let nonce = "";
     try { nonce = String((JSON.parse(dec.decode(req)) as { nonce?: unknown }).nonce ?? "").slice(0, 96); } catch { /* empty nonce still signs */ }
     yield enc.encode(JSON.stringify({
       address: this.identity.address,
       pubKey: this.identity.publicKey,
+      mining: true,
       sig: edSign("zira-live:" + nonce, this.identity.privateKey),
     }));
   }
@@ -1898,7 +1904,7 @@ export class ZiraNode {
     return {
       // Release version, exposed so the Console can negotiate features against older nodes (upgrade
       // without ruptures). Tracks the node package version / installer release.
-      version: "1.9.14",
+      version: "1.9.15",
       network: this.genesis.network,
       phase: "live",
       providersOnline: this.soft.onlineProviders(now).length,
