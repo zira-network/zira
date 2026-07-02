@@ -307,6 +307,8 @@ export const NodeApi = {
   // active wallet so mining earnings land in the wallet the user sees. The key is held in memory for the
   // session only, never persisted in the browser.
   walletExport: () => rpcGet<{ address: string; privateKey: string; publicKey: string; balanceUZIR: number }>("/wallet/export"),
+  // Import a wallet as the node's identity (loopback-only). The node mines into it after a restart.
+  walletImport: (privateKey: string) => rpcPost<{ ok: boolean; address?: string; reason?: string }>("/wallet/import", { privateKey }),
 
   net: () => rpcGet<NetInfo>("/net"),
   addPeer: (multiaddr: string) => rpcPost<{ ok: boolean; reason?: string }>("/peers/add", { multiaddr }),

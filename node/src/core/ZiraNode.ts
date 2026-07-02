@@ -1726,6 +1726,23 @@ export class ZiraNode {
   exportWallet(): { address: string; privateKey: string; publicKey: string; balanceUZIR: number } {
     return { address: this.identity.address, privateKey: this.identity.privateKey, publicKey: this.identity.publicKey, balanceUZIR: this.state.balanceOf(this.identity.address) };
   }
+
+  /**
+   * Import a wallet as THIS node's identity: the node will mine into it after a restart. Writes the key to
+   * <dataDir>/identity.json (the same file loadOrCreateIdentity reads at startup). Loopback-gated at the RPC
+   * layer. The caller restarts the node/app so the new identity loads; we do not hot-swap it in-process
+   * because the identity is referenced throughout a running node.
+   */
+  importIdentity(privateKey: string): { ok: boolean; address?: string; reason?: string } {
+    let kp;
+    try { kp = keypairFromPrivate(String(privateKey || "").trim()); }
+    catch { return { ok: false, reason: "that is not a valid private key" }; }
+    try {
+      mkdirSync(this.dataDir, { recursive: true });
+      writeFileSync(join(this.dataDir, "identity.json"), JSON.stringify({ privateKey: kp.privateKey, publicKey: kp.publicKey, address: kp.address }, null, 2));
+      return { ok: true, address: kp.address };
+    } catch (e) { return { ok: false, reason: e instanceof Error ? e.message : "could not write identity" }; }
+  }
   submitObservation(o: SignedObservation): { accepted: boolean; reason?: string } {
     const r = this.state.ingestObservation(o);
     if (r.ok && r.isNew) { this.store.appendEvent({ t: "observation", data: o }); this.publish(this.topics.events, { t: "observation", data: o }); }

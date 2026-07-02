@@ -284,5 +284,13 @@ ipcMain.handle("zira:reset", async () => {
   return true;
 });
 
+// Plain relaunch (no wipe): used after importing a wallet so the node reloads its new identity.json.
+ipcMain.handle("zira:relaunch", async () => {
+  try { stopNode(); } catch { /* */ }
+  app.relaunch();
+  app.exit(0);
+  return true;
+});
+
 // The application menu bar is intentionally off (Menu.setApplicationMenu(null) above). Copy/paste and
 // text selection still work natively inside inputs; the app is driven entirely from the Console UI.

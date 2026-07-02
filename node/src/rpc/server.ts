@@ -480,6 +480,12 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
       if (!isLoopbackHost(opts.host)) return json(res, { error: "wallet export is only available on a loopback node" }, 403);
       return json(res, node.exportWallet());
     }
+    // Import a wallet as this node's identity (it mines into the imported wallet after a restart). LOOPBACK-ONLY.
+    case "POST /wallet/import": {
+      if (!isLoopbackHost(opts.host)) return json(res, { error: "wallet import is only available on a loopback node" }, 403);
+      const b = await body(req);
+      return json(res, node.importIdentity(String(b.privateKey ?? "")));
+    }
     case "GET /history": return json(res, history(node, q));
     case "GET /events": return json(res, s.recentHistory(null, int(q, "limit", 100)));
     case "GET /locks": return json(res, s.recentLocks(int(q, "limit", 50)));

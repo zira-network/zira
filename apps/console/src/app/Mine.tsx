@@ -322,12 +322,12 @@ function EarningsPanel({ answered, earnedTodayUZIR, balanceUZIR, zti, state, min
       </div>
       <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
         <Stat label="Answered" value={answered} />
-        <Stat label="Paid today (ZIR)" value={formatZir(earnedTodayUZIR)} tone="teal" />
-        <Stat label="Mining balance (ZIR)" value={formatZir(balanceUZIR)} tone="teal" />
+        <Stat label="Earned (24h)" value={formatZir(earnedTodayUZIR)} tone="teal" />
+        <Stat label="Balance (ZIR)" value={formatZir(balanceUZIR)} tone="teal" />
         <Stat label="Trust (ZTI)" value={zti.toFixed(2)} tone="indigo" />
       </div>
       {minerAddress && (
-        <div className="mt-2 text-[11px] text-faint">Mining wallet <span className="mono text-muted">{minerAddress.slice(0, 10)}…{minerAddress.slice(-6)}</span> — this node earns here. It is separate from your personal wallet; both live on this machine.</div>
+        <div className="mt-2 text-[11px] text-faint">This node earns into your wallet <span className="mono text-muted">{minerAddress.slice(0, 10)}…{minerAddress.slice(-6)}</span>. Emission, coordination payouts, and tips all land here.</div>
       )}
       <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
         <div className="rounded-lg border border-[color-mix(in_srgb,var(--teal)_24%,var(--border))] bg-[color-mix(in_srgb,var(--teal)_7%,transparent)] p-2.5">
@@ -535,8 +535,28 @@ function HowYouEarn() {
 
 export function Mine() {
   const toast = useToast();
-  const { mode, isFounder, stats, balanceUZIR, hardware, nodeConfig, providerStatus, mining, localLaunchMiners, zti, address, locks,
+  const { mode, isFounder, stats, balanceUZIR, hardware, nodeConfig, providerStatus, mining, localLaunchMiners, zti, address, locks, client,
     minerAddress, minerBalanceUZIR, setMining, refreshStatus } = useZira();
+  // Earnings shown here are read from the ledger (the authoritative source the wallet and Earnings history
+  // use), not from provider inference counters — a coordination node earns emission/coordination payouts
+  // that never touch the inference counter, so those must come from the signed ledger to be truthful.
+  const [earned24hUZIR, setEarned24hUZIR] = useState(0);
+  useEffect(() => {
+    if (!client || !address) { setEarned24hUZIR(0); return; }
+    let live = true;
+    client.getTxHistory(address, 200)
+      .then((h) => {
+        if (!live) return;
+        const now = Date.now();
+        const total = h.filter((tx) => (tx.to === address || tx.kind === "reward" || tx.kind === "reserve_grant")
+          && tx.kind !== "bond_burn" && (tx.amountUZIR ?? 0) > 0
+          && typeof tx.timestamp === "number" && now - tx.timestamp <= 24 * 60 * 60 * 1000)
+          .reduce((s, tx) => s + (tx.amountUZIR ?? 0), 0);
+        setEarned24hUZIR(total);
+      })
+      .catch(() => { if (live) setEarned24hUZIR(0); });
+    return () => { live = false; };
+  }, [client, address, balanceUZIR]);
   const [busy, setBusy] = useState(false);
   const [hardwareBusy, setHardwareBusy] = useState(false);
   const [advanced, setAdvanced] = useState(false);
@@ -831,8 +851,8 @@ export function Mine() {
       {/* Earnings: paid ZIR vs ZTI from coordination, honestly distinguished. */}
       <EarningsPanel
         answered={(mining?.answered ?? 0) + localLaunchAnswers}
-        earnedTodayUZIR={providerStatus.earnedTodayUZIR + localLaunchEarnedUZIR}
-        balanceUZIR={minerBalanceUZIR}
+        earnedTodayUZIR={earned24hUZIR}
+        balanceUZIR={balanceUZIR || minerBalanceUZIR}
         zti={zti}
         state={state}
         minerAddress={minerAddress}
@@ -858,7 +878,7 @@ export function Mine() {
         <p className="mt-1 text-sm text-muted">You&apos;re already part of the network. Your node helps keep the shared ledger honest. No graphics card or AI model needed, and it runs whenever ZIRA is open.</p>
         <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
           <Stat label="Trust (ZTI)" value={zti.toFixed(2)} />
-          <Stat label="Earned today" value={formatZir(providerStatus.earnedTodayUZIR)} tone="teal" />
+          <Stat label="Earned (24h)" value={formatZir(earned24hUZIR)} tone="teal" />
           <Stat label="Network peers" value={peers} />
         </div>
         <div className="mt-3 flex items-center justify-between rounded-lg border border-hairline bg-base px-3 py-2">

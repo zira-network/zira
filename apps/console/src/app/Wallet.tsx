@@ -79,6 +79,7 @@ export function WalletPage() {
             </div>
             <p className="text-xs text-muted">This is the wallet your node mines into. Its key stays on your machine and never enters the browser, so there is nothing to unlock here. Mining and coordination earnings arrive at this address directly.</p>
             <p className="mt-2 text-xs text-faint">To back it up, save the file <span className="mono">identity.json</span> in your ZIRA data folder. Anyone with that file controls this wallet.</p>
+            <NodeWalletImport />
           </Card>
         ) : (
           <Card>
@@ -256,6 +257,40 @@ function SendForm() {
       </div>
       <Button variant="primary" className="mt-3 w-full" onClick={submit} disabled={!valid || busy || !canSend}>Review and send</Button>
     </Card>
+  );
+}
+
+// Import a different wallet as this node's mining identity. Writes the key to the node (loopback-only)
+// and restarts the app so the node reloads it, after which the node mines into the imported wallet.
+function NodeWalletImport() {
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function doImport() {
+    setBusy(true);
+    try {
+      const raw = extractPrivateKeyInput(key);
+      const r = await NodeApi.walletImport(raw);
+      if (!r.ok) { toast.push(r.reason ?? "could not import", "danger"); return; }
+      toast.push("Wallet imported. Restarting to mine into it…");
+      const bridge = (window as unknown as { zira?: { relaunchApp?: () => void } }).zira;
+      if (bridge?.relaunchApp) { setTimeout(() => bridge.relaunchApp!(), 800); }
+      else toast.push("Imported. Restart ZIRA to load the new wallet.", "warn");
+    } catch (e) { toast.push(e instanceof Error ? e.message : "invalid private key", "danger"); }
+    finally { setBusy(false); }
+  }
+  return (
+    <div className="mt-3 border-t border-hairline pt-3">
+      <button onClick={() => setOpen((v) => !v)} className="text-[11px] text-muted hover:text-text">{open ? "Cancel" : "Use a different wallet (import a private key)"}</button>
+      {open && (
+        <div className="mt-2 space-y-2">
+          <p className="text-[11px] text-faint">Paste a private key. It becomes this node&apos;s wallet, so your node mines into it. The app restarts to load it. Your current wallet stays recoverable from its own key.</p>
+          <Textarea rows={3} className="mono" placeholder="privateKey=... or a raw private key" value={key} onChange={(e) => setKey(e.target.value)} />
+          <Button variant="secondary" onClick={doImport} disabled={busy || !key.trim()}>Import and restart</Button>
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -232,7 +232,12 @@ export function Console() {
   const [activeProjectId, setActiveProjectId] = useState<string>("");
   const [projectEditor, setProjectEditor] = useState<{ id: string | null; name: string; instructions: string } | null>(null);
   const [input, setInput] = useState("");
-  const [streaming, setStreaming] = useState(false);
+  // Streaming + abort are PER CHAT, keyed by conversation id, so a running answer in one chat is
+  // independent of another: switching chats never shows the wrong "stop", and Stop only cancels the
+  // chat you are looking at. `streaming` (below, after `active`) is the derived flag for the active chat.
+  const [streamingIds, setStreamingIds] = useState<Set<string>>(() => new Set());
+  const startStreaming = (id: string) => setStreamingIds((s) => { const n = new Set(s); n.add(id); return n; });
+  const endStreaming = (id: string) => setStreamingIds((s) => { const n = new Set(s); n.delete(id); return n; });
   // Local mode needs the user's own machine (a node + hardware), so it exists only in the desktop app.
   // On the web/mobile build there is no local node, so we always use Field (answered by the network).
   const [answerMode, setAnswerMode] = useState<ConsoleAnswerMode>(() => {
@@ -268,7 +273,7 @@ export function Console() {
   // field. This holds the question waiting on that choice (keyed by the assistant message that failed),
   // so the user can pick "Use this machine" or "Ask zira" without retyping.
   const [localFieldOffer, setLocalFieldOffer] = useState<{ msgId: string; convoId: string; question: string } | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  const abortMap = useRef<Map<string, AbortController>>(new Map());
   const workspaceHandleRef = useRef<DirectoryHandleLike | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -276,6 +281,8 @@ export function Console() {
   const inActiveProject = (c: ModeConvo) => (activeProjectId ? c.projectId === activeProjectId : !c.projectId);
   const visibleConvos = convos.filter((c) => (c.mode ?? "field") === answerMode && inActiveProject(c));
   const active = convos.find((c) => c.id === activeId && (c.mode ?? "field") === answerMode && inActiveProject(c));
+  // Is the CHAT the user is currently viewing streaming? Drives the input lock, the Stop button, and scroll.
+  const streaming = active ? streamingIds.has(active.id) : false;
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
 
   // Resonators you can talk to directly: your own Resonators only.
@@ -650,9 +657,9 @@ export function Console() {
       messages: [...c.messages, userMsg, asstMsg], updatedAt: Date.now(),
     }));
 
-    setStreaming(true);
+    startStreaming(convoId);
     const ctrl = new AbortController();
-    abortRef.current = ctrl;
+    abortMap.current.set(convoId, ctrl);
     try {
       // If a resonator persona is selected, answer in its character. The displayed question stays as
       // typed; the persona is added to what the field receives.
@@ -739,15 +746,18 @@ export function Console() {
         }));
       }
     } finally {
-      setStreaming(false);
-      abortRef.current = null;
+      endStreaming(convoId);
+      abortMap.current.delete(convoId);
       void refreshQuota();
     }
   }
 
+  // Stop ONLY the chat the user is viewing. Other chats keep streaming independently.
   function stop() {
-    abortRef.current?.abort();
-    setStreaming(false);
+    const id = active?.id;
+    if (!id) return;
+    abortMap.current.get(id)?.abort();
+    endStreaming(id);
   }
 
   // Local mode fallback: the user chose "Ask zira" after a local answer could not run (no model loaded).
@@ -760,9 +770,9 @@ export function Console() {
     update(offer.convoId, (c) => ({
       ...c, messages: c.messages.map((m) => m.id === offer.msgId ? { ...m, content: "", streaming: true, receipt: undefined } : m),
     }));
-    setStreaming(true);
+    startStreaming(offer.convoId);
     const ctrl = new AbortController();
-    abortRef.current = ctrl;
+    abortMap.current.set(offer.convoId, ctrl);
     try {
       const convo = convos.find((c) => c.id === offer.convoId);
       const history = (convo?.messages ?? []).filter((m) => m.role !== "system" && m.id !== offer.msgId).map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
@@ -780,8 +790,8 @@ export function Console() {
         ...c, messages: c.messages.map((m) => m.id === offer.msgId ? { ...m, content: "Could not get an answer from the field: " + (e instanceof Error ? e.message : "error"), streaming: false } : m),
       }));
     } finally {
-      setStreaming(false);
-      abortRef.current = null;
+      endStreaming(offer.convoId);
+      abortMap.current.delete(offer.convoId);
       void refreshQuota();
     }
   }

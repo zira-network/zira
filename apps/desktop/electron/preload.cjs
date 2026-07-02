@@ -9,4 +9,6 @@ contextBridge.exposeInMainWorld("zira", {
   version: process.versions.electron,
   // Settings -> "Reset ZIRA": wipe everything (ledger + wallet + model cache) and relaunch clean.
   resetAndRelaunch: () => ipcRenderer.invoke("zira:reset"),
+  // Relaunch without wiping (used after importing a wallet, so the node reloads its new identity).
+  relaunchApp: () => ipcRenderer.invoke("zira:relaunch"),
 });
