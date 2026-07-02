@@ -55,8 +55,14 @@ export class SoftState {
     return true;
   }
 
-  upsertResonator(r: Resonator): boolean {
+  // `agentBalanceUZIR`, when provided by the node, is the resonator agent wallet's REAL ledger balance.
+  // The operating float is never the owner-declared record value (which is signed as 0 at creation and so
+  // cannot be trusted or rewritten after signing) — the node reads it from the ledger, gates the creation
+  // cost on it, and stores it so Discover shows the true float. Absent (internal seed callers) it falls
+  // back to the record value.
+  upsertResonator(r: Resonator, agentBalanceUZIR?: number): boolean {
     if (!this.mustVerify(r, "Resonator", r?.id ?? "?")) return false;
+    const floatUZIR = agentBalanceUZIR ?? (r.balanceUZIR ?? 0);
     // Anchor Resonators (one per anchor position) are minted and moved only by the anchor steward
     // authority: the steward signs them while setting `owner` to the position's current on-chain owner,
     // so they follow their position through transfers (the steward re-publishes the record after a
@@ -98,8 +104,8 @@ export class SoftState {
     // vesting allocation rather than a seeded balance, and the founder's default "zira" system resonator
     // is field-answered (no per-resonator float). Only enforced for the FIRST appearance of a record.
     const isSeededResonator = isAnchorResonator || NETWORK_RESONATOR_SEED_ZTI.has(r.id) || r.id === "zira";
-    if (!prev && !isSeededResonator && (r.balanceUZIR ?? 0) < PROTOCOL.RESONATOR_CREATION_COST_UZIR) {
-      log.warn("[SoftState] rejected under-funded new Resonator (below creation cost)", r.id, r.balanceUZIR);
+    if (!prev && !isSeededResonator && floatUZIR < PROTOCOL.RESONATOR_CREATION_COST_UZIR) {
+      log.warn("[SoftState] rejected under-funded new Resonator (below creation cost)", r.id, floatUZIR);
       return false;
     }
     // Trust and earnings are NOT the owner's to declare. ZTI, per-domain ZTI, jobs done, and total
@@ -120,7 +126,8 @@ export class SoftState {
       : seedStanding
         ? { zti: seedZti!, ztiByDomain: Object.fromEntries(r.domains.map((d) => [d, seedZti!])) as Record<string, number>, jobsDone: 0, totalEarnedUZIR: 0 }
         : { zti: 0, ztiByDomain: {} as Record<string, number>, jobsDone: 0, totalEarnedUZIR: 0 };
-    this.resonators.set(r.id, { ...r, ...earned });
+    // Store the ledger-derived float so Discover reflects real funds, not the owner-declared value.
+    this.resonators.set(r.id, { ...r, ...earned, balanceUZIR: floatUZIR });
     return true;
   }
 

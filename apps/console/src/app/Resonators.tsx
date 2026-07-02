@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Plus, Bot, Sparkles, Wallet, Activity, Coins, Search, Check, X } from "lucide-react";
-import { DOMAINS, DOMAIN_META, generateKeypair, type Resonator, type Domain, type SpendLimits } from "@zira/protocol";
+import { DOMAINS, DOMAIN_META, generateKeypair, PROTOCOL, type Resonator, type Domain, type SpendLimits } from "@zira/protocol";
 import { Card, Button, Input, Textarea, Badge, Meter, Modal, Field, Select, PageHeader, useToast, EmptyState, Spinner, LoadingState, ErrorState, useSlowHint } from "../components/ui";
 import { useZira } from "../store/useZira";
 import { useUnlock } from "../store/useUnlock";
@@ -411,11 +411,30 @@ function ResonatorBuilder({ starter, onClose, onCreated }: { starter: Starter | 
         }
       } catch { /* the node still enforces name uniqueness if this pre-check cannot run */ }
     }
+    const fundUZIR = zirToUzir(fundingZir);
+    // A new Resonator must stand up with at least the creation cost as its operating float. The node gates
+    // creation on the agent wallet's REAL ledger balance, so we must fund the agent wallet BEFORE publishing
+    // the record, and the funding must cover the creation cost.
+    if (mode === "node" && fundUZIR < PROTOCOL.RESONATOR_CREATION_COST_UZIR) {
+      toast.push(`Fund the Resonator with at least ${formatZir(PROTOCOL.RESONATOR_CREATION_COST_UZIR)} ZIR to create it.`, "warn");
+      setStep(2);
+      return;
+    }
     if (mode === "node") { const ok = await request(); if (!ok) return; }
     setBusy(true);
     try {
       const kp = generateKeypair(); // agent keypair, only address + pubkey leave the browser
       const limits: SpendLimits = { perTxUZIR: zirToUzir(perTxZir), perDayUZIR: zirToUzir(Number(perDay)), minCounterpartyZti: Number(minZti), allowedDomains: domains };
+
+      // 1) Fund the agent wallet FIRST so its ledger balance is in place when the node checks the creation cost.
+      if (fundUZIR > 0 && mode === "node") {
+        const nonce = await client.getNonce(address);
+        const tx = makeSignedTx({ network, to: kp.address, amountUZIR: fundUZIR, nonce, kind: "transfer", memo: "fund " + name });
+        const res = await client.submitTx(tx);
+        if (!res.accepted) { toast.push("Funding failed: " + (res.reason ?? "unknown"), "danger"); setBusy(false); return; }
+      }
+
+      // 2) Publish the signed record; the node reads the agent's funded balance from the ledger and accepts it.
       const created = await client.createResonator({
         owner: address, address: kp.address, name, purpose, systemPrompt: prompt, domains,
         modelPref: model, resonanceEnabled: resonance, spendLimits: limits,
@@ -427,12 +446,6 @@ function ResonatorBuilder({ starter, onClose, onCreated }: { starter: Starter | 
       agentKeys[created.id] = kp.privateKey;
       localStorage.setItem("zira.agentKeys", JSON.stringify(agentKeys));
 
-      const fundUZIR = zirToUzir(fundingZir);
-      if (fundUZIR > 0 && mode === "node") {
-        const nonce = await client.getNonce(address);
-        const tx = makeSignedTx({ network, to: kp.address, amountUZIR: fundUZIR, nonce, kind: "transfer", memo: "fund " + name });
-        await client.fundResonator(created.id, tx);
-      }
       toast.push("Resonator created" + (fundUZIR > 0 ? " and funded" : ""));
       onCreated();
     } catch (e) {

@@ -1486,7 +1486,9 @@ export class ZiraNode {
         return { ok: true, isNew: true };
       }
       case "resonator": {
-        const isNew = this.soft.upsertResonator(env.data);
+        // Derive the resonator's operating float from THIS node's ledger (consensus-shared), never from the
+        // gossiped record, so the creation-cost gate and the displayed balance are consistent everywhere.
+        const isNew = this.soft.upsertResonator(env.data, this.state.balanceOf(env.data.address));
         if (_fromWire && isNew) this.store.appendEvent(env);
         return { ok: true, isNew };
       }
@@ -1748,7 +1750,7 @@ export class ZiraNode {
     if (r.ok && r.isNew) { this.store.appendEvent({ t: "observation", data: o }); this.publish(this.topics.events, { t: "observation", data: o }); }
     return { accepted: r.ok, reason: r.reason };
   }
-  publishResonator(r: Resonator): boolean { const ok = this.soft.upsertResonator(r); if (ok) { const env = { t: "resonator" as const, data: r }; this.store.appendEvent(env); this.publish(this.topics.app, env); } return ok; }
+  publishResonator(r: Resonator): boolean { const ok = this.soft.upsertResonator(r, this.state.provisionalBalance(r.address)); if (ok) { const env = { t: "resonator" as const, data: r }; this.store.appendEvent(env); this.publish(this.topics.app, env); } return ok; }
   publishTask(t: Task): boolean { const ok = this.soft.upsertTask(t); if (ok) { const env = { t: "task" as const, data: t }; this.store.appendEvent(env); this.publish(this.topics.app, env); } return ok; }
   publishProvider(p: ProviderAnnounce): boolean { const ok = this.soft.upsertProvider(p, Date.now()); if (ok) this.publish(this.topics.app, { t: "provider", data: p }); return ok; }
   publishProviderProfile(p: ProviderProfile): boolean { const ok = this.soft.upsertProviderProfile(p); if (ok) { const env = { t: "providerProfile" as const, data: p }; this.store.appendEvent(env); this.publish(this.topics.app, env); } return ok; }
