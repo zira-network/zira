@@ -1,14 +1,16 @@
 // node/test/heartbeat-emission.test.ts
-// The inference-free "mining/storage earns" path: when >= MIN_OBSERVATIONS contributing nodes submit a
-// converging field-heartbeat observation (carrying their served storage), the PoR field seals a Lock and
-// the round emission is split among the ELIGIBLE contributors, weighted by storage. Eligibility is the
-// sybil-resistant gate: a contributor earns only if it is a genesis master (bootstrap infrastructure) or
-// has done verifiable on-ledger work (a settled coordination payout) recently. Empty heartbeats from
-// unknown nodes still converge for liveness but mint nothing — that is what stops emission farming.
+// Base per-epoch emission. When >= MIN_OBSERVATIONS nodes submit a converging field-heartbeat observation
+// the PoR field seals a Lock, and the epoch's base emission is credited to the FIXED genesis-master set,
+// split equally. It is NOT distributed to the live-observed contributor set: that made supply.emitted and
+// balances depend on gossip propagation, so the state root diverged across masters and quorum finality
+// stalled. Miners/resonators do not earn base emission; they earn from coordination settlement and tasks.
+// These tests prove (a) converging masters each earn equal base emission, (b) a non-master contributor
+// earns nothing from base emission, (c) a network with no genesis masters mints nothing, (d) a lone
+// observer seals no Lock and mints nothing.
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  keypairFromPrivate, buildObservationBody, canonical, hashHex, sign as edSign, standardGenesis, PROTOCOL,
+  keypairFromPrivate, buildObservationBody, canonical, hashHex, sign as edSign, standardGenesis,
   type GenesisDoc, type SignedObservation,
 } from "@zira/protocol";
 import { State, EPOCH_MS, epochOf, GRACE_MS, SETTLE_ROUNDS } from "../src/core/State.js";
@@ -16,16 +18,17 @@ import { State, EPOCH_MS, epochOf, GRACE_MS, SETTLE_ROUNDS } from "../src/core/S
 const founder = keypairFromPrivate("0a".repeat(32));
 const GTS = 1_700_000_000_000;
 
-// Three contributing nodes with different served-storage sizes.
-const n1 = keypairFromPrivate("11".repeat(32)); // 0 GiB stored
-const n2 = keypairFromPrivate("12".repeat(32)); // 25 GiB
-const n3 = keypairFromPrivate("13".repeat(32)); // 50 GiB (full storage bonus)
-// A devnet genesis whose master quorum is these three nodes, so the bootstrap earning path is exercised.
+// Three genesis-master nodes and one non-master serving miner.
+const m1 = keypairFromPrivate("11".repeat(32));
+const m2 = keypairFromPrivate("12".repeat(32));
+const m3 = keypairFromPrivate("13".repeat(32));
+const miner = keypairFromPrivate("31".repeat(32)); // non-master, serves 50 GiB
+// A devnet genesis whose master quorum is these three nodes, so the base-emission path is exercised.
 const masterGenesis: GenesisDoc = {
   ...standardGenesis("devnet", founder.address, GTS),
-  masters: [n1, n2, n3].map((k) => ({ address: k.address, pubKey: k.publicKey })),
+  masters: [m1, m2, m3].map((k) => ({ address: k.address, pubKey: k.publicKey })),
 };
-// A plain devnet genesis with no designated masters, for the sybil-gate test.
+// A plain devnet genesis with no designated masters.
 const plainGenesis = standardGenesis("devnet", founder.address, GTS);
 
 function heartbeat(kp: ReturnType<typeof keypairFromPrivate>, storageGiB: number, ts: number): SignedObservation {
@@ -41,49 +44,61 @@ function heartbeat(kp: ReturnType<typeof keypairFromPrivate>, storageGiB: number
 // (the trailing-evidence lag), so we advance a couple of epochs past both before checking balances.
 const at = (epoch: number): number => (epoch + SETTLE_ROUNDS + 2) * EPOCH_MS + GRACE_MS + 1;
 
-test("field heartbeat: >=3 eligible contributors mint storage-weighted emission", () => {
+test("field heartbeat: converging genesis masters each earn EQUAL base emission", () => {
   const s = new State(masterGenesis);
   const e = epochOf(GTS) + 1;
   const ts = e * EPOCH_MS + 10;
 
-  assert.equal(s.ingestObservation(heartbeat(n1, 0, ts)).ok, true);
-  assert.equal(s.ingestObservation(heartbeat(n2, 25, ts)).ok, true);
-  assert.equal(s.ingestObservation(heartbeat(n3, 50, ts)).ok, true);
+  // masters heartbeat with DIFFERENT served-storage sizes; base emission ignores storage (equal split).
+  assert.equal(s.ingestObservation(heartbeat(m1, 0, ts)).ok, true);
+  assert.equal(s.ingestObservation(heartbeat(m2, 25, ts)).ok, true);
+  assert.equal(s.ingestObservation(heartbeat(m3, 50, ts)).ok, true);
 
   const emittedBefore = s.supply.emitted;
   s.advance(at(e));
 
-  const b1 = s.balanceOf(n1.address), b2 = s.balanceOf(n2.address), b3 = s.balanceOf(n3.address);
-  assert.ok(s.supply.emitted > emittedBefore, "the heartbeat Lock minted round emission");
-  assert.ok(b1 > 0 && b2 > 0 && b3 > 0, "every eligible contributing node earned");
-  assert.ok(b3 > b1, "a node serving more storage earns more (storage-weighted split)");
-  assert.ok(b3 >= b2 && b2 >= b1, "earnings scale monotonically with storage");
+  const b1 = s.balanceOf(m1.address), b2 = s.balanceOf(m2.address), b3 = s.balanceOf(m3.address);
+  assert.ok(s.supply.emitted > emittedBefore, "the heartbeat Lock minted base emission");
+  assert.ok(b1 > 0 && b2 > 0 && b3 > 0, "every genesis master earned base emission");
+  assert.equal(b1, b2, "masters earn an equal split (storage does not weight base emission)");
+  assert.equal(b2, b3, "masters earn an equal split (storage does not weight base emission)");
 });
 
-test("sybil gate: >=3 converging heartbeats from non-eligible nodes mint NOTHING", () => {
-  // No genesis masters here, and these nodes have done no settled work, so although three converge and
-  // seal a Lock (liveness), none is eligible to draw round emission. This is the farming defense.
+test("a non-master contributor earns NOTHING from base emission (miners earn by work)", () => {
+  const s = new State(masterGenesis);
+  const e = epochOf(GTS) + 1;
+  const ts = e * EPOCH_MS + 10;
+  // masters converge (they earn), and a non-master miner heartbeats with full storage alongside them.
+  assert.equal(s.ingestObservation(heartbeat(m1, 0, ts)).ok, true);
+  assert.equal(s.ingestObservation(heartbeat(m2, 0, ts)).ok, true);
+  assert.equal(s.ingestObservation(heartbeat(m3, 0, ts)).ok, true);
+  assert.equal(s.ingestObservation(heartbeat(miner, 50, ts)).ok, true);
+
+  s.advance(at(e));
+  assert.ok(s.balanceOf(m1.address) > 0, "masters still earn base emission");
+  assert.equal(s.balanceOf(miner.address), 0, "the non-master miner earns nothing from base emission");
+});
+
+test("no genesis masters: converging heartbeats mint NOTHING", () => {
   const s = new State(plainGenesis);
   const e = epochOf(GTS) + 1;
   const ts = e * EPOCH_MS + 10;
-  assert.equal(s.ingestObservation(heartbeat(n1, 0, ts)).ok, true);
-  assert.equal(s.ingestObservation(heartbeat(n2, 25, ts)).ok, true);
-  assert.equal(s.ingestObservation(heartbeat(n3, 50, ts)).ok, true);
+  assert.equal(s.ingestObservation(heartbeat(m1, 0, ts)).ok, true);
+  assert.equal(s.ingestObservation(heartbeat(m2, 25, ts)).ok, true);
+  assert.equal(s.ingestObservation(heartbeat(m3, 50, ts)).ok, true);
 
   const before = s.supply.emitted;
   s.advance(at(e));
-  assert.equal(s.supply.emitted, before, "no eligible contributor, so the heartbeat mints nothing");
-  assert.equal(s.balanceOf(n1.address), 0);
-  assert.equal(s.balanceOf(n2.address), 0);
-  assert.equal(s.balanceOf(n3.address), 0);
+  assert.equal(s.supply.emitted, before, "no genesis-master set, so base emission mints nothing");
+  assert.equal(s.balanceOf(m1.address), 0);
 });
 
-test("a single contributor does NOT mint (needs >= MIN_OBSERVATIONS to converge)", () => {
+test("a single contributor seals no Lock and mints nothing (needs >= MIN_OBSERVATIONS)", () => {
   const s = new State(masterGenesis);
   const e = epochOf(GTS) + 1;
-  assert.equal(s.ingestObservation(heartbeat(n1, 50, e * EPOCH_MS + 10)).ok, true);
+  assert.equal(s.ingestObservation(heartbeat(m1, 50, e * EPOCH_MS + 10)).ok, true);
   const before = s.supply.emitted;
   s.advance(at(e));
   assert.equal(s.supply.emitted, before, "one observer is below MIN_OBSERVATIONS, so no Lock and no mint");
-  assert.equal(s.balanceOf(n1.address), 0);
+  assert.equal(s.balanceOf(m1.address), 0);
 });

@@ -5,7 +5,12 @@
 import { standardGenesis, PROTOCOL, addressFromPubKey, hashHex, type Address, type GenesisDoc, type NetworkId } from "@zira/protocol";
 
 // Fixed timestamps so the genesis hash is stable. Do not change after launch.
-const TS = { devnet: 1_700_000_000_000, testnet: 1_700_000_001_000, mainnet: 1_700_000_002_000 };
+// Mainnet uses a RECENT genesis timestamp (2026-07-02) so there is no multi-million-epoch grace
+// fast-forward at launch: with the old 2023 constant every node skipped ~16.6M empty 5s epochs to reach
+// real time, and the skip landing point depended on each node's local observation pool, which diverged
+// emission across masters and stalled quorum finality. A near-now genesis keeps the catch-up to a handful
+// of epochs that every node processes identically. devnet/testnet keep the old constants (single-node/test).
+const TS = { devnet: 1_700_000_000_000, testnet: 1_700_000_001_000, mainnet: 1_783_000_000_000 };
 
 // The mainnet genesis reserve (41% of the cap) is seeded on-ledger at block 0, fully auditable, never
 // a post launch transfer. It is not a founder premine: most of it is reserved for anchor owners.

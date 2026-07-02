@@ -1114,22 +1114,20 @@ export class ZiraNode {
     try {
       const now = Date.now();
       let live = 0, stored = 0;
-      // 1) COORDINATION baseline. Any directly-connected peer that is MINING answers a fresh liveness
-      //    challenge (a node with mining off refuses, so it is never vouched and earns nothing). Coordination
-      //    alone earns the baseline emission, no model download required, so a mining user starts earning the
-      //    moment they are a live peer. Bounded per round; each probe is timeout-guarded.
-      const liveAddrs = new Set<string>();
+      // 1) COORDINATION baseline. Any directly-connected peer that answers a fresh liveness challenge is a
+      //    real, reachable, participating node. Mining/coordination alone earns the baseline emission (no
+      //    model download required), so a new user starts earning the moment they are a live peer of the
+      //    field. Bounded per round; each probe is timeout-guarded so a stalled peer never blocks the set.
       for (const peerId of this.net.peers().slice(0, 24)) {
         const addr = await this.verifyPeerLive(peerId);
-        if (addr && addr !== this.identity.address) { this.verifiedMiners.set(addr, now); liveAddrs.add(addr); live++; }
+        if (addr && addr !== this.identity.address) { this.verifiedMiners.set(addr, now); live++; }
       }
-      // 2) STORAGE serving (earns MORE via storageRewardMultiplier). A bonus ON TOP of mining: we only
-      //    storage-vouch a peer that ALSO passed the liveness (mining) check this round, so storage is never
-      //    a way to earn while mining is off. Passing a random-chunk challenge proves it holds+serves bytes.
+      // 2) STORAGE serving (earns MORE via storageRewardMultiplier). Peers advertising the model that pass a
+      //    random-chunk challenge prove they actually hold+serve the bytes. Same freshness stamp; the extra
+      //    reward comes from their storage weight in the split. Only when we hold a model to probe against.
       const modelId = this.models.localHeldModelId();
       if (modelId) {
         for (const { peerId, address } of this.models.peersServing(modelId).slice(0, 16)) {
-          if (!liveAddrs.has(address)) continue; // not a live mining peer -> no storage bonus
           try { if (await this.models.verifyPeerStorage(peerId, modelId)) { this.verifiedMiners.set(address, now); stored++; } }
           catch { /* unreachable peer: skip */ }
         }
@@ -1152,17 +1150,25 @@ export class ZiraNode {
   private lastHeartbeatBucket = -1;
 
   /**
-   * Field heartbeat (the inference-free "mining/storage earns" path). A contributing node — one that is
-   * mining OR serving storage — periodically submits a signed observation attesting that the field is
-   * operational and it is participating, carrying its served-storage size. When >= MIN_OBSERVATIONS such
-   * contributors converge on the same value, the PoR field seals a Lock and the round emission is split
-   * among them, weighted by storage (storageRewardMultiplier). So simply mining/storing earns from day one,
-   * and paid inference coordination earns ON TOP. The steward/founder never farms this. Mints nothing
-   * beyond the emission curve (it only activates the scheduled emission), so the supply cap is unchanged.
+   * Field heartbeat (the network-liveness beacon). A contributing node — a genesis master, or any node that
+   * is mining OR serving storage — periodically submits a signed observation attesting that the field is
+   * operational and it is participating, carrying its served-storage size and (for masters) the miners it has
+   * verified. When >= MIN_OBSERVATIONS contributors converge, the PoR field seals the heartbeat Lock. Base
+   * per-epoch emission is credited to the fixed genesis-master set on epochs where a Lock seals (see
+   * State.runField): it is deliberately NOT split among the live-observed contributors, because that made
+   * emission depend on gossip propagation and diverged the state root across masters, stalling quorum
+   * finality. Miners and resonators earn from coordination settlement and tasks (real paid work), never from
+   * base emission. The steward/founder never beacons. Mints nothing beyond the emission curve.
    */
   private contributeFieldHeartbeat(now: number): void {
     if (this.isFounder()) return;                                   // the launch authority does not farm emission
-    if (!this.models.miningEnabled()) return;                       // earning requires mining ON (storage is a bonus on top, not a substitute)
+    // Genesis masters are the base infrastructure: they ALWAYS beacon, independent of any mining/storage flag,
+    // so the heartbeat Lock reliably seals every epoch. Base per-epoch emission is credited to the fixed
+    // master set only on epochs where that Lock seals, and finality liveness rests on the masters converging,
+    // so a master must never fall silent just because its MINE flag is off. A regular (non-master) node still
+    // contributes the heartbeat only when it is mining OR serving storage.
+    const isMaster = this.state.isGenesisMaster(this.identity.address);
+    if (!isMaster && !this.models.miningEnabled() && !this.models.storageState().enabled) return;
     const bucket = Math.floor(now / FIELD_HEARTBEAT_INTERVAL_MS);
     if (bucket === this.lastHeartbeatBucket) return;                // one heartbeat per interval
     if (this.lastHeartbeatBucket === -1) {
@@ -1553,15 +1559,11 @@ export class ZiraNode {
    * the master can confirm we are a real, directly-reachable, participating peer (the baseline coordination
    * work that earns even without holding model bytes). */
   private async *serveLiveness(req: Uint8Array): AsyncIterable<Uint8Array> {
-    // Earning requires mining to be ON. A node that is not mining does not present itself as a
-    // participating coordinator, so masters do not vouch it and it earns nothing while mining is off.
-    if (!this.models.miningEnabled()) { yield enc.encode(JSON.stringify({ mining: false })); return; }
     let nonce = "";
     try { nonce = String((JSON.parse(dec.decode(req)) as { nonce?: unknown }).nonce ?? "").slice(0, 96); } catch { /* empty nonce still signs */ }
     yield enc.encode(JSON.stringify({
       address: this.identity.address,
       pubKey: this.identity.publicKey,
-      mining: true,
       sig: edSign("zira-live:" + nonce, this.identity.privateKey),
     }));
   }

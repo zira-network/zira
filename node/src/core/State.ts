@@ -15,7 +15,7 @@ import {
   hashHex, canonical, buildObservationBody, addressFromPubKey, verify as edVerify,
   verifyTx, feeAndBurn,
   trustWeightedMedian, cv as cvOf, accuracyScore, emaAccuracy, consistencyScore, composeZti,
-  perRoundReward, splitReward, demandMultiplier, storageRewardMultiplier,
+  perRoundReward,
   applyGenesis, computeStateRoot,
   addUZIR, subUZIR,
   type SignedTx, type SignedObservation, type Lock, type GenesisDoc, type Address, type Domain,
@@ -636,20 +636,20 @@ export class State {
       bySubject.set(o.subject, arr);
     }
 
-    // Demand-driven emission: scale this round's rewards by how many distinct subjects the field is
-    // actively resolving. Deterministic across nodes (same gossiped in-window observations).
-    const demandMult = demandMultiplier(bySubject.size);
-    // F4: cap TOTAL emission this epoch to a single demand-scaled curve value, so emission velocity does
-    // NOT scale with the number of converged subjects. Without this, an attacker who spawns many subjects
-    // mints one perRoundReward PER subject and drains the earned pool far faster than the curve intends
-    // (the absolute 59% cap still held, but the schedule did not). Once the budget is spent, later subjects
-    // still seal their locks and lift ZTI; they simply mint no further reward this epoch.
-    const epochEmissionBudget = perRoundReward(this.supply.emitted, demandMult);
-    let epochEmitted = 0;
+    // Base per-epoch emission is credited to the fixed genesis-master set in the master-emission block AFTER
+    // this convergence loop, never to the live-observed contributor set. Distributing to whoever a node
+    // happened to observe this window (and scaling the budget by the node-local converged-subject count via a
+    // demand multiplier) made supply.emitted and per-account balances depend on gossip propagation, so the
+    // state root diverged across masters and quorum finality stalled. Crediting the fixed masters by a budget
+    // that is a pure function of supply.emitted makes every node compute an identical root. Miners and
+    // resonators do NOT earn from base emission; they earn from coordination settlement (the 77 percent
+    // split, settled through the tx pool) and tasks, which is real paid work. The loop below still seals Locks
+    // and updates ZTI (soft state, not in the state root) so trust and master admission keep working.
 
-    // Walk subjects in a deterministic (sorted) order. The reward reads supply.emitted and observer ZTI
+    // Walk subjects in a deterministic (sorted) order. Observer ZTI
     // is EMA-updated as the loop runs, so iterating in Map/gossip-arrival order would make emission and
     // trust depend on ingest order and diverge state roots across nodes. Sorting by subject fixes both.
+    let sealedAny = false; // did the field converge on at least one subject this epoch (gate for base emission)
     const subjectsSorted = [...bySubject.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
     for (const [subject, obsAll] of subjectsSorted) {
       // latest observation per observer, deterministic
@@ -691,6 +691,7 @@ export class State {
       // one lock per subject per epoch
       if (this.locks.get(subject)?.epoch === epoch) continue;
       this.locks.set(subject, lock);
+      sealedAny = true;
       this.lockLog.unshift(lock);
       if (this.lockLog.length > State.LOCK_CAP) this.lockLog.pop();
 
@@ -717,21 +718,21 @@ export class State {
         }
       }
 
-      // update contributor ZTI and mint the round reward
-      const rewardContribs: { pubKey: string; accuracy: number; address: Address; storageGiB: number }[] = [];
+      // update contributor ZTI (soft state, not in the state root; base emission is credited to the fixed
+      // genesis-master set after this loop, so no reward is minted per contributor here)
       for (const c of claims) {
         const addr = addressFromPubKey(c.observer);
         const a = this.acct(addr);
         if (!a.pubkey) a.pubkey = c.observer;
         const score = accuracyScore(c.value, median);
-        // Verifiable-work gate, scoped to the farmable liveness beacon. On FIELD_HEARTBEAT_SUBJECT a node
-        // earns round emission only if a genesis master recently VOUCHED it (lastWorkEpoch): the master
-        // confirmed it is either a real, directly-reachable coordinating peer (liveness probe, baseline) or
-        // a storage-serving peer (random-chunk challenge, earns more via storageRewardMultiplier), or it did
-        // a settled coordination payout. Genesis masters (bootstrap infrastructure) are always eligible. A
-        // bare gossip heartbeat with no master vouch still converges for liveness and lifts ZTI but mints
-        // nothing, so a node cannot farm emission without a master attesting it is a genuine participant. On
-        // real measurement subjects the accurate observation IS the work, so those earn directly (gate off).
+        // Verifiable-work gate for master-tenure accrual, scoped to the farmable liveness beacon. On
+        // FIELD_HEARTBEAT_SUBJECT a node counts a tenure epoch only if a genesis master recently VOUCHED it
+        // (lastWorkEpoch): the master confirmed it is a real, directly-reachable coordinating or storage-
+        // serving peer, or it did a settled coordination payout. Genesis masters are always eligible. A bare
+        // gossip heartbeat with no master vouch still converges for liveness and lifts ZTI, but earns no
+        // tenure, so an idle identity cannot ripen into an earned master without a master attesting it is a
+        // genuine participant. (Base emission no longer flows to contributors at all; it goes to the fixed
+        // genesis-master set after this loop. This gate now only guards earned-master admission.)
         const eligible = subject !== PROTOCOL.FIELD_HEARTBEAT_SUBJECT
           || this.isGenesisMaster(addr)
           || (a.lastWorkEpoch >= 0 && epoch - a.lastWorkEpoch <= PROTOCOL.WORK_VALIDITY_EPOCHS);
@@ -768,30 +769,25 @@ export class State {
             && a.activeEpochs >= PROTOCOL.MIN_MASTER_TENURE_EPOCHS
             && supporters.length >= PROTOCOL.MIN_INDEPENDENT_SUPPORTERS;
         }
-        // storageGiB rides on the signed observation, so every node reads the same value and the storage
-        // bonus stays deterministic. It boosts the reward WEIGHT below, never the trust/ZTI composed above.
-        // Only eligible contributors draw a slice of the round emission; ineligible empty-heartbeat nodes
-        // converge for liveness but mint nothing. (On real measurement subjects everyone is eligible.)
-        if (eligible) {
-          const storageGiB = latest.get(c.observer)?.storageGiB ?? 0;
-          rewardContribs.push({ pubKey: c.observer, accuracy: score, address: addr, storageGiB });
-        }
       }
-      // The per-subject reward is the curve value, further clamped to the remaining per-epoch budget (F4).
-      const reward = Math.min(perRoundReward(this.supply.emitted, demandMult), Math.max(0, epochEmissionBudget - epochEmitted));
-      if (reward > 0) {
-        // Weight = accuracy x storage bonus: equally-accurate contributors that serve more of the field's
-        // model weights take a larger slice of the (already curve-capped) round reward. Mints no new ZIR.
-        const parts = splitReward(reward, rewardContribs.map((r) => ({ pubKey: r.pubKey, accuracy: r.accuracy * storageRewardMultiplier(r.storageGiB) })));
-        for (const part of parts) {
-          if (part.amountUZIR <= 0) continue;
-          const rc = rewardContribs.find((r) => r.pubKey === part.pubKey);
-          if (!rc) continue;
-          if (this.supply.emitted + part.amountUZIR > PROTOCOL.MAX_SUPPLY_UZIR * PROTOCOL.EARNED_SHARE) continue;
-          this.acct(rc.address).balance += part.amountUZIR;
-          this.supply.emitted += part.amountUZIR;
-          epochEmitted += part.amountUZIR;
-          this.record(this.rewardEntry(rc.address, part.amountUZIR, subject, epoch));
+    }
+
+    // Base per-epoch emission: credit the fixed genesis-master set deterministically. The budget is a pure
+    // function of supply.emitted (no demand multiplier, which depended on the node-local converged-subject
+    // count), and the recipients are the genesis masters from the genesis doc, so supply.emitted and every
+    // master balance grow identically on every node and the state root stays byte-identical for quorum
+    // finality. Split by floor division in sorted address order; the sub-uZIR remainder is dropped, which is
+    // deterministic. Emission runs only on epochs where the field actually converged (sealedAny), so idle
+    // spans and the empty-epoch fast-forward mint nothing and stay state-neutral.
+    const masters = [...this.genesisMasters].sort();
+    if (sealedAny && masters.length > 0) {
+      const per = Math.floor(perRoundReward(this.supply.emitted, 1) / masters.length);
+      if (per > 0) {
+        for (const m of masters) {
+          if (this.supply.emitted + per > PROTOCOL.MAX_SUPPLY_UZIR * PROTOCOL.EARNED_SHARE) break;
+          this.acct(m).balance += per;
+          this.supply.emitted += per;
+          this.record(this.rewardEntry(m, per, PROTOCOL.FIELD_HEARTBEAT_SUBJECT, epoch));
         }
       }
     }

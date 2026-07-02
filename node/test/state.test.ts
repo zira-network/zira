@@ -224,12 +224,15 @@ test("a double spend at the same nonce is resolved deterministically", () => {
   assert.equal(a.nonceOf(alice.address), 1); // exactly one applied
 });
 
-test("observations seal a Lock, lift ZTI, and mint a reward", () => {
-  const s = new State(genesis);
-  const e1 = epochOf(GTS) + 1;
+test("observations seal a Lock, lift ZTI, and mint base emission to the genesis masters", () => {
   const o1 = keypairFromPrivate("31".repeat(32));
   const o2 = keypairFromPrivate("32".repeat(32));
   const o3 = keypairFromPrivate("33".repeat(32));
+  // The observers ARE the genesis masters, so the sealed Lock mints base emission to them (base emission
+  // credits the fixed master set, never the live-observed contributor set — that is what keeps it deterministic).
+  const masterGenesis = { ...standardGenesis("devnet", founder.address, GTS), masters: [o1, o2, o3].map((k) => ({ address: k.address, pubKey: k.publicKey })) };
+  const s = new State(masterGenesis);
+  const e1 = epochOf(GTS) + 1;
   for (const [kp, v] of [[o1, 1.0], [o2, 1.002], [o3, 0.999]] as const) {
     assert.equal(s.ingestObservation(obs(kp, "USD", "currency", v, e1 * EPOCH_MS + 10)).ok, true);
   }
@@ -237,7 +240,8 @@ test("observations seal a Lock, lift ZTI, and mint a reward", () => {
   const lock = s.valueOf("USD");
   assert.ok(lock, "a lock should seal");
   assert.ok(lock!.resonantValue > 0.99 && lock!.resonantValue < 1.01);
-  assert.ok(s.supply.emitted > 0, "a reward should be minted");
+  assert.ok(s.supply.emitted > 0, "base emission is minted to the masters");
+  assert.equal(s.balanceOf(o1.address), s.balanceOf(o2.address), "masters earn an equal base split");
 });
 
 test("work-gate is not self-grantable: a forged self-send earns no eligibility; a real third-party payout does", () => {
