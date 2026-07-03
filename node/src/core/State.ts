@@ -13,7 +13,7 @@
 import {
   PROTOCOL, ANCHOR_CLASSES, ANCHOR_CLASS_ZTI, ANCHOR_ACTIVATION_ENABLED, anchorSeatAllocationUZIR,
   hashHex, canonical, buildObservationBody, addressFromPubKey, verify as edVerify,
-  verifyTx, feeAndBurn,
+  verifyTx, feeAndBurn, parseBatchOutputs,
   trustWeightedMedian, cv as cvOf, accuracyScore, emaAccuracy, consistencyScore, composeZti,
   perRoundReward,
   applyGenesis, computeStateRoot,
@@ -34,7 +34,12 @@ export const WINDOW_ROUNDS = Math.ceil(PROTOCOL.OBSERVATION_WINDOW_MS / EPOCH_MS
 // per-account balances and state root — would differ, so no single root could ever gather the 3-of-4 master
 // votes and quorum finality would stall. Lagging the evidence makes the contributor set deterministic across
 // nodes. The emit-every-epoch cadence and per-epoch curve value are unchanged; only the evidence is settled.
-export const SETTLE_ROUNDS = 3;
+// Widened for a public network with uneven peer connectivity: a master with many external peers can receive
+// user txs its sibling masters have not yet seen, so an epoch closed too eagerly diverges and stalls quorum
+// finality. Finalizing further behind the head (with the applied-tx re-gossip backfill in ZiraNode) gives
+// every tx time to reach every master before its epoch settles, so honest masters always agree. Cost: finality
+// trails wall-clock by a few more seconds. Deterministic — every node uses the same value.
+export const SETTLE_ROUNDS = 8;
 // Settle time before an epoch is processed. Emission/Lock convergence is computed over each node's
 // in-window observation pool, so for the state root to match across nodes EVERY node must hold the same
 // observations when it closes a given epoch. A node whose event loop is briefly busy (serving inference,
@@ -44,7 +49,7 @@ export const SETTLE_ROUNDS = 3;
 // loop stall (and than the re-gossip interval) lets late deliveries land before the epoch closes anywhere,
 // so all nodes converge on identical emission. Kept well under OBSERVATION_WINDOW_MS so observations are
 // still firmly in-window when processed; the only cost is finality trailing wall-clock by a few epochs.
-export const GRACE_MS = 12_000;
+export const GRACE_MS = 20_000;
 
 /**
  * Deep-clone a plain snapshot leaf (account/lock/anchor) so loadSnapshot never aliases the caller's
@@ -108,6 +113,10 @@ export class State {
 
   private static HISTORY_CAP = 8000;
   private static LOCK_CAP = 2000;
+  // How long a nonce-gapped tx waits in the pool for its missing predecessor before it is dropped (~10 min of
+  // epochs). Generous, because the applied-tx re-gossip usually fills the gap within seconds; this only bounds
+  // the pool against a predecessor that is genuinely gone. Deterministic across nodes (epochs of tx timestamps).
+  private static TX_GAP_TTL_EPOCHS = 120;
 
   constructor(genesis: GenesisDoc) {
     this.genesis = genesis;
@@ -434,6 +443,12 @@ export class State {
       if (tx.to === this.founder) return { ok: false, isNew: false, reason: "genesis founder cannot be revoked" };
       if (tx.amountUZIR !== 0) return { ok: false, isNew: false, reason: "founder_revoke amount must be zero" };
     }
+    if (tx.kind === "batch_transfer") {
+      const outs = parseBatchOutputs(tx.memo);
+      if (!outs) return { ok: false, isNew: false, reason: "batch_transfer outputs are malformed" };
+      let sum = 0; for (const [, amt] of outs) sum += amt;
+      if (sum !== tx.amountUZIR) return { ok: false, isNew: false, reason: "batch_transfer amount must equal the sum of its outputs" };
+    }
     // Do NOT reject a tx whose epoch is already processed. A tx that arrives late (gossip delay, or
     // after the empty-epoch fast-forward raced lastProcessedEpoch ahead) must still be pooled; it is
     // applied at the next processed epoch (processEpoch applies every pooled tx whose epoch is <= the one
@@ -535,8 +550,21 @@ export class State {
     const txs = [...this.txPool.values()]
       .filter((t) => epochOf(t.timestamp) <= epoch - SETTLE_ROUNDS)
       .sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0) || (a.nonce - b.nonce) || (a.id < b.id ? -1 : 1));
+    // A nonce-gapped tx (its predecessor for this sender has not been applied yet, e.g. it is still in flight
+    // over gossip) must NOT be discarded: dropping it meant the tx was lost even after the predecessor arrived,
+    // so the node stayed permanently behind and its state root diverged, stalling quorum finality. Instead we
+    // RETAIN a future-nonce tx and let the applied-tx re-gossip (ZiraNode) deliver the missing predecessor,
+    // then it applies in order on the next epoch. Stale txs (nonce already past) are dropped; a gap that never
+    // resolves is dropped after TX_GAP_TTL_EPOCHS so the pool stays bounded. All checks are pure functions of
+    // nonce and epoch, so every node makes the identical keep/drop/apply decision and converges to one root.
     for (const tx of txs) {
-      this.applyTx(tx, epoch);
+      const senderNonce = this.nonceOf(tx.from);
+      if (tx.nonce < senderNonce) { this.txPool.delete(tx.id); continue; }        // superseded / already applied
+      if (tx.nonce > senderNonce) {                                                // gap: wait for the predecessor
+        if (epochOf(tx.timestamp) < epoch - State.TX_GAP_TTL_EPOCHS) this.txPool.delete(tx.id); // predecessor never came
+        continue;
+      }
+      this.applyTx(tx, epoch);                                                      // nonce matches: apply now
       this.txPool.delete(tx.id);
     }
 
@@ -610,6 +638,26 @@ export class State {
       this.acct(tx.to).balance += tx.amountUZIR;
       this.supply.burned += burned;
       this.supply.reserve = Math.max(0, this.supply.reserve - tx.amountUZIR);
+      this.record({ ...tx, committedEpoch: epoch });
+      return;
+    }
+
+    if (tx.kind === "batch_transfer") {
+      // One tx credits many recipients. Outputs come straight from the signed memo, applied in listed order,
+      // so every node produces the identical balances. amountUZIR == sum(outputs) was checked at ingest; we
+      // re-check here so a malformed tx that somehow reached apply moves no money. Overspend drops WITHOUT
+      // consuming the nonce (same as a transfer), so it retries once the funder has accrued enough.
+      const outs = parseBatchOutputs(tx.memo);
+      if (!outs) { sender.nonce += 1; if (!sender.pubkey) sender.pubkey = tx.fromPubKey; this.record({ ...tx, committedEpoch: epoch }); return; }
+      let sum = 0; for (const [, amt] of outs) sum += amt;
+      if (sum !== tx.amountUZIR) { sender.nonce += 1; if (!sender.pubkey) sender.pubkey = tx.fromPubKey; this.record({ ...tx, committedEpoch: epoch }); return; }
+      if (sender.balance < need) return;                   // overspend, drop and retry
+      const { burned } = feeAndBurn(tx.feeUZIR);
+      sender.balance = subUZIR(sender.balance, need, "batch debit");
+      sender.nonce += 1;
+      if (!sender.pubkey) sender.pubkey = tx.fromPubKey;
+      for (const [to, amt] of outs) { const r = this.acct(to); r.balance = addUZIR(r.balance, amt, "batch credit"); }
+      this.supply.burned = addUZIR(this.supply.burned, burned, "fee burn");
       this.record({ ...tx, committedEpoch: epoch });
       return;
     }
@@ -901,6 +949,14 @@ export class State {
   provisionalBalance(address: Address): number {
     let bal = this.balanceOf(address);
     for (const tx of this.txPool.values()) {
+      if (tx.kind === "batch_transfer") {
+        // A batch debits the sender the full pool and credits each memo output; tx.to is a self-placeholder,
+        // so it must NOT be credited here.
+        if (tx.from === address) bal -= tx.amountUZIR + tx.feeUZIR;
+        const outs = parseBatchOutputs(tx.memo);
+        if (outs) for (const [to, amt] of outs) if (to === address) bal += amt;
+        continue;
+      }
       if (tx.from === address) bal -= tx.amountUZIR + tx.feeUZIR;
       if (tx.to === address && tx.kind !== "bond_burn") bal += tx.amountUZIR;
     }

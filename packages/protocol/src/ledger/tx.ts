@@ -51,10 +51,30 @@ export function verifyTx(tx: SignedTx): TxCheck {
   // channel and every payment burns into the supply accounting. transfer and agent_spend both credit `to`;
   // all legitimate agent_spend callers (coordination payouts, resonator hires, query coordination) already
   // pay BASE_FEE, so this only closes the free-payment hole (e.g. a forged zero-fee "coordination payout").
-  if ((tx.kind === "transfer" || tx.kind === "agent_spend") && tx.feeUZIR < PROTOCOL.BASE_FEE_UZIR) {
+  if ((tx.kind === "transfer" || tx.kind === "agent_spend" || tx.kind === "batch_transfer") && tx.feeUZIR < PROTOCOL.BASE_FEE_UZIR) {
     return { ok: false, reason: "fee below the base fee" };
   }
   return { ok: true };
+}
+
+// Parse a batch_transfer's recipient list from its memo: {"o":[["zir1...",amountUZIR],...]}. Pure and total
+// (returns null on anything malformed), so every node derives the identical output set from the signed memo.
+// Bounded to 256 outputs; amounts must be positive whole uZIR and addresses well-formed. Shared by the ledger
+// apply path (State), the supply audit, and validation so all three agree on where a batch's ZIR went.
+export function parseBatchOutputs(memo: string | undefined): [string, number][] | null {
+  let p: unknown;
+  try { p = JSON.parse(memo ?? ""); } catch { return null; }
+  const arr = (p as { o?: unknown } | null)?.o;
+  if (!Array.isArray(arr) || arr.length === 0 || arr.length > 256) return null;
+  const out: [string, number][] = [];
+  for (const item of arr) {
+    if (!Array.isArray(item) || item.length !== 2) return null;
+    const to = item[0], amt = item[1];
+    if (typeof to !== "string" || !/^zir1[0-9a-z]{6,}$/.test(to)) return null;
+    if (typeof amt !== "number" || !Number.isInteger(amt) || amt <= 0) return null;
+    out.push([to, amt]);
+  }
+  return out;
 }
 
 /** Split a fee into the burned portion and the kept portion. With FEE_BURN = 1.0 the whole fee is

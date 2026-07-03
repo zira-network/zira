@@ -469,7 +469,11 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
       return json(res, { ...view, publicHost: host.publicHost ?? "", publicHostType: host.publicHostType, publicHostSource: host.source, publicHostError: host.error }, node.isFounder() ? 200 : 403);
     }
     case "POST /admin/reset": { json(res, { ok: true }); node.wipeAndExit(); return; }
-    case "GET /balance": return json(res, { uZIR: s.provisionalBalance(q.get("address") ?? "") });
+    // Report the SETTLED (applied) balance, not the provisional one. provisionalBalance adds every pending
+    // mempool tx, and each node's mempool differs moment to moment, so a miner's displayed balance would flicker
+    // and honest nodes would disagree on it (the settler's per-cycle payout txs sit in the pool before they
+    // settle). balanceOf is the applied state that finality agrees on: stable, and identical across nodes.
+    case "GET /balance": return json(res, { uZIR: s.balanceOf(q.get("address") ?? "") });
     case "GET /nonce": return json(res, { nonce: s.provisionalNonce(q.get("address") ?? "") });
     case "POST /tx": { const b = await body(req); return json(res, node.submitTx(b.tx)); }
     // The node's own (mining) wallet key, so the local Console can adopt it as the active wallet (the

@@ -4,7 +4,7 @@
 // balance and the issuance and burn totals from the signed event log, the function
 // an exchange would run. See Part 3.5.
 import { PROTOCOL } from "../constants";
-import { feeAndBurn } from "./tx";
+import { feeAndBurn, parseBatchOutputs } from "./tx";
 import type { Address, SignedTx, uZIR } from "../types";
 
 const EARNED_CAP_UZIR = Math.round(PROTOCOL.MAX_SUPPLY_UZIR * PROTOCOL.EARNED_SHARE);
@@ -91,6 +91,16 @@ export function auditSupply(events: SignedTx[], founderAddress: Address): AuditR
       continue;
     }
     if (tx.kind === "founder_delegate" || tx.kind === "founder_revoke") {
+      continue;
+    }
+    if (tx.kind === "batch_transfer") {
+      // One tx, many recipients (from the signed memo). Debit the sender the full amount + fee and credit each
+      // output, so the audit matches how State applies it. amountUZIR == sum(outputs) is enforced at ingest.
+      const { burned: b } = feeAndBurn(tx.feeUZIR);
+      debit(tx.from, tx.amountUZIR + tx.feeUZIR);
+      const outs = parseBatchOutputs(tx.memo);
+      if (outs) for (const [to, amt] of outs) credit(to, amt);
+      burned += b;
       continue;
     }
     // transfer, agent_spend, bond_post/return/burn

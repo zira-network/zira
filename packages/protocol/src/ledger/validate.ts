@@ -5,7 +5,7 @@
 import { PROTOCOL } from "../constants";
 import { hashHex, verify as edVerify } from "../crypto";
 import { canonical, buildObservationBody } from "../serialize";
-import { feeAndBurn, verifyTx } from "./tx";
+import { feeAndBurn, verifyTx, parseBatchOutputs } from "./tx";
 import { SupplyTracker } from "./supply";
 import type { Address, Lock, SignedEvent, SignedObservation, SignedTx, uZIR } from "../types";
 
@@ -125,6 +125,14 @@ export function applyEvent(ev: SignedEvent, state: LedgerState): { state: Ledger
   } else if (tx.kind === "founder_revoke") {
     if (tx.to !== next.founderAddress) next.founderAddresses.delete(tx.to);
     next.founderAddresses.add(next.founderAddress);
+    next.nonces[tx.from] = (next.nonces[tx.from] ?? 0) + 1;
+  } else if (tx.kind === "batch_transfer") {
+    // One tx credits many recipients from its signed memo (sum == amountUZIR). Debit the sender, credit each.
+    const { burned } = feeAndBurn(tx.feeUZIR);
+    next.balances[tx.from] = (next.balances[tx.from] ?? 0) - (tx.amountUZIR + tx.feeUZIR);
+    const outs = parseBatchOutputs(tx.memo);
+    if (outs) for (const [to, amt] of outs) next.balances[to] = (next.balances[to] ?? 0) + amt;
+    next.supply.recordBurn(burned);
     next.nonces[tx.from] = (next.nonces[tx.from] ?? 0) + 1;
   } else {
     const { burned } = feeAndBurn(tx.feeUZIR);

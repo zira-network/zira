@@ -148,7 +148,13 @@ export type TxKind =
   | "anchor_claim" | "anchor_transfer" | "anchor_list" | "anchor_delist" | "anchor_code_edit"
   | "anchor_vest_start" | "anchor_vest_release" | "anchor_activate" | "anchor_position_transfer"
   | "anchor_set_contributions"
-  | "storage_attest";
+  | "storage_attest"
+  // A single transaction that credits many recipients at once. The recipient list rides in `memo` as
+  // {"o":[["zir1...",amountUZIR],...]} and `amountUZIR` is their exact sum. It lets the settler pay a whole
+  // cycle's field-participation payout in ONE tx (one nonce) instead of one tx per miner, so a dropped
+  // packet can't open a nonce gap that cascades and forks honest nodes. Deterministic: every recipient and
+  // amount is in the signed body, applied in listed order.
+  | "batch_transfer";
 export interface TxBody {
   network: NetworkId; from: Address; fromPubKey: PublicKey; to: Address;
   amountUZIR: uZIR; feeUZIR: uZIR; nonce: number; kind: TxKind;

@@ -1061,6 +1061,13 @@ export class ZiraNode {
       const pool = this.state.poolEvents(50);
       for (const tx of pool.txs) this.publish(this.topics.events, { t: "tx", data: tx });
       for (const o of pool.observations) this.publish(this.topics.events, { t: "observation", data: o });
+      // Backfill: also re-broadcast recently-APPLIED txs, not only pooled ones. Once a tx is applied it leaves
+      // the pool, so a master that missed it during its brief pool lifetime would otherwise never receive it and
+      // would sit behind a permanent nonce gap (every later tx from that sender is then dropped), diverging its
+      // state root and stalling quorum finality. Re-gossiping the recent applied window lets a lagging master
+      // fill the gap and converge. Idempotent: a node that already has a tx de-dupes it by id, and the wide
+      // settle window (SETTLE_ROUNDS) gives these backfills time to land before their epoch finalizes anywhere.
+      for (const tx of this.state.recentHistory(null, 80)) this.publish(this.topics.events, { t: "tx", data: tx });
       // Re-gossip the latest finalized checkpoint so followers converge finality even when the
       // one-shot vote at finalization time lost a gossipsub mesh race (common on a fresh single-peer
       // join). Without this a late joiner advances its currentEpoch by wall clock but its
@@ -1202,30 +1209,29 @@ export class ZiraNode {
     }
     const per = Math.floor(pool / payees.length);
     if (per <= 0) return;
-    // Whole pool (per*N + remainder) + one base fee per payee.
-    const needed = pool + payees.length * PROTOCOL.BASE_FEE_UZIR;
+    // ONE batched tx covers the whole pool plus a single base fee (not one fee per payee). Paying every miner
+    // in a single transaction is the fix for the fork: N separate transfers meant one dropped packet opened a
+    // nonce gap that dropped every later settler tx on that node, so honest nodes diverged and finality
+    // stalled. A single tx has a single nonce, so there is no gap to cascade.
+    const needed = pool + PROTOCOL.BASE_FEE_UZIR;
     if (this.state.balanceOf(this.identity.address) < needed) {
       if (this.lastParticipationDeferLog !== bucket) { this.lastParticipationDeferLog = bucket; log.warn(`field participation deferred: settler balance ${this.state.balanceOf(this.identity.address)} < needed ${needed} (base emission still accruing)`); }
       return; // not enough base emission accrued yet; retry on a later tick this cycle
     }
-    this.lastParticipationBucket = bucket;
-    let nonce = this.state.provisionalNonce(this.identity.address);
-    const tag = String(bucket);
-    // Distribute the whole pool exactly: the floor-division remainder goes to the first (sorted) payee, so
-    // `sum(amounts) == per * payees.length + remainder == pool` and no dust is left undistributed.
-    let remainder = pool - per * payees.length;
-    let paid = 0;
-    for (const to of payees) {
-      const amt = per + (remainder > 0 ? remainder : 0);
-      remainder = 0;
-      const tx = signTx({
-        network: this.genesis.network, from: this.identity.address, fromPubKey: this.identity.publicKey, to,
-        amountUZIR: amt, feeUZIR: PROTOCOL.BASE_FEE_UZIR, nonce: nonce++, kind: "agent_spend",
-        parents: [], timestamp: now, memo: `field participation ${tag}`,
-      }, this.identity.privateKey);
-      if (this.submitTx(tx).accepted) paid++;
+    // Each payee gets `per`; the floor remainder goes to the first (sorted) payee so the outputs sum EXACTLY
+    // to `pool`. amountUZIR == pool == sum(outputs), which the ledger re-checks so no ZIR is minted or lost.
+    const remainder = pool - per * payees.length;
+    const outputs: [string, number][] = payees.map((to, i) => [to, per + (i === 0 ? remainder : 0)]);
+    const tx = signTx({
+      network: this.genesis.network, from: this.identity.address, fromPubKey: this.identity.publicKey,
+      to: this.identity.address, amountUZIR: pool, feeUZIR: PROTOCOL.BASE_FEE_UZIR,
+      nonce: this.state.provisionalNonce(this.identity.address), kind: "batch_transfer",
+      parents: [], timestamp: now, memo: JSON.stringify({ o: outputs }),
+    }, this.identity.privateKey);
+    if (this.submitTx(tx).accepted) {
+      this.lastParticipationBucket = bucket;
+      log.info(`field participation payout: ${payees.length} miner(s) x ~${per} uZIR in ONE batch (bucket ${bucket})`);
     }
-    if (paid > 0) log.info(`field participation payout: ${paid} contributing miner(s) x ${per} uZIR (bucket ${tag})`);
   }
 
   /**
