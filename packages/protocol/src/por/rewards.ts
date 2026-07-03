@@ -8,10 +8,13 @@ import type { PublicKey, uZIR } from "../types";
 
 const EARNED_CAP_UZIR = Math.round(PROTOCOL.MAX_SUPPLY_UZIR * PROTOCOL.EARNED_SHARE);
 
-// Fraction of the still unemitted earned pool paid out per round. Small, so the
-// curve is smooth: high in absolute terms early (large remaining pool) and tapering
-// as the pool empties, an exponential decay toward the cap that never crosses it.
-const ROUND_EMISSION_FRACTION = 0.000_000_5;
+// Fraction of the still unemitted earned pool paid out per round. Small, so the curve is smooth: high in
+// absolute terms early (large remaining pool) and tapering as the pool empties, an exponential decay toward
+// the cap that never crosses it. Calibrated for a ~10-year half-life at the 5s round cadence: the earned
+// 59% pool releases about half over ~10 years and tails off for decades after, so ZIR supply grows gradually
+// like a real, long-lived network rather than minting most of itself in the first year.
+// half-life = ln(2) / (fraction * rounds_per_year); rounds_per_year = 365.25*24*3600/5 ≈ 6.31M.
+const ROUND_EMISSION_FRACTION = 0.000_000_011;
 // A floor so late rounds still pay a little while remaining stays positive.
 const MIN_ROUND_REWARD_UZIR = 1_000;
 

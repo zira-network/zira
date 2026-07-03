@@ -241,7 +241,7 @@ test("observations seal a Lock, lift ZTI, and mint base emission to the genesis 
   assert.ok(lock, "a lock should seal");
   assert.ok(lock!.resonantValue > 0.99 && lock!.resonantValue < 1.01);
   assert.ok(s.supply.emitted > 0, "base emission is minted to the masters");
-  assert.equal(s.balanceOf(o1.address), s.balanceOf(o2.address), "masters earn an equal base split");
+  assert.ok(s.balanceOf(o1.address) > 0 && s.balanceOf(o2.address) === 0, "base emission goes to the settler (first master) alone");
 });
 
 test("work-gate is not self-grantable: a forged self-send earns no eligibility; a real third-party payout does", () => {

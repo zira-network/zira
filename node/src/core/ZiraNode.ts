@@ -62,6 +62,10 @@ function envInt(name: string, fallback: number): number {
   const n = Number(process.env[name] ?? "");
   return Number.isInteger(n) && n > 0 ? n : fallback;
 }
+function envFrac(name: string, fallback: number): number {
+  const n = Number(process.env[name] ?? "");
+  return Number.isFinite(n) && n >= 0 && n <= 1 ? n : fallback;
+}
 
 // Autonomous-coordination payouts are created by a SINGLE network settler (isNetworkSettler): the first
 // genesis master on mainnet, the founder on devnet/test. One funder means one deterministic tx set per epoch,
@@ -73,7 +77,12 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 const AUTONOMOUS_RESONANCE_MAX_PER_CYCLE = envInt("ZIRA_AUTONOMOUS_RESONANCE_MAX_PER_CYCLE", 2);
-const AUTONOMOUS_RESONANCE_TASK_UZIR = envInt("ZIRA_AUTONOMOUS_RESONANCE_TASK_UZIR", 0);
+// Community redistribution. Base emission is minted to the settler alone (see State.emitBaseThrough); each
+// cycle the settler pays most of it out to the people running the network — a fixed per-cycle mining pool
+// split among verified participants, plus a per-driven-resonator reward to owners. Sized so the settler
+// redistributes the large majority of its per-cycle emission and keeps the rest as treasury. Env-tunable.
+const FIELD_PARTICIPATION_BUDGET_UZIR = envInt("ZIRA_FIELD_PARTICIPATION_BUDGET_UZIR", 5_000_000_000); // 5000 ZIR/cycle mining pool
+const AUTONOMOUS_RESONANCE_TASK_UZIR = envInt("ZIRA_AUTONOMOUS_RESONANCE_TASK_UZIR", 200_000_000);     // 200 ZIR / driven resonator / cycle
 // Real per-query coordination reward paid by the steward/founder funding wallet to the providers that
 // contributed accepted answers to an autonomous-resonance query. This is the money path that makes a
 // MINING node actually earn ZIR via Proof of Resonance + coordination: when its accepted work converges
@@ -89,7 +98,6 @@ const AUTONOMOUS_COORDINATION_REWARD_UZIR = envInt("ZIRA_AUTONOMOUS_COORDINATION
 // among participants means more nodes dilute each share (so spinning up sybils just splits the same pool)
 // and bounds the settler's spend. One settler funds it, so the payout txs are deterministic and finality
 // holds. Answering coordination queries (the 77% split) still earns MORE, on top of this. Set 0 to disable.
-const FIELD_PARTICIPATION_BUDGET_UZIR = envInt("ZIRA_FIELD_PARTICIPATION_BUDGET_UZIR", 2_000_000); // 2 ZIR/cycle pool
 const FIELD_PARTICIPATION_MAX_PAYEES = envInt("ZIRA_FIELD_PARTICIPATION_MAX_PAYEES", 64);
 // Field heartbeat: how often a contributing (mining or storage) node attests it is up + serving, so the
 // PoR field forms Locks and the round emission flows to contributors. Frequent enough that every
@@ -1157,36 +1165,41 @@ export class ZiraNode {
   private lastAutonomousResonanceBucket = -1;
   private lastParticipationBucket = -1;
   private lastHeartbeatBucket = -1;
+  /** The reward a single driven resonator's owner earns per cycle (fixed pool, funded from the settler's base
+   *  emission). Used for BOTH the owner payment and the task's displayed totalEarned, so they match. */
+  private cycleResonatorReward(_now: number): number {
+    return AUTONOMOUS_RESONANCE_TASK_UZIR;
+  }
 
   /**
-   * Field participation payout. Once per cycle the network settler splits FIELD_PARTICIPATION_BUDGET_UZIR
-   * among the miners it has VERIFIED are genuinely participating (freshVouchedMiners: a live, reachable
-   * coordinating peer, or a storage-serving peer that passed a chunk challenge). This is what makes turning
-   * mining ON actually earn: a real, connected, contributing node is paid for taking part even when it does
-   * not win a coordination answer. Paid from the settler's base emission as ordinary transfers. One settler
-   * funds it, so the txs are a single deterministic set and finality never diverges. Genesis masters (they
-   * already earn base emission) and the settler itself are excluded.
+   * Field participation payout. Once per cycle the network settler splits a fixed mining pool among the miners
+   * it has VERIFIED are genuinely participating (freshVouchedMiners: a live, reachable coordinating peer, or a
+   * storage-serving peer that passed a chunk challenge). This is what makes turning mining ON actually earn: a
+   * real, connected, contributing node is paid for taking part even when it does not win a coordination answer.
+   * Funded from the settler's base emission as ordinary transfers. One settler funds it, so the txs are a single
+   * deterministic set and finality never diverges. Genesis masters and the settler itself are excluded.
    */
   private settleFieldParticipation(now: number): void {
     if (FIELD_PARTICIPATION_BUDGET_UZIR <= 0 || !this.isNetworkSettler()) return;
     const bucket = Math.floor(now / AUTONOMOUS_RESONANCE_CYCLE_MS);
     if (this.lastParticipationBucket === bucket) return;
+    const pool = FIELD_PARTICIPATION_BUDGET_UZIR;
     const payees = this.freshVouchedMiners(now)
       .filter((a) => /^zir1[0-9a-z]{6,}$/.test(a) && a !== this.identity.address && !this.state.isGenesisMaster(a))
       .sort()
       .slice(0, FIELD_PARTICIPATION_MAX_PAYEES);
     if (payees.length === 0) return;
-    const per = Math.floor(FIELD_PARTICIPATION_BUDGET_UZIR / payees.length);
+    const per = Math.floor(pool / payees.length);
     if (per <= 0) return;
-    // Whole budget (per*N + remainder) + one base fee per payee.
-    const needed = FIELD_PARTICIPATION_BUDGET_UZIR + payees.length * PROTOCOL.BASE_FEE_UZIR;
+    // Whole pool (per*N + remainder) + one base fee per payee.
+    const needed = pool + payees.length * PROTOCOL.BASE_FEE_UZIR;
     if (this.state.balanceOf(this.identity.address) < needed) return; // not enough base emission accrued yet
     this.lastParticipationBucket = bucket;
     let nonce = this.state.provisionalNonce(this.identity.address);
     const tag = String(bucket);
     // Distribute the whole pool exactly: the floor-division remainder goes to the first (sorted) payee, so
-    // `sum(amounts) == per * payees.length + remainder == budget` and no dust is left undistributed.
-    let remainder = FIELD_PARTICIPATION_BUDGET_UZIR - per * payees.length;
+    // `sum(amounts) == per * payees.length + remainder == pool` and no dust is left undistributed.
+    let remainder = pool - per * payees.length;
     let paid = 0;
     for (const to of payees) {
       const amt = per + (remainder > 0 ? remainder : 0);
@@ -1310,7 +1323,11 @@ export class ZiraNode {
       if (queries > 0) log.info(`autonomous coordination: published ${queries} resonance ${queries === 1 ? "query" : "queries"} this cycle (driving ${mine.length} of ${eligible.length} eligible resonators)`);
     }
 
+    // Tasks carry the resonator reward budget, so ONLY the settler publishes + settles them: one deterministic
+    // funder means the reward amount (and every resonator's displayed totalEarned, credited from the gossiped
+    // task) is identical on every node. Non-settler masters only publish queries above (idempotent, free).
     let released = 0;
+    if (!this.isNetworkSettler()) return { queries, released };
     for (const settleBucket of [bucket, bucket - 1]) {
       if (settleBucket < 0) continue;
       const bucketStart = settleBucket * AUTONOMOUS_RESONANCE_CYCLE_MS;
@@ -1318,6 +1335,10 @@ export class ZiraNode {
       for (const resonator of this.autonomousResonanceBatch(mine, settleBucket)) {
         const task = this.autonomousResonanceTask(resonator, settleBucket, now);
         if (task && this.publishTask(task)) released++;
+        // Pay the resonator's OWNER for this cycle of autonomous work (real ZIR from the settler's base
+        // emission). The gossiped task grows the resonator's displayed totalEarned by the same amount, so the
+        // owner's balance and the resonator's earnings stay in step. Settler-only, once per (resonator,bucket).
+        this.payResonatorReward(resonator, settleBucket, now);
         // Real coordination payout: the funding wallet (this master/steward node, the query asker) pays the
         // providers whose accepted answers converged this query, so a MINING contributor's balance actually
         // grows from Proof of Resonance + coordination. Run EVERY cycle (not only when the task first
@@ -1327,6 +1348,41 @@ export class ZiraNode {
       }
     }
     return { queries, released };
+  }
+
+  private paidResonatorRewards = new Set<string>();
+  /**
+   * Pay a resonator's OWNER for one cycle of autonomous coordination work, from the network settler's base
+   * emission. One deterministic funder (the settler), once per (resonator, bucket), so the payout txs never
+   * diverge across masters. The amount equals the autonomous task budget, so the owner's real balance and the
+   * resonator's displayed totalEarned (credited by the gossiped task) move together. Excludes the settler and
+   * genesis masters (they already earn base emission).
+   */
+  private payResonatorReward(resonator: Resonator, bucket: number, now: number): void {
+    if (!this.isNetworkSettler()) return;
+    const amt = this.cycleResonatorReward(now);
+    if (amt <= 0) return;
+    const key = `${resonator.id}:${bucket}`;
+    if (this.paidResonatorRewards.has(key)) return;
+    const owner = resonator.owner;
+    // Pay only genuine third-party (user) owners. The settler, genesis masters, and the steward/founder are
+    // network infrastructure — paying them is a pointless self-transfer that only adds settle-window tx load,
+    // so skip it. The resonator's DISPLAYED totalEarned still grows for every driven resonator (via the
+    // gossiped, tx-free task), so anchor resonators visibly earn even though no ZIR moves to the steward.
+    if (!/^zir1[0-9a-z]{6,}$/.test(owner) || owner === this.identity.address
+      || owner === this.genesis.founder || this.state.isGenesisMaster(owner)) {
+      this.paidResonatorRewards.add(key); return; // nothing to pay, but don't retry
+    }
+    if (this.state.balanceOf(this.identity.address) < amt + PROTOCOL.BASE_FEE_UZIR) return; // fund next cycle
+    const tx = signTx({
+      network: this.genesis.network, from: this.identity.address, fromPubKey: this.identity.publicKey, to: owner,
+      amountUZIR: amt, feeUZIR: PROTOCOL.BASE_FEE_UZIR, nonce: this.state.provisionalNonce(this.identity.address),
+      kind: "agent_spend", parents: [], timestamp: now, memo: `resonator reward ${bucket}`,
+    }, this.identity.privateKey);
+    if (this.submitTx(tx).accepted) {
+      this.paidResonatorRewards.add(key);
+      if (this.paidResonatorRewards.size > 5000) this.paidResonatorRewards = new Set([...this.paidResonatorRewards].slice(-2500));
+    }
   }
 
   private settledCoordinationQueries = new Set<string>();
@@ -1446,12 +1502,10 @@ export class ZiraNode {
     const domain = this.autonomousResonanceDomain(resonator, bucket);
     const convergence = this.autonomousConvergenceScore(answers);
     const resultRef = hashHex(answers.map((a) => `${a.provider}:${a.answer}`).sort().join("\n"));
-    const budgetUZIR = Math.min(
-      AUTONOMOUS_RESONANCE_TASK_UZIR,
-      Math.max(0, resonator.spendLimits?.perTxUZIR ?? AUTONOMOUS_RESONANCE_TASK_UZIR),
-      Math.max(0, resonator.balanceUZIR ?? 0),
-    );
-    void now;
+    // The network (settler) funds this reward from base emission, so it is NOT capped by the resonator's own
+    // operating float — the resonator EARNS this, it does not spend it. The same amount is paid to the owner
+    // (payResonatorReward), so the displayed totalEarned (credited from this gossiped task) matches the payout.
+    const budgetUZIR = this.cycleResonatorReward(now);
     return {
       id: taskId,
       client: this.genesis.founder,
@@ -2001,7 +2055,7 @@ export class ZiraNode {
     return {
       // Release version, exposed so the Console can negotiate features against older nodes (upgrade
       // without ruptures). Tracks the node package version / installer release.
-      version: "1.9.17",
+      version: "1.9.18",
       network: this.genesis.network,
       phase: "live",
       providersOnline: this.soft.onlineProviders(now).length,

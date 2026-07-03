@@ -101,9 +101,9 @@ export const PROTOCOL = {
   // directory). This raises the prior effective floor (20 ZIR, console-only) to a meaningful 1,000 ZIR
   // and makes it a canonical protocol constant enforced by the node. It is NOT a fee/burn and mints no
   // ZIR: it is the owner's own ZIR moved into their own Resonator's wallet (withdrawable later), so
-  // supply, emission, and the genesis hash are all unchanged. Set deliberately high so a Resonator is a
-  // serious, funded agent with real operating float — not a throwaway anyone can spam into the directory.
-  RESONATOR_CREATION_COST_UZIR: 1000 * 1_000_000,
+  // supply, emission, and the genesis hash are all unchanged. Sized so a Resonator is a funded agent with
+  // real operating float, while staying accessible enough for a growing network to create them.
+  RESONATOR_CREATION_COST_UZIR: 100 * 1_000_000,
 
   // Storage-weighted emission. Hosting the field's authorized model weights is real, costly work, so a
   // contributor that serves more model data earns a bounded bonus on its emission split. The bonus is a

@@ -30,7 +30,7 @@ const miner = generateKeypair(); // the paid coordination contributor
 
 test("the network settler funds coordination payouts without breaking finality", { timeout: 260_000 }, async () => {
   const dir = (n: string) => join(tmpdir(), `zira-msf-${process.pid}-${n}-${Date.now()}`);
-  const basePort = 19740;
+  const basePort = 19772;
   const nets: Libp2pNetwork[] = [];
   const nodes: ZiraNode[] = [];
   for (let i = 0; i < masters.length; i++) {

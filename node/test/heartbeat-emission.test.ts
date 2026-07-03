@@ -44,12 +44,11 @@ function heartbeat(kp: ReturnType<typeof keypairFromPrivate>, storageGiB: number
 // (the trailing-evidence lag), so we advance a couple of epochs past both before checking balances.
 const at = (epoch: number): number => (epoch + SETTLE_ROUNDS + 2) * EPOCH_MS + GRACE_MS + 1;
 
-test("field heartbeat: converging genesis masters each earn EQUAL base emission", () => {
+test("base emission is minted to the SETTLER (first genesis master) alone", () => {
   const s = new State(masterGenesis);
   const e = epochOf(GTS) + 1;
   const ts = e * EPOCH_MS + 10;
 
-  // masters heartbeat with DIFFERENT served-storage sizes; base emission ignores storage (equal split).
   assert.equal(s.ingestObservation(heartbeat(m1, 0, ts)).ok, true);
   assert.equal(s.ingestObservation(heartbeat(m2, 25, ts)).ok, true);
   assert.equal(s.ingestObservation(heartbeat(m3, 50, ts)).ok, true);
@@ -57,11 +56,14 @@ test("field heartbeat: converging genesis masters each earn EQUAL base emission"
   const emittedBefore = s.supply.emitted;
   s.advance(at(e));
 
-  const b1 = s.balanceOf(m1.address), b2 = s.balanceOf(m2.address), b3 = s.balanceOf(m3.address);
-  assert.ok(s.supply.emitted > emittedBefore, "the heartbeat Lock minted base emission");
-  assert.ok(b1 > 0 && b2 > 0 && b3 > 0, "every genesis master earned base emission");
-  assert.equal(b1, b2, "masters earn an equal split (storage does not weight base emission)");
-  assert.equal(b2, b3, "masters earn an equal split (storage does not weight base emission)");
+  // m1 is masters[0] = the settler; it mints the whole per-epoch reward and redistributes it later (in the
+  // node). The other masters do NOT earn base emission.
+  assert.equal(s.settler, m1.address, "the first genesis master is the settler");
+  assert.ok(s.supply.emitted > emittedBefore, "base emission minted");
+  assert.ok(s.balanceOf(m1.address) > 0, "the settler earned all base emission");
+  assert.equal(s.balanceOf(m2.address), 0, "non-settler masters earn no base emission");
+  assert.equal(s.balanceOf(m3.address), 0, "non-settler masters earn no base emission");
+  assert.equal(s.balanceOf(m1.address), s.supply.emitted, "all emitted ZIR is held by the settler");
 });
 
 test("a non-master contributor earns NOTHING from base emission (miners earn by work)", () => {
@@ -93,23 +95,25 @@ test("no genesis masters: converging heartbeats mint NOTHING", () => {
   assert.equal(s.balanceOf(m1.address), 0);
 });
 
-test("base emission accrues to the masters every epoch, independent of convergence", () => {
+test("base emission accrues to the settler every epoch, independent of convergence", () => {
   // A single observer seals no Lock (needs >= MIN_OBSERVATIONS), but base emission is a per-epoch schedule to
-  // the fixed masters that does NOT depend on the observation window — so the masters still earn, deterministically.
+  // the settler that does NOT depend on the observation window — so it still accrues, deterministically.
   const s = new State(masterGenesis);
   const e = epochOf(GTS) + 1;
   assert.equal(s.ingestObservation(heartbeat(m1, 50, e * EPOCH_MS + 10)).ok, true);
   s.advance(at(e));
   assert.equal(s.valueOf("ZIRA_FIELD_HEARTBEAT"), null, "one observer seals no Lock");
-  assert.ok(s.supply.emitted > 0, "base emission still accrues to the masters (not Lock-gated)");
-  assert.equal(s.balanceOf(m1.address), s.balanceOf(m2.address), "masters earn an equal base split");
+  assert.ok(s.supply.emitted > 0, "base emission still accrues (not Lock-gated)");
+  assert.equal(s.balanceOf(m1.address), s.supply.emitted, "the settler holds all emission");
+  assert.equal(s.balanceOf(m2.address), 0, "non-settler masters earn nothing");
 });
 
-test("with no observations at all, base emission still accrues to the masters", () => {
+test("with no observations at all, base emission still accrues to the settler", () => {
   // The purest determinism check: emission is a function of the epoch reached, not of any observation.
   const s = new State(masterGenesis);
   const e = epochOf(GTS) + 1;
   s.advance(at(e));
-  assert.ok(s.supply.emitted > 0, "masters earn base emission with zero observations");
-  assert.equal(s.balanceOf(m1.address), s.balanceOf(m3.address), "equal split across masters");
+  assert.ok(s.supply.emitted > 0, "settler earns base emission with zero observations");
+  assert.equal(s.balanceOf(m1.address), s.supply.emitted, "the settler holds all emission");
+  assert.equal(s.balanceOf(m3.address), 0, "non-settler masters earn nothing");
 });

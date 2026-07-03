@@ -30,7 +30,7 @@ const genesis: GenesisDoc = {
 };
 const topicList = buildTopics(genesisId(genesis)).all();
 
-test("4 genesis masters keep finality live and compute an identical root + equal emission", { timeout: 240_000 }, async () => {
+test("4 genesis masters keep finality live and compute an identical root + identical emitted supply", { timeout: 240_000 }, async () => {
   const dir = (n: string) => join(tmpdir(), `zira-mmf-${process.pid}-${n}-${Date.now()}`);
   const basePort = 19720;
   const nets: Libp2pNetwork[] = [];

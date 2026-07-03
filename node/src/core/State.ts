@@ -66,6 +66,10 @@ export class State {
   readonly founder: Address;
   private authorizedFounders = new Set<Address>();
   private genesisMasters = new Set<Address>();
+  // The network settler: the FIRST genesis master (mainnet) or the founder (devnet/test with no master set).
+  // Base emission is credited here alone, so a single wallet mints the earned pool and then redistributes
+  // most of it to the community each cycle (see ZiraNode). Fixed from genesis, so emission stays deterministic.
+  readonly settler: Address;
 
   accounts = new Map<Address, Account>();
   supply: SupplyState = { emitted: 0, burned: 0, reserve: 0 };
@@ -108,6 +112,7 @@ export class State {
   constructor(genesis: GenesisDoc) {
     this.genesis = genesis;
     this.founder = genesis.founder;
+    this.settler = genesis.masters?.[0]?.address ?? genesis.founder;
     this.setAuthorizedFounders(genesis.founders ?? [genesis.founder]);
     const seeded = applyGenesis(genesis);
     for (const [addr, bal] of Object.entries(seeded.balances)) {
@@ -800,27 +805,28 @@ export class State {
    * it had observed. This is the property finality needs: two nodes at the same epoch always hold the same
    * emitted and the same master balances. Catching up the whole span (rather than emitting one epoch inside
    * runField) is what closes the gap the fast-forward opens. Reward per epoch is perRoundReward(emitted) with
-   * NO demand multiplier (that depended on the observed subject count and forked the chain). Miners and
-   * resonators do not earn base emission; they earn from coordination settlement and tasks. Bounded by the
-   * earned-share cap. One aggregated ledger entry per master per catch-up keeps history lean.
+   * NO demand multiplier (that depended on the observed subject count and forked the chain).
+   *
+   * The whole per-epoch reward is credited to the SETTLER (the first genesis master) alone. The settler then
+   * redistributes most of it to the community (miners + resonator owners) each cycle and keeps a small
+   * treasury cut — see ZiraNode. Concentrating the mint in one wallet is what lets ~80% of emission flow to
+   * participants (a single funder can't redistribute more than it holds). Emission runs only when a genesis
+   * master set exists (mainnet); on a masterless devnet nothing mints. Bounded by the earned-share cap.
    */
   private emitBaseThrough(epoch: number): void {
-    const masters = [...this.genesisMasters].sort();
-    if (masters.length === 0) { this.lastEmittedEpoch = Math.max(this.lastEmittedEpoch, epoch); return; }
+    if (this.genesisMasters.size === 0) { this.lastEmittedEpoch = Math.max(this.lastEmittedEpoch, epoch); return; }
     const cap = PROTOCOL.MAX_SUPPLY_UZIR * PROTOCOL.EARNED_SHARE;
-    const credited = new Map<Address, number>();
+    let credited = 0;
     for (let e = this.lastEmittedEpoch + 1; e <= epoch; e++) {
-      const per = Math.floor(perRoundReward(this.supply.emitted, 1) / masters.length);
-      if (per <= 0) break;                                          // schedule exhausted / too small to split
-      if (this.supply.emitted + per * masters.length > cap) break;  // would cross the earned-share cap
-      for (const m of masters) {
-        this.acct(m).balance += per;
-        this.supply.emitted += per;
-        credited.set(m, (credited.get(m) ?? 0) + per);
-      }
+      const per = perRoundReward(this.supply.emitted, 1);
+      if (per <= 0) break;                                // schedule exhausted
+      if (this.supply.emitted + per > cap) break;         // would cross the earned-share cap
+      this.acct(this.settler).balance += per;
+      this.supply.emitted += per;
+      credited += per;
     }
     this.lastEmittedEpoch = Math.max(this.lastEmittedEpoch, epoch);
-    for (const [m, amt] of credited) if (amt > 0) this.record(this.rewardEntry(m, amt, PROTOCOL.FIELD_HEARTBEAT_SUBJECT, epoch));
+    if (credited > 0) this.record(this.rewardEntry(this.settler, credited, PROTOCOL.FIELD_HEARTBEAT_SUBJECT, epoch));
   }
 
   private rewardEntry(to: Address, amount: number, subject: string, epoch: number): LedgerEntry {
