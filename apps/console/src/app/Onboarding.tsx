@@ -100,9 +100,10 @@ export function Onboarding() {
 
       {step === 2 && (
         <div className="flex flex-col gap-3">
-          <h4 className="font-medium">Before you make a wallet</h4>
-          <p className="text-sm text-muted">A few honest things to know first.</p>
+          <h4 className="font-medium">Your privacy, and a few honest terms</h4>
+          <p className="text-sm text-muted">ZIRA keeps your data with you. A few honest things to know before you make a wallet.</p>
           <ul className="space-y-1.5 text-sm text-muted">
+            <li><span className="text-text">Your data stays on your machine.</span> Your chats and files live on this device and are never sent to a company. When you ask the network, only your question travels to the models that answer it, and only to complete that answer.</li>
             <li>ZIRA is run by its users, not a company. There is no account to sign into and no support desk. You run it, you own it.</li>
             <li>Your wallet key stays on this device. Lose it and your funds are gone, and no one can reset it for you.</li>
             <li>ZIR is earned, never sold by us. It has no guaranteed value and may never have one. None of this is investment advice.</li>
@@ -111,7 +112,7 @@ export function Onboarding() {
           </ul>
           <label className="mt-1 flex items-start gap-2 text-sm text-text">
             <input type="checkbox" checked={termsAccepted} onChange={(e) => setTermsAccepted(e.target.checked)} className="mt-0.5" />
-            <span>I've read and agree to these terms.</span>
+            <span>I've read the privacy note and accept these terms.</span>
           </label>
           <label className="flex items-start gap-2 text-sm text-muted">
             <input type="checkbox" checked={analytics} onChange={(e) => setAnalytics(e.target.checked)} className="mt-0.5" />

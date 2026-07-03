@@ -157,18 +157,31 @@ function splashHtml(state, detail) {
   const sub = connecting
     ? "Launching your local node and loading the Console."
     : (detail || "The local node did not become reachable.");
+  // The ZIRA mark (the resonance cell), inlined so the splash needs no external asset.
+  const mark = `<svg width="72" height="72" viewBox="0 0 88 88" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="ZIRA">
+    <defs><linearGradient id="zm" x1="18" y1="14" x2="70" y2="74" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#E8FCF7" stop-opacity=".95"/><stop offset=".38" stop-color="#3ECFC0" stop-opacity=".9"/><stop offset="1" stop-color="#6B8CE8" stop-opacity=".78"/>
+    </linearGradient></defs>
+    <g fill="url(#zm)">
+      <circle cx="44" cy="31" r="13" fill-opacity=".88"/><circle cx="55.3" cy="37.5" r="13" fill-opacity=".64"/><circle cx="55.3" cy="50.5" r="13" fill-opacity=".48"/>
+      <circle cx="44" cy="57" r="13" fill-opacity=".64"/><circle cx="32.7" cy="50.5" r="13" fill-opacity=".48"/><circle cx="32.7" cy="37.5" r="13" fill-opacity=".72"/>
+    </g>
+    <g fill="none" stroke="rgba(255,255,255,.34)" stroke-width=".75">
+      <circle cx="44" cy="31" r="13"/><circle cx="55.3" cy="37.5" r="13"/><circle cx="55.3" cy="50.5" r="13"/><circle cx="44" cy="57" r="13"/><circle cx="32.7" cy="50.5" r="13"/><circle cx="32.7" cy="37.5" r="13"/>
+    </g></svg>`;
   return `<!doctype html><html><head><meta charset="utf-8"><style>
     html,body{margin:0;height:100%;background:#070B14;color:#cdd6e4;font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif}
-    .wrap{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;text-align:center;padding:24px}
-    .logo{width:54px;height:54px;border-radius:14px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);box-shadow:0 0 40px rgba(99,102,241,.45)}
-    h1{margin:0;font-size:19px;font-weight:600;color:#eef2f8}
-    p{margin:0;max-width:460px;color:#8b97ab;white-space:pre-wrap}
-    .spin{width:26px;height:26px;border:3px solid rgba(255,255,255,.15);border-top-color:#6366f1;border-radius:50%;animation:s 1s linear infinite}
+    .wrap{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;text-align:center;padding:24px}
+    .logo{filter:drop-shadow(0 0 34px rgba(62,207,192,.4));animation:breathe 3s ease-in-out infinite}
+    @keyframes breathe{0%,100%{opacity:.92;transform:scale(1)}50%{opacity:1;transform:scale(1.03)}}
+    h1{margin:0;font-size:18px;font-weight:600;letter-spacing:.2px;color:#eef2f8}
+    p{margin:0;max-width:440px;color:#8b97ab;white-space:pre-wrap}
+    .spin{width:22px;height:22px;border:2.5px solid rgba(255,255,255,.12);border-top-color:#3ECFC0;border-radius:50%;animation:s 1s linear infinite}
     @keyframes s{to{transform:rotate(360deg)}}
-    button{margin-top:6px;padding:9px 18px;border:0;border-radius:9px;background:#6366f1;color:#fff;font-size:14px;cursor:pointer}
-    button:hover{background:#5457e6}
+    button{margin-top:6px;padding:9px 18px;border:0;border-radius:9px;background:#3ECFC0;color:#062421;font-weight:600;font-size:14px;cursor:pointer}
+    button:hover{background:#54ddce}
   </style></head><body><div class="wrap">
-    <div class="logo"></div>
+    <div class="logo">${mark}</div>
     <h1>${title}</h1>
     ${connecting ? '<div class="spin"></div>' : ''}
     <p>${sub.replace(/</g, "&lt;")}</p>

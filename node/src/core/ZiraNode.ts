@@ -1120,7 +1120,11 @@ export class ZiraNode {
   // runField credits any miner vouched by enough masters in the converged Lock. No ledger tx is created, so
   // this is consensus-safe (the credit derives from converged observations, not divergent per-master txs).
   private verifiedMiners = new Map<string, number>();
-  private static VOUCH_FRESH_MS = 120_000;   // vouch a peer for ~2 min after a successful probe
+  // Vouch a peer for a full cycle after a successful probe. This must be >= the participation cycle
+  // (AUTONOMOUS_RESONANCE_CYCLE_MS) so a peer probed anywhere in a cycle is still fresh when the settler pays
+  // at the cycle boundary; otherwise a continuously-connected miner probed early in the cycle would silently
+  // fall out of the payout. A disconnected peer stops being re-probed and ages out within one cycle.
+  private static VOUCH_FRESH_MS = 300_000;
 
   private async runStorageProbe(): Promise<void> {
     if (this.storageProbeBusy) return;
@@ -1164,6 +1168,7 @@ export class ZiraNode {
   }
   private lastAutonomousResonanceBucket = -1;
   private lastParticipationBucket = -1;
+  private lastParticipationDeferLog = -1;
   private lastHeartbeatBucket = -1;
   /** The reward a single driven resonator's owner earns per cycle (fixed pool, funded from the settler's base
    *  emission). Used for BOTH the owner payment and the task's displayed totalEarned, so they match. */
@@ -1188,12 +1193,21 @@ export class ZiraNode {
       .filter((a) => /^zir1[0-9a-z]{6,}$/.test(a) && a !== this.identity.address && !this.state.isGenesisMaster(a))
       .sort()
       .slice(0, FIELD_PARTICIPATION_MAX_PAYEES);
-    if (payees.length === 0) return;
+    // Deferred paths below must NOT consume the payment bucket: if there are no payees yet or the settler is
+    // briefly underfunded early in a cycle, we want to retry on a later tick and still pay once conditions are
+    // met. We only throttle the diagnostic log to once per cycle via a separate marker.
+    if (payees.length === 0) {
+      if (this.lastParticipationDeferLog !== bucket) { this.lastParticipationDeferLog = bucket; log.info("field participation: no fresh vouched miners this cycle yet (0 payees)"); }
+      return;
+    }
     const per = Math.floor(pool / payees.length);
     if (per <= 0) return;
     // Whole pool (per*N + remainder) + one base fee per payee.
     const needed = pool + payees.length * PROTOCOL.BASE_FEE_UZIR;
-    if (this.state.balanceOf(this.identity.address) < needed) return; // not enough base emission accrued yet
+    if (this.state.balanceOf(this.identity.address) < needed) {
+      if (this.lastParticipationDeferLog !== bucket) { this.lastParticipationDeferLog = bucket; log.warn(`field participation deferred: settler balance ${this.state.balanceOf(this.identity.address)} < needed ${needed} (base emission still accruing)`); }
+      return; // not enough base emission accrued yet; retry on a later tick this cycle
+    }
     this.lastParticipationBucket = bucket;
     let nonce = this.state.provisionalNonce(this.identity.address);
     const tag = String(bucket);
@@ -1479,7 +1493,7 @@ export class ZiraNode {
       `Purpose: ${resonator.purpose}`,
       `Domain: ${domain}. Field models: ${knownModels.length}. Online providers: ${providerCount}. Field Exchange Resonators: ${marketplaceCount}.`,
       `Model field: ${knownModels.slice(0, 3).map((m) => m.meta.name).join(", ") || "checking"}.`,
-      "Act as part of ZIRA's multi-intelligence neural economy: coordinate models, miners, storage, Resonators, tasks, trust, and continuity.",
+      "Act as part of ZIRA, a shared AI network that people run together: coordinate models, miners, storage, Resonators, tasks, trust, and continuity.",
       "Return a concise coordination proposal that helps this Resonator improve the field through model, storage, task, mining, or resonance coordination. Do not claim human payment or token earnings.",
     ].join("\n");
     return {
@@ -2055,7 +2069,7 @@ export class ZiraNode {
     return {
       // Release version, exposed so the Console can negotiate features against older nodes (upgrade
       // without ruptures). Tracks the node package version / installer release.
-      version: "1.9.18",
+      version: "1.9.19",
       network: this.genesis.network,
       phase: "live",
       providersOnline: this.soft.onlineProviders(now).length,

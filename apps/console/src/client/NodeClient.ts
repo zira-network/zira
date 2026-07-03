@@ -26,8 +26,16 @@ export class FreeTierError extends Error {
   }
 }
 
+// The public ZIRA gateway (kept in sync with createClient.ts DEFAULT_PUBLIC_GATEWAY). When the Console
+// talks to a LOCAL embedded node that is still syncing, isolated, or briefly without a serving provider,
+// a field ask that comes back empty is retried against this always-on gateway so the user still gets an
+// answer instead of a "warming up" message. Mining and earning stay on the local node.
+const PUBLIC_GATEWAY = "http://157.173.106.50:8645";
+
 export class NodeClient implements ZiraClient {
-  constructor(private base: string) { this.base = base.replace(/\/$/, ""); }
+  // fieldFallback: when true (the default) a field ask with no model-backed answer is retried once against
+  // the public gateway. The fallback client itself is created with fieldFallback=false so it never recurses.
+  constructor(private base: string, private fieldFallback = true) { this.base = base.replace(/\/$/, ""); }
   private rpc(p: string): string { return this.base + "/rpc" + p; }
 
   private async get<T>(p: string): Promise<T> {
@@ -93,7 +101,7 @@ export class NodeClient implements ZiraClient {
     // each loop, extending to the full window the moment one appears. Only a network that stays empty the
     // whole time returns the "still warming up" guidance.
     const start = Date.now();
-    const FULL_WAIT = 45000, EMPTY_FLOOR = 20000;
+    const FULL_WAIT = 60000, EMPTY_FLOOR = 25000;
     let deadline = start + (providers.length === 0 ? EMPTY_FLOOR : FULL_WAIT);
     let answers: FieldAnswer[] = [];
     let recheck = 0;
@@ -109,12 +117,22 @@ export class NodeClient implements ZiraClient {
       await new Promise((r) => setTimeout(r, 500));
     }
 
-    if (answers.length === 0) {
+    const hasModelBacked = answers.some((a) => !isCoordinationFallback(a.answer));
+    if (!hasModelBacked) {
       // "Use this machine" backs up the field: if this machine can answer (own-task is on and a model is
       // loaded here), answer locally instead of returning an empty field result.
       const own = await this.get<{ enabled: boolean; ready: boolean; label?: string }>("/own-task/status").catch(() => null);
       if (own?.enabled && own.ready) {
         return this.askLocal({ question: args.question, history: args.history, onToken: args.onToken, signal: args.signal });
+      }
+      // The local node had no serving provider (still syncing, isolated, or no model loaded here). Retry
+      // once against the always-on public gateway so the user still gets a real field answer. Free ask (no
+      // tip) since the fallback answers come from the gateway's field; mining/earning stay on the local node.
+      if (this.fieldFallback && !this.base.startsWith(PUBLIC_GATEWAY) && !args.signal?.aborted) {
+        try {
+          const gw = new NodeClient(PUBLIC_GATEWAY, false);
+          return await gw.askField({ ...args, pay: false });
+        } catch { /* gateway unreachable too: fall through to the guidance message */ }
       }
       const msg = own?.enabled
         ? "No answer came back in time. This machine has no local model — but you don't need one: the field answers for you. Authorized models are distributed to miners across the network, and your question is answered here as soon as one is serving. The field may just be warming up; please try again in a moment."
