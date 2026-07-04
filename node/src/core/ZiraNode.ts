@@ -1249,7 +1249,9 @@ export class ZiraNode {
       // starved late-ordered peers so real, synced, mining nodes never got vouched and never earned. This is
       // consensus-safe: it only changes which miners this master vouches for, which rides on its SIGNED
       // observation / settled payout tx and is applied byte-identically by every node (old builds included).
-      const probeCap = Number(process.env.ZIRA_VOUCH_PROBE_CAP ?? 64);
+      // Probe ALL connected peers (maxConnections is 128), not just the first 64: on a busy master a correctly
+      // configured new miner past index 64 would otherwise never be liveness-probed, never vouched, never paid.
+      const probeCap = Number(process.env.ZIRA_VOUCH_PROBE_CAP ?? 128);
       for (const peerId of this.net.peers().slice(0, probeCap)) {
         const addr = await this.verifyPeerLive(peerId);
         if (addr && addr !== this.identity.address) { this.verifiedMiners.set(addr, now); live++; }
@@ -1359,8 +1361,13 @@ export class ZiraNode {
     // nonce gap that dropped every later settler tx on that node, so honest nodes diverged and finality
     // stalled. A single tx has a single nonce, so there is no gap to cascade.
     const needed = pool + PROTOCOL.BASE_FEE_UZIR;
-    if (this.state.balanceOf(this.identity.address) < needed) {
-      if (this.lastParticipationDeferLog !== bucket) { this.lastParticipationDeferLog = bucket; log.warn(`field participation deferred: settler balance ${this.state.balanceOf(this.identity.address)} < needed ${needed} (base emission still accruing)`); }
+    // Use the PROVISIONAL balance (nets txs already pooled this tick: resonator rewards + coordination payouts
+    // run before this in the same reap). Checking committed balanceOf let the settler pool more than it could
+    // afford; at apply time this batch would then drop for overspend WITHOUT consuming its nonce, yet the
+    // bucket watermark had already advanced, so that cycle's miners were never paid and never retried. Gating
+    // on provisionalBalance defers (does not submit, does not advance the watermark) so it retries next tick.
+    if (this.state.provisionalBalance(this.identity.address) < needed) {
+      if (this.lastParticipationDeferLog !== bucket) { this.lastParticipationDeferLog = bucket; log.warn(`field participation deferred: settler provisional balance ${this.state.provisionalBalance(this.identity.address)} < needed ${needed} (base emission still accruing)`); }
       return; // not enough base emission accrued yet; retry on a later tick this cycle
     }
     // WEIGHTED split (v2.0.2): each payee's share is proportional to the verifiable work the settler observed
@@ -1550,7 +1557,7 @@ export class ZiraNode {
       || owner === this.genesis.founder || this.state.isGenesisMaster(owner)) {
       this.paidResonatorRewards.add(key); return; // nothing to pay, but don't retry
     }
-    if (this.state.balanceOf(this.identity.address) < amt + PROTOCOL.BASE_FEE_UZIR) return; // fund next cycle
+    if (this.state.provisionalBalance(this.identity.address) < amt + PROTOCOL.BASE_FEE_UZIR) return; // fund next cycle (provisional: net txs already pooled this tick, else a later overspend drop leaves the watermark advanced)
     const tx = signTx({
       network: this.genesis.network, from: this.identity.address, fromPubKey: this.identity.publicKey, to: owner,
       amountUZIR: amt, feeUZIR: PROTOCOL.BASE_FEE_UZIR, nonce: this.state.provisionalNonce(this.identity.address),
@@ -1638,7 +1645,10 @@ export class ZiraNode {
     return masters[this.activeSettlerIndex()]?.address === this.identity.address;
   }
 
-  private static SETTLER_FAILOVER_MS = Number(process.env.ZIRA_SETTLER_FAILOVER_MS ?? 90_000);
+  // 180s = 6 heartbeat intervals. Wide enough that a heartbeat flapping at the boundary (or a ~90s GC pause)
+  // does not promote masters[1] while masters[0] still self-settles — which would double-pay a bucket from two
+  // wallets (state-root-safe but an economic double-pay). A genuine outage past 180s still fails over.
+  private static SETTLER_FAILOVER_MS = Number(process.env.ZIRA_SETTLER_FAILOVER_MS ?? 180_000);
   /** Index of the lowest-index genesis master that is live now; falls back to 0 so the network keeps a settler
    *  even in the (transient) case where no master heartbeat is visible yet. Soft state; consensus-neutral. */
   private activeSettlerIndex(): number {
@@ -2195,7 +2205,7 @@ export class ZiraNode {
     if (outputs.length === 0) return { ok: false, reason: "no positive-value coordination outputs to settle" };
     const outSum = outputs.reduce((s, [, a]) => s + a, 0);
     const fee = Math.max(PROTOCOL.BASE_FEE_UZIR, split.burnUZIR); // the §9 burn IS the fee (all burned)
-    if (this.state.balanceOf(funder.address) < outSum + fee) return { ok: false, reason: "funding wallet has insufficient balance for the coordination payout" };
+    if (this.state.provisionalBalance(funder.address) < outSum + fee) return { ok: false, reason: "funding wallet has insufficient balance for the coordination payout" }; // provisional: don't over-commit across this tick's pooled payouts (a later overspend drop would still mark the query settled)
     const now = Date.now();
     const tx = signTx({
       network: this.genesis.network, from: funder.address, fromPubKey: funder.publicKey, to: funder.address,

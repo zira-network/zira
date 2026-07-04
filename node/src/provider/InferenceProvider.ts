@@ -101,6 +101,10 @@ export class InferenceProvider {
       if (this.node.publishAnswer({ id, queryId: query.id, provider: this.identity.publicKey, answer, confidence: 0.78, sig, ts: Date.now() })) {
         this.answered.add(query.id);
         this.queriesAnswered++;
+        // Bound the dedup set on a long-lived mining node that answers autonomous queries every cycle forever.
+        // Once a query id is pruned from soft state it never reappears (ids are bucketed), and a rare re-answer
+        // is harmless (settlement dedups one answer per provider), so trimming the oldest is safe.
+        if (this.answered.size > 4000) for (const old of [...this.answered].slice(0, 2000)) this.answered.delete(old);
       }
     } catch (e) { log.debug("provider answer failed", (e as Error).message); }
     finally { this.inFlight.delete(query.id); }

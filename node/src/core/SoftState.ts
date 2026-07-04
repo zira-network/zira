@@ -26,7 +26,12 @@ import type { ProviderAnnounce, QueryMsg, AnswerMsg } from "./types.js";
 import { log } from "../log.js";
 
 const PROVIDER_TTL_MS = 90_000;
-const QUERY_TTL_MS = 60_000;
+// Answers to a query must survive long enough for the settler to see >= MIN_ANSWERS of them: autonomous
+// coordination opens its settle window at bucketStart + 30s and retries once per ~30s reap tick, while a CPU
+// answer can take ~35s to generate. At the old 60s the answers were pruned after roughly one settle tick, so
+// coordination could never settle even when enough nodes answered. Keep answers well past the settle window
+// (still under the 5 min autonomous bucket, so query ids never collide across buckets).
+const QUERY_TTL_MS = 240_000;
 // DoS guard: the most answers any single query will retain. Far above any honest contributor count
 // for one query; overflow is dropped. Soft state, so this is consensus-neutral (see addAnswer).
 const MAX_ANSWERS_PER_QUERY = 256;
