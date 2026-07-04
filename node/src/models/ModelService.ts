@@ -253,7 +253,7 @@ export class ModelService {
   }
 
   /** Launch-authority only: add a model from a local GGUF file. */
-  async provide(localPath: string, name: string, opts: { arch?: string; quant?: string; url?: string; type?: ModelType; domains?: ModelMeta["domains"]; tags?: string[]; version?: number } = {}): Promise<ModelMeta> {
+  async provide(localPath: string, name: string, opts: { arch?: string; quant?: string; url?: string; type?: ModelType; domains?: ModelMeta["domains"]; tags?: string[]; version?: number; assigned?: boolean } = {}): Promise<ModelMeta> {
     if (!this.isFounder()) throw new Error("only active launch authority can add a model to the field");
     const meta = await this.store.importFile(localPath, name, opts);
     this.authorizeAndAnnounce(meta);
@@ -263,7 +263,7 @@ export class ModelService {
 
   /** Launch-authority only: add a model by link. The node downloads it once, hashes it, signs it, and the
    * field then distributes it peer to peer with the link as a fallback source. */
-  async provideByUrl(url: string, name: string, opts: { arch?: string; quant?: string; type?: ModelType; domains?: ModelMeta["domains"]; tags?: string[]; version?: number } = {}): Promise<ModelMeta> {
+  async provideByUrl(url: string, name: string, opts: { arch?: string; quant?: string; type?: ModelType; domains?: ModelMeta["domains"]; tags?: string[]; version?: number; assigned?: boolean } = {}): Promise<ModelMeta> {
     if (!this.isFounder()) throw new Error("only active launch authority can add a model to the field");
     log.info(`launch authority adding model ${name} by link, downloading to hash and sign...`);
     const meta = await this.store.importUrl(url, name, opts);
@@ -566,6 +566,20 @@ export class ModelService {
     }
   }
 
+  /** Empty the storage cache on demand: delete every cached model file the node is not actively serving
+   *  (the essential loaded/serving GGUF is kept so the engine never loses its weights). Frees disk without
+   *  turning storage off, so the node re-fills from the field per its cap. Returns how many models it freed. */
+  clearStoredModels(): { cleared: number; freedBytes: number } {
+    let cleared = 0, freedBytes = 0;
+    for (const e of [...this.registry.values()]) {
+      if (!this.store.hasValidGguf(e.meta.id) || this.isEssentialModel(e.meta.id)) continue;
+      const size = e.meta.sizeBytes ?? 0;
+      if (this.store.remove(e.meta.id)) { e.local = false; cleared++; freedBytes += size; }
+    }
+    if (cleared) log.info(`storage cleared on request: freed ${cleared} model(s), ${(freedBytes / 1e9).toFixed(2)} GB`);
+    return { cleared, freedBytes };
+  }
+
   /** Storage peers actively replicate authorized models so distribution is not passive, and they do it at
    * SCALE: with a large catalog, every peer holding every model neither fits nor is necessary. Each peer
    * fills UNDER-replicated models first and stops adding copies once a model already has
@@ -583,13 +597,16 @@ export class ModelService {
     // A mining node must hold at least one servable model to answer; force grabbing one even when the field
     // already has it well replicated. A pure storage node just fills replication gaps.
     let needServing = this.mining.enabled && !this.bestLocalModelId();
-    // Under-replicated first (fewest live holders), then newest, so gaps fill before extra copies pile up.
-    const entries = [...this.registry.values()].sort((a, b) => (liveReplicas(a) - liveReplicas(b)) || (b.meta.ts - a.meta.ts));
+    // Steward-ASSIGNED models first (the steward wants them on every storage node), then under-replicated
+    // (fewest live holders), then newest, so assignments spread and gaps fill before extra copies pile up.
+    const entries = [...this.registry.values()].sort((a, b) =>
+      (Number(!!b.meta.assigned) - Number(!!a.meta.assigned)) || (liveReplicas(a) - liveReplicas(b)) || (b.meta.ts - a.meta.ts));
     for (const entry of entries) {
       if (this.store.hasValidGguf(entry.meta.id)) continue;
       if (this.storageFetches.has(entry.meta.id)) continue;
       const wellReplicated = liveReplicas(entry) >= MODEL_REPLICATION_TARGET;
-      if (wellReplicated && !needServing) continue; // spread the catalog; don't clone already well-covered models
+      // An assigned model is fetched even when well replicated: the steward wants it on the whole network.
+      if (wellReplicated && !needServing && !entry.meta.assigned) continue; // else spread, don't clone covered
       if (this.projectedStorageBytes() + (entry.meta.sizeBytes ?? 0) > cap) {
         log.debug(`storage peer skipped ${entry.meta.name}: would exceed the storage cap`);
         continue;

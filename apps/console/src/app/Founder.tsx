@@ -440,6 +440,7 @@ function FounderModelFieldCard() {
   const [name, setName] = useState("");
   const [arch, setArch] = useState("");
   const [quant, setQuant] = useState("");
+  const [assign, setAssign] = useState(true); // distribute this model to every storage node by default
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
 
@@ -464,6 +465,7 @@ function FounderModelFieldCard() {
         quant: quant.trim() || undefined,
         domains: ["general"],
         version: 1,
+        assigned: assign,
       });
       toast.push(`Authorized model on the network: ${meta.name}`);
       setSource(""); setName(""); setArch(""); setQuant(""); setConfirm(false);
@@ -502,6 +504,10 @@ function FounderModelFieldCard() {
           <Field label="Quant"><Input value={quant} onChange={(e) => setQuant(e.target.value)} placeholder="Q8_0, Q4_K_M, BF16..." /></Field>
         </div>
       </div>
+      <label className="mt-3 flex items-start gap-2 text-xs text-muted">
+        <input type="checkbox" checked={assign} onChange={(e) => setAssign(e.target.checked)} className="mt-0.5 accent-[var(--accent)]" />
+        <span>Distribute to the whole storage network. Every node with storage on fetches this model automatically, so it is widely served across the field. Leave off to only fill replication gaps.</span>
+      </label>
       <p className="mt-3 text-[11px] text-faint">Routing is automatic: the network matches each question to the best available model by architecture and capability. Subject domains are a per-Resonator attribute set by their owners, not a model tag.</p>
       <Button variant="primary" className="mt-3 w-full" onClick={requestAdd} disabled={busy || !source.trim()}>
         <ShieldCheck size={15} /> Authorize and announce GGUF

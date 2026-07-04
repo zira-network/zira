@@ -199,6 +199,7 @@ export const NodeApi = {
   // user-controllable peer-to-peer storage: enable/disable + byte cap (default 1 GiB). Persisted node-side.
   getStorage: () => rpcGet<StorageState>("/storage"),
   setStorage: (patch: { enabled?: boolean; capBytes?: number }) => rpcPost<StorageState>("/storage", patch),
+  clearStorage: () => rpcPost<StorageState & { cleared?: number; freedBytes?: number }>("/storage", { clear: true }),
 
   // own-task local inference: the user's own hardware for the user's own Console/Resonator tasks.
   // Decoupled from mining: it never serves the field, never answers others, and never earns.
@@ -234,7 +235,7 @@ export const NodeApi = {
 
   // the model field (everyone can read; only active launch authority can add)
   models: () => rpcGet<FieldModel[]>("/models"),
-  provideModelLink: (m: { url: string; path?: string; name: string; arch?: string; quant?: string; domains?: Domain[]; version?: number }) =>
+  provideModelLink: (m: { url: string; path?: string; name: string; arch?: string; quant?: string; domains?: Domain[]; version?: number; assigned?: boolean }) =>
     rpcPost<ModelMetaView>("/models/provide", m),
   prepareModelLink: (m: { input: { url: string; name: string; arch?: string; quant?: string; domains?: Domain[]; version?: number; ts: number }; founderPubKey: string; requestSig: string }) =>
     rpcPost<ModelMetaView>("/models/prepare", m),

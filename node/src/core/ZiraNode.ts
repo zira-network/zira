@@ -18,6 +18,7 @@ import { settlementWalletsFor, treasuryWalletsFor } from "../genesis-docs.js";
 import { launchModelsFor } from "../launch-models.js";
 import { verifyContribution, type WatchNetwork } from "../anchor/paymentWatcher.js";
 import { State, epochOf, SETTLE_ROUNDS } from "./State.js";
+import { weightedOutputs } from "./payout-split.js";
 import { SoftState } from "./SoftState.js";
 import { Checkpoints } from "./Checkpoints.js";
 import { Store } from "./Store.js";
@@ -109,6 +110,22 @@ const AUTONOMOUS_COORDINATION_REWARD_UZIR = envInt("ZIRA_AUTONOMOUS_COORDINATION
 // and bounds the settler's spend. One settler funds it, so the payout txs are deterministic and finality
 // holds. Answering coordination queries (the 77% split) still earns MORE, on top of this. Set 0 to disable.
 const FIELD_PARTICIPATION_MAX_PAYEES = envInt("ZIRA_FIELD_PARTICIPATION_MAX_PAYEES", 64);
+// Contribution weighting for the field pool (v2.0.2). The pool is no longer split equally: the settler
+// weights each vouched miner by VERIFIABLE work it observed, so a stronger machine that serves storage and
+// answers more coordination queries earns a larger share, while a bare live node keeps a real baseline. This
+// is entirely settler-computed and issued in the SAME single signed batch_transfer, so every node applies it
+// byte-identically — consensus-safe (like the union payee choice). All values are floats in "weight units":
+//   weight = BASE + (storage-serving ? STORAGE_BONUS) + min(ANSWER_CAP, answerCredits*ANSWER_UNIT)
+//                 + min(ZTI_CAP, zti*ZTI_UNIT), clamped to [BASE, CEILING].
+const FIELD_WEIGHT_BASE = Number(process.env.ZIRA_FIELD_WEIGHT_BASE ?? 1);
+const FIELD_WEIGHT_STORAGE_BONUS = Number(process.env.ZIRA_FIELD_WEIGHT_STORAGE_BONUS ?? 0.5);
+const FIELD_WEIGHT_ANSWER_UNIT = Number(process.env.ZIRA_FIELD_WEIGHT_ANSWER_UNIT ?? 0.5);
+const FIELD_WEIGHT_ANSWER_CAP = Number(process.env.ZIRA_FIELD_WEIGHT_ANSWER_CAP ?? 3);
+const FIELD_WEIGHT_ZTI_CAP = Number(process.env.ZIRA_FIELD_WEIGHT_ZTI_CAP ?? 1);
+const FIELD_WEIGHT_CEILING = Number(process.env.ZIRA_FIELD_WEIGHT_CEILING ?? 6);
+// Recency decay applied to a miner's accumulated coordination-answer credits once per paid cycle, so recent
+// work dominates and stale credits fade (a rolling recency-weighted answer count).
+const FIELD_ANSWER_DECAY = Number(process.env.ZIRA_FIELD_ANSWER_DECAY ?? 0.8);
 // Field heartbeat: how often a contributing (mining or storage) node attests it is up + serving, so the
 // PoR field forms Locks and the round emission flows to contributors. Frequent enough that every
 // contributor always has a fresh in-window observation. This is the inference-free "mining/storage earns"
@@ -480,7 +497,20 @@ export class ZiraNode {
     if (typeof saved.lastAutonomousResonanceBucket === "number") this.lastAutonomousResonanceBucket = saved.lastAutonomousResonanceBucket;
     if (Array.isArray(saved.paidResonatorRewards)) this.paidResonatorRewards = new Set(saved.paidResonatorRewards.slice(-5000));
     if (Array.isArray(saved.settledCoordinationQueries)) this.settledCoordinationQueries = new Set(saved.settledCoordinationQueries.slice(-5000));
-    log.info(`settler progress restored: participationBucket=${this.lastParticipationBucket} resonanceBucket=${this.lastAutonomousResonanceBucket} paidRewards=${this.paidResonatorRewards.size} settledQueries=${this.settledCoordinationQueries.size}`);
+    if (saved.minerAnswerCredits && typeof saved.minerAnswerCredits === "object") {
+      this.minerAnswerCredits = new Map(Object.entries(saved.minerAnswerCredits).filter(([, v]) => typeof v === "number") as [string, number][]);
+    }
+    log.info(`settler progress restored: participationBucket=${this.lastParticipationBucket} resonanceBucket=${this.lastAutonomousResonanceBucket} paidRewards=${this.paidResonatorRewards.size} settledQueries=${this.settledCoordinationQueries.size} answerCredits=${this.minerAnswerCredits.size}`);
+  }
+
+  /** Settler role right now (diagnostics + tests): whether this node is the ACTIVE settler and the failover
+   *  index it computed from live master heartbeats. */
+  settlerStatus(): { isSettler: boolean; activeIndex: number; liveMasters: number } {
+    return {
+      isSettler: this.isNetworkSettler(),
+      activeIndex: this.activeSettlerIndex(),
+      liveMasters: this.state.liveGenesisMasters(Date.now(), ZiraNode.SETTLER_FAILOVER_MS).size,
+    };
   }
 
   /** Current settler payout watermarks (diagnostics + tests). Reflects what this node has already settled. */
@@ -501,6 +531,7 @@ export class ZiraNode {
         lastAutonomousResonanceBucket: this.lastAutonomousResonanceBucket,
         paidResonatorRewards: [...this.paidResonatorRewards],
         settledCoordinationQueries: [...this.settledCoordinationQueries],
+        minerAnswerCredits: Object.fromEntries(this.minerAnswerCredits),
       });
     } catch { /* best effort; in-memory guard still holds until next restart */ }
   }
@@ -1182,6 +1213,13 @@ export class ZiraNode {
   // runField credits any miner vouched by enough masters in the converged Lock. No ledger tx is created, so
   // this is consensus-safe (the credit derives from converged observations, not divergent per-master txs).
   private verifiedMiners = new Map<string, number>();
+  // Which vouched miners passed the STORAGE chunk challenge this window (address -> last-verified ms). A
+  // subset of verifiedMiners; used to give storage-servers the payout bonus. Settler-local, consensus-safe.
+  private storageServingMiners = new Map<string, number>();
+  // Recency-weighted count of accepted coordination answers the settler has settled per miner (address ->
+  // credits). Grows in settleAutonomousCoordination, decays once per paid cycle, persisted in
+  // settler-progress.json so weighting is restart-stable. Feeds the "answers more -> earns more" weight.
+  private minerAnswerCredits = new Map<string, number>();
   // Vouch a peer for a full cycle after a successful probe. This must be >= the participation cycle
   // (AUTONOMOUS_RESONANCE_CYCLE_MS) so a peer probed anywhere in a cycle is still fresh when the settler pays
   // at the cycle boundary; otherwise a continuously-connected miner probed early in the cycle would silently
@@ -1216,12 +1254,13 @@ export class ZiraNode {
       const modelId = this.models.localHeldModelId();
       if (modelId) {
         for (const { peerId, address } of this.models.peersServing(modelId).slice(0, probeCap)) {
-          try { if (await this.models.verifyPeerStorage(peerId, modelId)) { this.verifiedMiners.set(address, now); stored++; } }
+          try { if (await this.models.verifyPeerStorage(peerId, modelId)) { this.verifiedMiners.set(address, now); this.storageServingMiners.set(address, now); stored++; } }
           catch { /* unreachable peer: skip */ }
         }
       }
       // prune stale entries so the vouch set stays current and bounded
       for (const [a, ts] of this.verifiedMiners) if (now - ts > ZiraNode.VOUCH_FRESH_MS) this.verifiedMiners.delete(a);
+      for (const [a, ts] of this.storageServingMiners) if (now - ts > ZiraNode.VOUCH_FRESH_MS) this.storageServingMiners.delete(a);
       if (live > 0 || stored > 0) log.info(`vouch probe: ${live} live coordinating peer(s), ${stored} storage-serving -> vouching ${this.verifiedMiners.size} in heartbeat`);
     } finally {
       this.storageProbeBusy = false;
@@ -1233,6 +1272,24 @@ export class ZiraNode {
     const out: string[] = [];
     for (const [a, ts] of this.verifiedMiners) if (now - ts <= ZiraNode.VOUCH_FRESH_MS) out.push(a);
     return out;
+  }
+
+  /**
+   * The field-pool weight for one vouched miner: a baseline every live node earns, plus a bonus for serving
+   * storage (chunk-challenge verified), plus its recent coordination-answer contribution, plus its on-ledger
+   * ZTI, clamped to a ceiling so no single miner can take the whole pool. All inputs are settler-observed and
+   * verifiable, so the weighting is deterministic on the settler and rides its one signed batch_transfer.
+   * "Better hardware earns more" falls out naturally: a stronger machine serves storage and wins more
+   * answers, so it accrues a higher weight.
+   */
+  private fieldPayoutWeight(addr: string, now: number): number {
+    let w = FIELD_WEIGHT_BASE;
+    const st = this.storageServingMiners.get(addr);
+    if (st !== undefined && now - st <= ZiraNode.VOUCH_FRESH_MS) w += FIELD_WEIGHT_STORAGE_BONUS;
+    w += Math.min(FIELD_WEIGHT_ANSWER_CAP, (this.minerAnswerCredits.get(addr) ?? 0) * FIELD_WEIGHT_ANSWER_UNIT);
+    const zti = this.state.accounts.get(addr)?.zti ?? 0;
+    w += Math.min(FIELD_WEIGHT_ZTI_CAP, Math.max(0, zti));
+    return Math.max(FIELD_WEIGHT_BASE, Math.min(FIELD_WEIGHT_CEILING, w));
   }
   private lastAutonomousResonanceBucket = -1;
   private lastParticipationBucket = -1;
@@ -1285,8 +1342,7 @@ export class ZiraNode {
       if (this.lastParticipationDeferLog !== bucket) { this.lastParticipationDeferLog = bucket; log.info("field participation: no fresh vouched miners this cycle yet (0 payees)"); }
       return;
     }
-    const per = Math.floor(pool / payees.length);
-    if (per <= 0) return;
+    if (Math.floor(pool / payees.length) <= 0) return;
     // ONE batched tx covers the whole pool plus a single base fee (not one fee per payee). Paying every miner
     // in a single transaction is the fix for the fork: N separate transfers meant one dropped packet opened a
     // nonce gap that dropped every later settler tx on that node, so honest nodes diverged and finality
@@ -1296,10 +1352,15 @@ export class ZiraNode {
       if (this.lastParticipationDeferLog !== bucket) { this.lastParticipationDeferLog = bucket; log.warn(`field participation deferred: settler balance ${this.state.balanceOf(this.identity.address)} < needed ${needed} (base emission still accruing)`); }
       return; // not enough base emission accrued yet; retry on a later tick this cycle
     }
-    // Each payee gets `per`; the floor remainder goes to the first (sorted) payee so the outputs sum EXACTLY
-    // to `pool`. amountUZIR == pool == sum(outputs), which the ledger re-checks so no ZIR is minted or lost.
-    const remainder = pool - per * payees.length;
-    const outputs: [string, number][] = payees.map((to, i) => [to, per + (i === 0 ? remainder : 0)]);
+    // WEIGHTED split (v2.0.2): each payee's share is proportional to the verifiable work the settler observed
+    // for it (storage-serving bonus + recent coordination answers + on-ledger ZTI), so a stronger machine
+    // earns more while a bare live node keeps a baseline. Deterministic on the settler; the resulting outputs
+    // ride the SAME single signed batch_transfer and are applied byte-identically by every node (fork-safe).
+    const weights = payees.map((a) => this.fieldPayoutWeight(a, now));
+    // Deterministic largest-remainder split so the outputs sum EXACTLY to `pool` (see payout-split.ts).
+    const outputs = weightedOutputs(payees, weights, pool);
+    // Recency-decay the answer credits once per paid cycle so recent work dominates and stale credits fade.
+    for (const [a, c] of this.minerAnswerCredits) { const nc = c * FIELD_ANSWER_DECAY; if (nc < 0.05) this.minerAnswerCredits.delete(a); else this.minerAnswerCredits.set(a, nc); }
     const tx = signTx({
       network: this.genesis.network, from: this.identity.address, fromPubKey: this.identity.publicKey,
       to: this.identity.address, amountUZIR: pool, feeUZIR: PROTOCOL.BASE_FEE_UZIR,
@@ -1310,7 +1371,8 @@ export class ZiraNode {
     if (res.accepted) {
       this.lastParticipationBucket = bucket;
       this.persistSettlerProgress(); // survive restart: never re-pay this bucket with a different payee set
-      log.info(`field participation payout: ${payees.length} miner(s) x ~${per} uZIR in ONE batch (bucket ${bucket})`);
+      const hi = Math.max(...outputs.map(([, v]) => v)), lo = Math.min(...outputs.map(([, v]) => v));
+      log.info(`field participation payout: ${payees.length} miner(s), weighted ${lo}..${hi} uZIR in ONE batch (bucket ${bucket})`);
     } else if (this.lastParticipationDeferLog !== bucket) {
       // A rejected payout would otherwise retry silently forever — surface WHY so it can be fixed.
       this.lastParticipationDeferLog = bucket;
@@ -1519,6 +1581,17 @@ export class ZiraNode {
     const result = this.settleQueryCoordination(queryId, AUTONOMOUS_COORDINATION_REWARD_UZIR, { poolBeneficiary: owner });
     if (result.ok) {
       this.settledCoordinationQueries.add(queryId);
+      // Credit each contributor an answer point (recency-weighted via the per-cycle decay in
+      // settleFieldParticipation). This is what makes "answers more -> earns a bigger field share": a
+      // stronger machine that wins more coordination answers accumulates more credits. Settler-local +
+      // persisted, so it is deterministic on the settler and rides its signed payout tx. Bound the map.
+      for (const p of result.payouts ?? []) if (/^zir1[0-9a-z]{6,}$/.test(p.address)) {
+        this.minerAnswerCredits.set(p.address, (this.minerAnswerCredits.get(p.address) ?? 0) + 1);
+      }
+      if (this.minerAnswerCredits.size > 5000) {
+        const top = [...this.minerAnswerCredits.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2500);
+        this.minerAnswerCredits = new Map(top);
+      }
       // bound the dedup set: keep only the most recent ids (autonomous queries are bucketed, so this is
       // ample headroom and prevents unbounded growth on a long-running node).
       if (this.settledCoordinationQueries.size > 5000) {
@@ -1538,17 +1611,35 @@ export class ZiraNode {
   }
 
   /**
-   * The single node that funds and settles autonomous-coordination payouts. Keeping it to ONE funder makes
-   * the payout transactions deterministic (like the steward path) so no two masters ever create conflicting
-   * payout txs and quorum finality never diverges. On mainnet (a defined genesis master set) that funder is
-   * the FIRST genesis master — an always-on, keyless coordinator that pays miners and resonator owners from
-   * the base emission it earns, so earning works with no steward online. On devnet/test (no master set) the
-   * founder settles. Every other node earns by answering the resonance queries, never by settling.
+   * The single node that funds and settles payouts THIS instant. Still ONE funder at a time (deterministic
+   * payout txs, no divergence), but with ORDERED FAILOVER (v2.0.2): the active settler is the LOWEST-index
+   * genesis master that is currently live (has beaconed a field heartbeat within the failover window). Normally
+   * that is masters[0] (box1). If box1 goes offline its heartbeat ages out of every node's obsPool, so
+   * masters[1] becomes the active settler and keeps miners + resonators paid — box1 is no longer a hard single
+   * point of failure. Base emission is untouched (still credited only to masters[0]); a failover settler pays
+   * from its own pre-funded balance, so this covers box1 OUTAGES, not permanent removal. Who-settles is soft
+   * state, so failover never affects the state root; the persisted settler-progress watermark plus the
+   * deterministic lowest-live-index rule bound any brief split-brain to at most one already-paid bucket.
    */
   private isNetworkSettler(): boolean {
     const masters = this.genesis.masters ?? [];
-    if (masters.length > 0) return masters[0]!.address === this.identity.address;
-    return this.identity.address === this.genesis.founder;
+    if (masters.length === 0) return this.identity.address === this.genesis.founder;
+    return masters[this.activeSettlerIndex()]?.address === this.identity.address;
+  }
+
+  private static SETTLER_FAILOVER_MS = Number(process.env.ZIRA_SETTLER_FAILOVER_MS ?? 90_000);
+  /** Index of the lowest-index genesis master that is live now; falls back to 0 so the network keeps a settler
+   *  even in the (transient) case where no master heartbeat is visible yet. Soft state; consensus-neutral. */
+  private activeSettlerIndex(): number {
+    const masters = this.genesis.masters ?? [];
+    if (masters.length === 0) return 0;
+    const live = this.state.liveGenesisMasters(Date.now(), ZiraNode.SETTLER_FAILOVER_MS);
+    // masters[0] is treated as live during the initial window before any heartbeat is observed, so a fresh
+    // network does not briefly promote masters[1]. After that, real liveness drives it.
+    for (let i = 0; i < masters.length; i++) {
+      if (live.has(masters[i]!.address) || (i === 0 && live.size === 0)) return i;
+    }
+    return 0;
   }
 
   /**

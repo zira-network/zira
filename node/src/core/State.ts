@@ -195,6 +195,23 @@ export class State {
     return [...out];
   }
 
+  /**
+   * The genesis-master addresses that have beaconed a field heartbeat within `freshMs` — i.e. are online.
+   * Used for settler FAILOVER: the active settler is the lowest-index master that is live, so if box1
+   * (masters[0]) goes offline its heartbeat ages out here and the next master can take over payouts. Soft
+   * state (reads gossiped observations), never in the state root, so this changes only WHO issues payout txs.
+   */
+  liveGenesisMasters(now: number, freshMs: number): Set<Address> {
+    const cutoff = now - freshMs;
+    const live = new Set<Address>();
+    for (const o of this.obsPool.values()) {
+      if (o.subject !== PROTOCOL.FIELD_HEARTBEAT_SUBJECT || o.timestamp < cutoff) continue;
+      const addr = addressFromPubKey(o.observer);
+      if (this.isGenesisMaster(addr)) live.add(addr);
+    }
+    return live;
+  }
+
   setAuthorizedFounders(addresses: Address[]): void {
     this.authorizedFounders = new Set([this.founder, ...addresses.filter((a) => a.startsWith("zir1"))]);
     for (const founder of this.authorizedFounders) {

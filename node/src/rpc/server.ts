@@ -544,6 +544,7 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
     case "GET /storage": return json(res, node.storageState());
     case "POST /storage": {
       const b = await body(req);
+      if (b.clear === true) { const r = node.models.clearStoredModels(); return json(res, { ...node.storageState(), ...r }); }
       const patch: { enabled?: boolean; capBytes?: number } = {};
       if (typeof b.enabled === "boolean") patch.enabled = b.enabled;
       if (b.capBytes !== undefined && Number.isFinite(Number(b.capBytes))) patch.capBytes = Number(b.capBytes);
@@ -657,8 +658,8 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
     }
     case "POST /models/provide": { const b = await body(req); if (!node.isFounder()) return json(res, { error: "only active launch authority can add a model to the field. Import an authorized wallet to use wallet authorization." }, 403); try {
       const meta = b.path
-        ? await node.models.provide(String(b.path), String(b.name ?? "model"), { arch: b.arch, quant: b.quant, url: b.url, type: b.type, domains: b.domains, tags: b.tags, version: b.version })
-        : await node.models.provideByUrl(String(b.url), String(b.name ?? "model"), { arch: b.arch, quant: b.quant, type: b.type, domains: b.domains, tags: b.tags, version: b.version });
+        ? await node.models.provide(String(b.path), String(b.name ?? "model"), { arch: b.arch, quant: b.quant, url: b.url, type: b.type, domains: b.domains, tags: b.tags, version: b.version, assigned: b.assigned })
+        : await node.models.provideByUrl(String(b.url), String(b.name ?? "model"), { arch: b.arch, quant: b.quant, type: b.type, domains: b.domains, tags: b.tags, version: b.version, assigned: b.assigned });
       return json(res, meta);
     } catch (e) { return json(res, { error: (e as Error).message }, 400); } }
     case "POST /models/prepare": { const b = await body(req); try {

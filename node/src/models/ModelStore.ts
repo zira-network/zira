@@ -14,7 +14,7 @@ import { defaultDomainsForModelType, type ModelType } from "@zira/protocol";
 
 type ImportOpts = {
   arch?: string; quant?: string; url?: string;
-  type?: ModelType; domains?: ModelMeta["domains"]; tags?: string[]; version?: number;
+  type?: ModelType; domains?: ModelMeta["domains"]; tags?: string[]; version?: number; assigned?: boolean;
 };
 /** Fill in a model's modality + routing domains so every stored model is type+domain addressable.
  * Models registered without a type default to "text"; without domains, to the type's default domains. */
@@ -134,7 +134,7 @@ export class ModelStore {
     const id = await ModelStore.hashFile(localPath);
     const { type, domains } = normalizeModelType(opts);
     const meta: ModelMeta = {
-      id, name, arch: opts.arch, quant: opts.quant, url: opts.url, type, domains, tags: opts.tags, version: opts.version, sizeBytes: size,
+      id, name, arch: opts.arch, quant: opts.quant, url: opts.url, type, domains, tags: opts.tags, version: opts.version, assigned: opts.assigned, sizeBytes: size,
       chunkSize: MODEL_CHUNK_BYTES, chunkCount: Math.ceil(size / MODEL_CHUNK_BYTES), ts: Date.now(),
     };
     mkdirSync(this.modelDir(id), { recursive: true });
@@ -203,7 +203,7 @@ export class ModelStore {
     const id = h.digest("hex");
     const { type, domains } = normalizeModelType(opts);
     const meta: ModelMeta = {
-      id, name, arch: opts.arch, quant: opts.quant, url, type, domains, tags: opts.tags, version: opts.version,
+      id, name, arch: opts.arch, quant: opts.quant, url, type, domains, tags: opts.tags, version: opts.version, assigned: opts.assigned,
       sizeBytes: size, chunkSize: MODEL_CHUNK_BYTES, chunkCount: Math.ceil(size / MODEL_CHUNK_BYTES), ts: Date.now(),
     };
     mkdirSync(this.modelDir(id), { recursive: true });

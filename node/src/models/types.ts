@@ -23,6 +23,11 @@ export interface ModelMeta {
   // so the steward can describe a model's specialty for discovery without changing the protocol enum.
   tags?: string[];
   version?: number;    // catalog version, so models can be revised over time
+  // Steward assignment (v2.0.2): when true, this model was designated by the steward to spread across the
+  // whole storage network, so every storage-enabled node fetches it even if it is already well replicated
+  // (reconcileStorage prioritizes assigned models ahead of gap-filling). Part of the signed meta, so the
+  // assignment is authenticated by the launch authority. Older models default to undefined (not assigned).
+  assigned?: boolean;
   ts: number;
 }
 

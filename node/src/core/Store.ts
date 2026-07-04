@@ -37,12 +37,12 @@ export class Store {
   // set/amount — conflicting txs that diverged the masters and stalled quorum. These guards are in-memory
   // watermarks; persisting them makes restart idempotent. Consensus-neutral: only the SETTLER reads/writes this,
   // and it only ever REMOVES duplicate txs it would otherwise issue. ----
-  loadSettlerProgress(): { lastParticipationBucket?: number; lastAutonomousResonanceBucket?: number; paidResonatorRewards?: string[]; settledCoordinationQueries?: string[] } | null {
+  loadSettlerProgress(): { lastParticipationBucket?: number; lastAutonomousResonanceBucket?: number; paidResonatorRewards?: string[]; settledCoordinationQueries?: string[]; minerAnswerCredits?: Record<string, number> } | null {
     if (!existsSync(this.settlerProgressPath)) return null;
     try { return JSON.parse(readFileSync(this.settlerProgressPath, "utf8")); } catch { return null; }
   }
 
-  saveSettlerProgress(state: { lastParticipationBucket: number; lastAutonomousResonanceBucket: number; paidResonatorRewards: string[]; settledCoordinationQueries: string[] }): void {
+  saveSettlerProgress(state: { lastParticipationBucket: number; lastAutonomousResonanceBucket: number; paidResonatorRewards: string[]; settledCoordinationQueries: string[]; minerAnswerCredits?: Record<string, number> }): void {
     const tmp = this.settlerProgressPath + ".tmp";
     const fd = openSync(tmp, "w");
     try { writeSync(fd, JSON.stringify(state)); fdatasyncSync(fd); } finally { closeSync(fd); }

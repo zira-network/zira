@@ -687,6 +687,18 @@ export function Mine() {
     finally { setBusy(false); }
   }
 
+  async function emptyStorage() {
+    setBusy(true);
+    try {
+      const r = await NodeApi.clearStorage();
+      await refreshStatus();
+      const gb = ((r.freedBytes ?? 0) / 1024 ** 3).toFixed(2);
+      toast.push(r.cleared ? `Cleared ${r.cleared} stored model(s), freed ${gb} GB. Storage re-fills from the field up to your cap.` : "Nothing to clear (only the model in use is kept).");
+    }
+    catch (e) { toast.push(e instanceof Error ? e.message : "could not clear storage", "danger"); }
+    finally { setBusy(false); }
+  }
+
   async function updateLocalTaskPermission(on = !(mining?.localTaskPermission ?? false)) {
     setBusy(true);
     try {
@@ -1040,6 +1052,12 @@ export function Mine() {
             <Stat label="Used of cap" value={<span className="text-sm">{formatBytes(mining?.storageUsedBytes ?? 0)} / {formatBytes(mining?.storageCapBytes ?? (mining?.storageLimitGb ?? 1) * 1024 ** 3)}{(mining?.storageDownloadingBytes ?? 0) > 0 ? <span className="text-faint"> (+{formatBytes(mining?.storageDownloadingBytes ?? 0)} downloading)</span> : null}</span>} />
             <Stat label="Mode" value={<span className="text-sm">{mining?.storageEnabled ? "storage peer" : "light node"}</span>} />
           </div>
+          {(mining?.storageUsedBytes ?? 0) > 0 && (
+            <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-faint">
+              <span>Free the disk without turning storage off. The node re-fills from the field up to your cap; the model it is actively serving is kept.</span>
+              <Button variant="ghost" onClick={emptyStorage} disabled={busy} className="shrink-0 text-xs">Empty stored models</Button>
+            </div>
+          )}
           {mining?.storageEnabled && (mining?.storageUsedBytes ?? 0) >= (mining?.storageCapBytes ?? (mining?.storageLimitGb ?? 1) * 1024 ** 3) && (
             <div className="mt-2 rounded-lg border border-[color-mix(in_srgb,var(--warn)_35%,transparent)] bg-[color-mix(in_srgb,var(--warn)_7%,transparent)] p-2 text-[11px] text-muted">
               Storage is at its cap. This node keeps serving what it already holds and will not take new bytes until you raise the cap.
