@@ -49,6 +49,13 @@ interface PubSubLike {
 // below the cap so a healthy local mesh forms quickly without ever crowding out inbound peers.
 const TARGET_PEERS = Number(process.env.ZIRA_TARGET_PEERS ?? 8);
 const DISCOVERY_INTERVAL_MS = 20_000;
+// Keepalive: a home node behind NAT dials OUT to the masters, and the masters reuse that same connection to
+// send it a liveness probe (which is how a miner gets vouched and paid). If the connection sits idle, the
+// router's NAT mapping expires; libp2p still lists the connection but the master's probe stream hangs and the
+// miner silently stops being vouched — it stops earning without any error. Pinging each live connection well
+// inside the typical NAT idle window keeps the mapping fresh AND surfaces a dead connection fast so the
+// discovery sweep can redial it. Networking only; no consensus effect.
+const KEEPALIVE_INTERVAL_MS = Number(process.env.ZIRA_KEEPALIVE_INTERVAL_MS ?? 20_000);
 
 export class Libp2pNetwork implements ZiraNetwork {
   private node: Libp2p | null = null;
@@ -57,6 +64,7 @@ export class Libp2pNetwork implements ZiraNetwork {
   private syncProvider: () => AsyncIterable<Uint8Array> | Iterable<Uint8Array> = function* () {};
   private syncedPeers = new Set<string>();
   private discoveryTimer: ReturnType<typeof setInterval> | null = null;
+  private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
   private maxConnections = Number(process.env.ZIRA_MAX_CONNECTIONS ?? 128);
   // Backoff bookkeeping so we don't hammer a peer that keeps refusing: peerId/addr -> next-eligible time.
   private dialBackoff = new Map<string, number>();
@@ -158,6 +166,26 @@ export class Libp2pNetwork implements ZiraNetwork {
     void this.dialAllSeeds();
     this.discoveryTimer = setInterval(() => { void this.discoverySweep(); }, DISCOVERY_INTERVAL_MS);
     if (typeof (this.discoveryTimer as any).unref === "function") (this.discoveryTimer as any).unref();
+    this.keepAliveTimer = setInterval(() => { void this.keepAliveSweep(); }, KEEPALIVE_INTERVAL_MS);
+    if (typeof (this.keepAliveTimer as any).unref === "function") (this.keepAliveTimer as any).unref();
+  }
+
+  /**
+   * Ping every live connection to keep its NAT mapping fresh (see KEEPALIVE_INTERVAL_MS). Each ping opens a
+   * stream over the EXISTING connection, so it both refreshes the router's UDP/TCP mapping and lets libp2p
+   * detect a dead connection quickly (the connection is closed on failure, and discoverySweep redials). This
+   * is what keeps a home miner reachable for the masters' liveness probe, so it stays vouched and keeps
+   * earning. Bounded and best-effort: a slow/dead peer never blocks the others.
+   */
+  private async keepAliveSweep(): Promise<void> {
+    if (!this.node) return;
+    const pinger: any = this.node.services?.ping;
+    if (!pinger || typeof pinger.ping !== "function") return;
+    const conns = this.node.getConnections();
+    await Promise.allSettled(conns.map(async (c) => {
+      try { await pinger.ping(c.remotePeer, { signal: AbortSignal.timeout(8_000) }); }
+      catch { try { await c.close(); } catch { /* pruned; discoverySweep will redial */ } }
+    }));
   }
 
   /** Dial all configured bootstrap + announce seeds in parallel (best effort). */
@@ -273,6 +301,7 @@ export class Libp2pNetwork implements ZiraNetwork {
 
   async stop(): Promise<void> {
     if (this.discoveryTimer) { clearInterval(this.discoveryTimer); this.discoveryTimer = null; }
+    if (this.keepAliveTimer) { clearInterval(this.keepAliveTimer); this.keepAliveTimer = null; }
     await this.node?.stop();
   }
 
