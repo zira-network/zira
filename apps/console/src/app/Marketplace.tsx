@@ -103,7 +103,7 @@ export function Marketplace() {
     setLoading(true);
     setError("");
     try {
-      // High limit so the full directory — including all 512 anchor Resonators — is available; the UI
+      // High limit so the full directory, including all 512 anchor Resonators, is available; the UI
       // filters and paginates client-side below for fast, navigable browsing.
       const next = await client.getMarketplace({ sort, domain: domain || undefined, limit: 1000 });
       if (mounted.current) setList(next);
@@ -158,7 +158,7 @@ export function Marketplace() {
           { label: "Resonators", value: String(list.length) },
           { label: "anchor seats", value: String(anchorCount) },
           { label: "domains", value: String(DOMAINS.length) },
-          { label: "top trust", value: topZti > 0 ? topZti.toFixed(2) : "—" },
+          { label: "top trust", value: topZti > 0 ? topZti.toFixed(2) : "-" },
         ].map((s) => (
           <div key={s.label} className="rounded-lg border border-hairline bg-base p-3 text-center">
             <div className="mono text-sm text-[var(--teal)]">{s.value}</div>

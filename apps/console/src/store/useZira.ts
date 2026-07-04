@@ -104,7 +104,7 @@ interface ZiraState {
   localLaunchMiners: LocalLaunchMinerSummary[];
   ztiByDomain: Partial<Record<Domain, number>>;
   zti: number;
-  // The node's OWN mining wallet (its identity) — the address that actually earns from mining/serving on
+  // The node's OWN mining wallet (its identity), the address that actually earns from mining/serving on
   // this machine. Separate from the user's spendable Console `address`. The Mine tab shows these so a
   // miner sees real earnings even when their personal wallet is a different (empty) address.
   minerAddress: string | null;
@@ -309,7 +309,7 @@ export const useZira = create<ZiraState>((set, get) => ({
       // Node-custody wallet: on a local node, keep the active wallet pinned to the node's mining identity
       // (covers the case where the node was not reachable at init and only came up now). Adopt the key in
       // memory once so signed actions work. IMPORTANT: only flip to nodeWallet once the key is actually
-      // adopted (unlocked) — otherwise a transient /wallet/export failure would leave a node-wallet card
+      // adopted (unlocked), otherwise a transient /wallet/export failure would leave a node-wallet card
       // with no unlock path and a send that can never sign. If the adopt fails we leave the wallet state
       // untouched and simply retry on the next poll.
       if (isLocalNode() && st.address && !Wallet.isUnlocked()) {

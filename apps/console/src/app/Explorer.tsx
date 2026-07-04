@@ -1,6 +1,6 @@
 // apps/console/src/app/Explorer.tsx
 // The public RPC surface: network health, supply audit, signed event history, address lookup,
-// recent Locks, and field convergence — the explorer/exchange-integration view.
+// recent Locks, and field convergence, the explorer/exchange-integration view.
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Copy, ChevronDown, ChevronRight } from "lucide-react";
 import { PROTOCOL, type Lock, type SignedTx, type FieldNode } from "@zira/protocol";
@@ -523,7 +523,7 @@ function FieldConvergence() {
     return () => clearInterval(t);
   }, [client, subject, paused]);
 
-  // Only nodes with a REAL signed estimate are plotted — no fabricated values. This is an explorer:
+  // Only nodes with a REAL signed estimate are plotted, no fabricated values. This is an explorer:
   // synthetic readings would undermine the verifiable-event-web claim.
   const readings = nodes.filter((n) => n.estimate != null);
 

@@ -33,8 +33,8 @@ async function rpcPostTo<T>(baseUrl: string, path: string, body: unknown): Promi
   return data as T;
 }
 
-// Sign a fresh steward challenge with the loaded wallet, so steward actions authorize on ANY node — even a
-// keyless public gateway — by signature rather than by the node holding the key. The node verifies the
+// Sign a fresh steward challenge with the loaded wallet, so steward actions authorize on ANY node, even a
+// keyless public gateway, by signature rather than by the node holding the key. The node verifies the
 // signature is by a founder-address wallet (verifyStewardSig). Returns {} if no wallet is unlocked, in
 // which case the node falls back to its own isFounder/canSteward check.
 export function stewardAuth(): { stewardPubKey?: string; stewardChallenge?: string; stewardSig?: string } {

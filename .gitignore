@@ -60,3 +60,4 @@ dist-rebuild/
 dist-*/
 *.tmp/
 .cache/
+apps/desktop/llama-bundle/

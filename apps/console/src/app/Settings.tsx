@@ -297,7 +297,7 @@ function PeersCard() {
               <div key={c.peerId} className="flex items-center justify-between gap-2 rounded-lg border border-hairline bg-base px-2.5 py-1.5">
                 <div className="min-w-0">
                   <button onClick={() => copy(c.peerId, "Peer ID")} className="mono block truncate text-xs text-text hover:underline" title={c.peerId}>{shortId(c.peerId)}</button>
-                  <div className="mono truncate text-[10px] text-faint" title={c.addr}>{c.addr || "—"}</div>
+                  <div className="mono truncate text-[10px] text-faint" title={c.addr}>{c.addr || "-"}</div>
                 </div>
                 <Badge tone={c.direction === "inbound" ? "teal" : "neutral"}>{c.direction === "inbound" ? "in" : c.direction === "outbound" ? "out" : c.direction}</Badge>
               </div>
@@ -384,7 +384,7 @@ function NodeInfoCard() {
       </div>
       <div className="grid gap-2 sm:grid-cols-2">
         <div className="rounded-lg border border-hairline bg-base p-2"><div className="mono break-all text-sm text-text">{formatNodeVersion(nodeVersion)}</div><div className="text-[11px] text-faint">Node build</div></div>
-        <Stat label="Round-trip latency" value={latencyMs == null ? "—" : `${latencyMs} ms`} />
+        <Stat label="Round-trip latency" value={latencyMs == null ? "-" : `${latencyMs} ms`} />
       </div>
       <p className="mt-2 text-[11px] text-faint">The node build is read from the node itself, so the Console can light up newer features only when the node supports them and stay quietly compatible with older nodes. Latency is measured round-trip on each refresh.</p>
     </Card>

@@ -1,6 +1,6 @@
 // apps/console/src/lib/usdtPay.ts
 // QR-code USDT contribution for the anchor event (spec §2.4) via WalletConnect. The contributor scans a
-// QR with their mobile wallet, which works identically on desktop (Electron), web, and mobile — no browser
+// QR with their mobile wallet, which works identically on desktop (Electron), web, and mobile, no browser
 // extension or injected provider required. The app constructs the exact USDT transfer to ZIRA's published
 // receiving address; the user approves it in their wallet. The WalletConnect SDK is heavy, so it is loaded
 // lazily (only when a contribution starts), keeping the main bundle small. Requires a steward-set
@@ -16,7 +16,7 @@ const EVM: Record<"Ethereum" | "BSC" | "Polygon", { chainId: number; contract: s
 };
 
 // Base units for a human USDT amount at the given decimals, as a BigInt (BSC uses 18 decimals, so the
-// value can exceed 2^53 — BigInt is required, never a float multiply).
+// value can exceed 2^53, BigInt is required, never a float multiply).
 function toBaseUnits(amountUsdt: number, decimals: number): bigint {
   if (!Number.isFinite(amountUsdt) || amountUsdt < 0) throw new Error("invalid amount");
   const parts = String(amountUsdt).split(".");
@@ -26,7 +26,7 @@ function toBaseUnits(amountUsdt: number, decimals: number): bigint {
   return BigInt(whole) * (10n ** BigInt(decimals)) + BigInt(fracPadded || "0");
 }
 
-// ERC-20 transfer(address,uint256) calldata — manual ABI encoding, no library needed.
+// ERC-20 transfer(address,uint256) calldata, manual ABI encoding, no library needed.
 function encodeErc20Transfer(to: string, amount: bigint): string {
   const selector = "a9059cbb";
   const addr = to.toLowerCase().replace(/^0x/, "").padStart(64, "0");

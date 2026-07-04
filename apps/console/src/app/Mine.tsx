@@ -269,7 +269,7 @@ function DemandPanel({ pricing, error, loading, onRetry }: { pricing: Pricing | 
   );
 }
 
-// The 3-contributor convergence gate — the single fact that determines whether mining pays. A node
+// The 3-contributor convergence gate, the single fact that determines whether mining pays. A node
 // earns only when >=3 contributors converge on the field heartbeat; below the line it builds ZTI only.
 // Also surfaces real field-health numbers already in the store (providers online, locks/min) and the
 // "answers come from capable miners, not this CPU" point for coordination-only nodes.
@@ -538,7 +538,7 @@ export function Mine() {
   const { mode, isFounder, stats, balanceUZIR, hardware, nodeConfig, providerStatus, mining, localLaunchMiners, zti, address, locks, client,
     minerAddress, minerBalanceUZIR, setMining, refreshStatus } = useZira();
   // Earnings shown here are read from the ledger (the authoritative source the wallet and Earnings history
-  // use), not from provider inference counters — a coordination node earns emission/coordination payouts
+  // use), not from provider inference counters, a coordination node earns emission/coordination payouts
   // that never touch the inference counter, so those must come from the signed ledger to be truthful.
   const [earned24hUZIR, setEarned24hUZIR] = useState(0);
   useEffect(() => {

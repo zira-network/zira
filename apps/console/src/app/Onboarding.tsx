@@ -77,7 +77,7 @@ export function Onboarding() {
 
   // Desktop / own-node import: the wallet the app shows IS the node's mining identity, so an import must be
   // adopted by the NODE (loopback /wallet/import), not only by the browser. Importing only browser-side left
-  // the app pinned back to the node's fresh identity on the next status poll — the imported wallet's balance
+  // the app pinned back to the node's fresh identity on the next status poll, the imported wallet's balance
   // never appeared. The passphrase still encrypts the local backup copy of the key on this device.
   async function importWalletLocal() {
     setError("");
@@ -114,7 +114,7 @@ export function Onboarding() {
       {step === 1 && (
         <div className="flex flex-col gap-3">
           <h4 className="font-medium">Connect to the live network</h4>
-          <p className="text-sm text-muted">ZIRA connects to a node and joins the live network. There is no demo mode, this is the real thing. New here? For the network's first year, the contributing community covers a free allowance of questions — no ZIR or machine needed. After that, add ZIR or run your own machine to keep asking; contributing your machine keeps it free with no limit.</p>
+          <p className="text-sm text-muted">ZIRA connects to a node and joins the live network. There is no demo mode, this is the real thing. New here? For the network's first year, the contributing community covers a free allowance of questions, no ZIR or machine needed. After that, add ZIR or run your own machine to keep asking; contributing your machine keeps it free with no limit.</p>
           <div className="grid grid-cols-1 gap-3">
             <Button variant="primary" onClick={() => chooseMode("node")}>Connect to the live network</Button>
           </div>
@@ -235,7 +235,7 @@ export function Onboarding() {
         <div className="flex flex-col items-center gap-3 text-center">
           <HexField size={80} />
           <h4 className="font-medium">Wallet imported</h4>
-          <p className="max-w-sm text-sm text-muted">ZIRA is restarting to load your wallet. Your balance appears once the node finishes syncing — usually under a minute.</p>
+          <p className="max-w-sm text-sm text-muted">ZIRA is restarting to load your wallet. Your balance appears once the node finishes syncing, usually under a minute.</p>
         </div>
       )}
 

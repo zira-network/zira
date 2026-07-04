@@ -382,9 +382,9 @@ export function Learn() {
                   {isRiskSection && stats && (
                     <div className="mt-4 space-y-3">
                       <div className="grid grid-cols-3 gap-3">
-                        <StatTile label="Reachable nodes" value={peers != null ? formatNum(peers, 0) : "—"} />
-                        <StatTile label="Providers online" value={providers != null ? formatNum(providers, 0) : "—"} />
-                        <StatTile label="Avg trust (ZTI)" value={avgZti != null ? avgZti.toFixed(2) : "—"} />
+                        <StatTile label="Reachable nodes" value={peers != null ? formatNum(peers, 0) : "-"} />
+                        <StatTile label="Providers online" value={providers != null ? formatNum(providers, 0) : "-"} />
+                        <StatTile label="Avg trust (ZTI)" value={avgZti != null ? avgZti.toFixed(2) : "-"} />
                       </div>
                       <Meter value={myZti} label="Network trust sample" />
                     </div>

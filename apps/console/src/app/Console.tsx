@@ -113,7 +113,7 @@ function parsePoll(content: string): ParsedPoll | null {
 }
 
 // Plan / steps: for a complex multi-step task the field may open with a short plan. The Console renders
-// it as a numbered checklist whose steps are clickable — clicking sends that step back as the next turn
+// it as a numbered checklist whose steps are clickable, clicking sends that step back as the next turn
 // so the user can drive the field through the plan one step at a time.
 const PLAN_INSTRUCTION =
   "\n\nOnly if the request is a genuinely multi-step build or change (something that sensibly breaks into separate steps the user would work through one at a time) you MAY open with a short plan using EXACTLY this format (3 to 8 concise steps), then continue with the first step below it:\n[[PLAN]]\n- <step one>\n- <step two>\n[[/PLAN]]\nFor a question, an explanation, or any single-step request, do NOT include a plan: just answer.";
@@ -244,7 +244,7 @@ export function Console() {
     const saved = localStorage.getItem("zira.console.answerMode") as ConsoleAnswerMode | null;
     return saved === "local" && isLocalNode() ? "local" : "field";
   });
-  // Compute tier — ORTHOGONAL to the Field/Local mode. It decides who does the work and how it is paid:
+  // Compute tier, ORTHOGONAL to the Field/Local mode. It decides who does the work and how it is paid:
   //   free    = the network answers, within your free allowance (no ZIR moves)
   //   zir     = the network answers, and you pay the miners who answered (needs an unlocked wallet)
   //   machine = your own hardware answers (own-task inference), private, costs and earns no ZIR
@@ -581,7 +581,7 @@ export function Console() {
   // the field neither chains polls nor re-plans mid-task.
   function questionWithWorkspaceContext(question: string, opts: { allowPoll: boolean; allowPlan: boolean }): string {
     const projectPreamble = activeProject?.instructions.trim()
-      ? `Project "${activeProject.name}" — standing instructions for every task in this project:\n${activeProject.instructions.trim()}\n\n`
+      ? `Project "${activeProject.name}", standing instructions for every task in this project:\n${activeProject.instructions.trim()}\n\n`
       : "";
     const profileText = projectPreamble + (coordinationProfile === "quick"
       ? "Coordination profile: quick. Prefer a concise answer, fewer comparison rounds, and low latency."
@@ -1172,7 +1172,7 @@ function ThreeWaysToAsk() {
     {
       k: "Ask free",
       tone: "var(--teal)",
-      v: "For the network's first year, the contributing community covers a free allowance of everyday questions — no ZIR and no machine of your own needed. After that first year, ask with ZIR or run your own machine. Contributing your machine keeps your questions free, with no limit, for good.",
+      v: "For the network's first year, the contributing community covers a free allowance of everyday questions, no ZIR and no machine of your own needed. After that first year, ask with ZIR or run your own machine. Contributing your machine keeps your questions free, with no limit, for good.",
     },
     {
       k: "Pay ZIR for more",

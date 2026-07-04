@@ -842,6 +842,14 @@ function serveStatic(dir: string, path: string, res: ServerResponse): void {
   if (!existsSync(file) || statSync(file).isDirectory()) file = join(dir, "index.html"); // SPA fallback
   if (!existsSync(file)) { res.writeHead(404); res.end("not found"); return; }
   const ext = extname(file);
-  res.writeHead(200, { "Content-Type": MIME[ext] ?? "application/octet-stream" });
+  // Upgrade safety: index.html must NEVER be served from a stale browser/webview cache, or after an
+  // update the page keeps referencing old hashed asset files that no longer exist and the Console
+  // breaks until a hard refresh. Hashed assets are immutable by name, so they may cache forever;
+  // the HTML entry point revalidates on every load. This is what makes installing a new version
+  // over an old one seamless for the desktop webview, the public gateway, and any browser client.
+  const headers: Record<string, string> = { "Content-Type": MIME[ext] ?? "application/octet-stream" };
+  if (ext === ".html") headers["Cache-Control"] = "no-cache";
+  else if (rel.startsWith("/assets/")) headers["Cache-Control"] = "public, max-age=31536000, immutable";
+  res.writeHead(200, headers);
   res.end(readFileSync(file));
 }

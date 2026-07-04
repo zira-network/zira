@@ -151,8 +151,8 @@ export class NodeClient implements ZiraClient {
         }
       }
       const msg = own?.enabled
-        ? "No answer came back in time. This machine has no local model — but you don't need one: the field answers for you. Authorized models are distributed to miners across the network, and your question is answered here as soon as one is serving. The field may just be warming up; please try again in a moment."
-        : "No answer came back in time. The field is still warming up — authorized models are distributed to miners across the network, and your question is answered here as soon as one is serving. Please try again in a moment.";
+        ? "No answer came back in time. This machine has no local model, but you don't need one: the field answers for you. Authorized models are distributed to miners across the network, and your question is answered here as soon as one is serving. The field may just be warming up; please try again in a moment."
+        : "No answer came back in time. The field is still warming up, authorized models are distributed to miners across the network, and your question is answered here as soon as one is serving. Please try again in a moment.";
       for (const w of msg.split(/(\s+)/)) { if (args.signal?.aborted) break; args.onToken(w); await new Promise((r) => setTimeout(r, 8)); }
       return { answer: msg, receipt: { contributors: [], domain, fusedConfidence: 0, challengeOpenUntil: Date.now(), proofAvailable: false, costUZIR: 0 } };
     }

@@ -39,7 +39,7 @@ export function WalletPage() {
       let txs = await client.getTxHistory(address, 80);
       // A freshly-synced local node only holds the recent tx window, so an imported (older) wallet can
       // look history-less here even though it earned for weeks. When the local answer is empty, read the
-      // public gateway too — it serves the network's shared view of this address's recent activity.
+      // public gateway too, it serves the network's shared view of this address's recent activity.
       if (txs.length === 0) {
         for (const gateway of PUBLIC_GATEWAYS) {
           try {

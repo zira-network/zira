@@ -1,7 +1,7 @@
 {
   "name": "@zira/desktop",
   "private": true,
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "ZIRA desktop app. Runs a full ZIRA Core node (with mining) and the Console in one window.",
   "main": "electron/main.cjs",
   "scripts": {
@@ -31,6 +31,10 @@
       {
         "from": "../../node/public",
         "to": "core/public"
+      },
+      {
+        "from": "llama-bundle/node_modules",
+        "to": "core/node_modules"
       }
     ],
     "win": {
