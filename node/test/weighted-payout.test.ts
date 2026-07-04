@@ -52,3 +52,17 @@ test("zero / non-finite weights fall back to an even split (never mints or loses
   const out2 = weightedOutputs(payees, [NaN, Infinity, -1, 2], 1000);
   assert.equal(sum(out2), 1000);
 });
+
+test("no output is ever <= 0 (the ledger rejects the whole batch on a non-positive output)", () => {
+  // A tiny pool against a skewed weight set used to leave a low-weight payee at 0 -> batch rejected.
+  const payees = ["zir1a", "zir1b", "zir1c", "zir1d", "zir1e"];
+  for (const pool of [1, 2, 3, 4, 5, 6, 7, 10, 64, 5_000_000_000]) {
+    for (const weights of [[1, 6], [1, 100], [1, 1, 1, 1, 1], [1, 2, 3, 4, 5], [0, 0, 0, 0, 1]]) {
+      const p = payees.slice(0, weights.length);
+      const out = weightedOutputs(p, weights, pool);
+      assert.equal(sum(out), pool, `pool=${pool} weights=${weights}`);
+      assert.ok(out.every(([, v]) => v > 0), `pool=${pool} weights=${weights} has a non-positive output`);
+      assert.ok(out.length <= p.length && out.length <= pool, `pool=${pool} weights=${weights} too many outputs`);
+    }
+  }
+});

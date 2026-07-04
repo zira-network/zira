@@ -212,6 +212,23 @@ export class State {
     return live;
   }
 
+  /**
+   * The storage size (GiB) a miner most recently attested it is serving, from its own signed field heartbeat.
+   * Self-reported, so the settler only WEIGHTS by it for miners it independently verified are storage-serving
+   * (passed a chunk challenge) — a liar who never serves gains nothing. Soft state; feeds "bigger storage
+   * earns more" in the field payout weight. 0 if the miner has no fresh heartbeat.
+   */
+  minerStorageGiB(addr: Address, now: number, freshMs: number): number {
+    const cutoff = now - freshMs;
+    let latest = 0, latestTs = 0;
+    for (const o of this.obsPool.values()) {
+      if (o.subject !== PROTOCOL.FIELD_HEARTBEAT_SUBJECT || o.timestamp < cutoff) continue;
+      if (addressFromPubKey(o.observer) !== addr) continue;
+      if (o.timestamp > latestTs) { latestTs = o.timestamp; latest = Math.max(0, Number(o.storageGiB) || 0); }
+    }
+    return latest;
+  }
+
   setAuthorizedFounders(addresses: Address[]): void {
     this.authorizedFounders = new Set([this.founder, ...addresses.filter((a) => a.startsWith("zir1"))]);
     for (const founder of this.authorizedFounders) {

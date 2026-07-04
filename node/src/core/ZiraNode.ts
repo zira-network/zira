@@ -119,10 +119,16 @@ const FIELD_PARTICIPATION_MAX_PAYEES = envInt("ZIRA_FIELD_PARTICIPATION_MAX_PAYE
 //                 + min(ZTI_CAP, zti*ZTI_UNIT), clamped to [BASE, CEILING].
 const FIELD_WEIGHT_BASE = Number(process.env.ZIRA_FIELD_WEIGHT_BASE ?? 1);
 const FIELD_WEIGHT_STORAGE_BONUS = Number(process.env.ZIRA_FIELD_WEIGHT_STORAGE_BONUS ?? 0.5);
+// Bigger verified storage earns more: a per-GiB bonus (only for miners that PASSED the chunk challenge, so a
+// self-reported size cannot be gamed), capped so a huge disk cannot dominate the pool.
+const FIELD_WEIGHT_STORAGE_GIB_UNIT = Number(process.env.ZIRA_FIELD_WEIGHT_STORAGE_GIB_UNIT ?? 0.05);
+const FIELD_WEIGHT_STORAGE_GIB_CAP = Number(process.env.ZIRA_FIELD_WEIGHT_STORAGE_GIB_CAP ?? 2);
 const FIELD_WEIGHT_ANSWER_UNIT = Number(process.env.ZIRA_FIELD_WEIGHT_ANSWER_UNIT ?? 0.5);
-const FIELD_WEIGHT_ANSWER_CAP = Number(process.env.ZIRA_FIELD_WEIGHT_ANSWER_CAP ?? 3);
+const FIELD_WEIGHT_ANSWER_CAP = Number(process.env.ZIRA_FIELD_WEIGHT_ANSWER_CAP ?? 4);
 const FIELD_WEIGHT_ZTI_CAP = Number(process.env.ZIRA_FIELD_WEIGHT_ZTI_CAP ?? 1);
-const FIELD_WEIGHT_CEILING = Number(process.env.ZIRA_FIELD_WEIGHT_CEILING ?? 6);
+// Wider range (was 6) so a strong, hard-working machine can earn many times a bare live node's share, while
+// the BASE floor keeps a small honest miner from ever going to zero.
+const FIELD_WEIGHT_CEILING = Number(process.env.ZIRA_FIELD_WEIGHT_CEILING ?? 8.5);
 // Recency decay applied to a miner's accumulated coordination-answer credits once per paid cycle, so recent
 // work dominates and stale credits fade (a rolling recency-weighted answer count).
 const FIELD_ANSWER_DECAY = Number(process.env.ZIRA_FIELD_ANSWER_DECAY ?? 0.8);
@@ -1285,7 +1291,12 @@ export class ZiraNode {
   private fieldPayoutWeight(addr: string, now: number): number {
     let w = FIELD_WEIGHT_BASE;
     const st = this.storageServingMiners.get(addr);
-    if (st !== undefined && now - st <= ZiraNode.VOUCH_FRESH_MS) w += FIELD_WEIGHT_STORAGE_BONUS;
+    if (st !== undefined && now - st <= ZiraNode.VOUCH_FRESH_MS) {
+      // Verified storage server: a flat bonus plus more for serving more bytes (gated by the passed challenge).
+      w += FIELD_WEIGHT_STORAGE_BONUS;
+      const gib = this.state.minerStorageGiB(addr, now, ZiraNode.VOUCH_FRESH_MS);
+      w += Math.min(FIELD_WEIGHT_STORAGE_GIB_CAP, gib * FIELD_WEIGHT_STORAGE_GIB_UNIT);
+    }
     w += Math.min(FIELD_WEIGHT_ANSWER_CAP, (this.minerAnswerCredits.get(addr) ?? 0) * FIELD_WEIGHT_ANSWER_UNIT);
     const zti = this.state.accounts.get(addr)?.zti ?? 0;
     w += Math.min(FIELD_WEIGHT_ZTI_CAP, Math.max(0, zti));

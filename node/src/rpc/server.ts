@@ -849,8 +849,11 @@ function serveStatic(dir: string, path: string, res: ServerResponse): void {
   // the HTML entry point revalidates on every load. This is what makes installing a new version
   // over an old one seamless for the desktop webview, the public gateway, and any browser client.
   const headers: Record<string, string> = { "Content-Type": MIME[ext] ?? "application/octet-stream" };
+  // normalize() yields OS separators (backslashes on Windows), so compare with forward slashes to keep the
+  // hashed-asset match working on every host the node runs on.
+  const relPosix = rel.replace(/\\/g, "/");
   if (ext === ".html") headers["Cache-Control"] = "no-cache";
-  else if (rel.startsWith("/assets/")) headers["Cache-Control"] = "public, max-age=31536000, immutable";
+  else if (relPosix.startsWith("/assets/")) headers["Cache-Control"] = "public, max-age=31536000, immutable";
   res.writeHead(200, headers);
   res.end(readFileSync(file));
 }
