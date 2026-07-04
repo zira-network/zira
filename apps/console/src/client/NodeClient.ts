@@ -26,11 +26,13 @@ export class FreeTierError extends Error {
   }
 }
 
-// The public ZIRA gateway (kept in sync with createClient.ts DEFAULT_PUBLIC_GATEWAY). When the Console
+// The public ZIRA gateways (kept in sync with createClient.ts DEFAULT_PUBLIC_GATEWAY). When the Console
 // talks to a LOCAL embedded node that is still syncing, isolated, or briefly without a serving provider,
-// a field ask that comes back empty is retried against this always-on gateway so the user still gets an
-// answer instead of a "warming up" message. Mining and earning stay on the local node.
-const PUBLIC_GATEWAY = "http://157.173.106.50:8645";
+// a field ask that comes back empty is retried against these always-on gateways so the user still gets an
+// answer instead of a "warming up" message. Mining and earning stay on the local node. Ordered: the main
+// gateway first, then the serving box as a second chance when the first is briefly unreachable.
+export const PUBLIC_GATEWAYS = ["http://157.173.106.50:8645", "http://164.68.97.111:8645"];
+const PUBLIC_GATEWAY = PUBLIC_GATEWAYS[0]!;
 
 export class NodeClient implements ZiraClient {
   // fieldFallback: when true (the default) a field ask with no model-backed answer is retried once against
@@ -39,9 +41,21 @@ export class NodeClient implements ZiraClient {
   private rpc(p: string): string { return this.base + "/rpc" + p; }
 
   private async get<T>(p: string): Promise<T> {
-    const r = await fetch(this.rpc(p));
-    if (!r.ok) throw new Error(`GET ${p} failed: ${r.status}`);
-    return r.json() as Promise<T>;
+    // Read endpoints are idempotent. A busy node can stall a single read for seconds (its event loop is
+    // shared with sync work), which used to surface as a "0 / unavailable" flicker in the app. Retry with
+    // a short per-attempt timeout so the next attempt lands on the fast path. A truly-down node rejects
+    // instantly (connection refused), so this only adds latency during a rare stall, not when offline.
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 5000);
+      try {
+        const r = await fetch(this.rpc(p), { signal: ctrl.signal });
+        if (!r.ok) throw new Error(`GET ${p} failed: ${r.status}`);
+        return (await r.json()) as T;
+      } catch (e) { lastErr = e; } finally { clearTimeout(timer); }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error(`GET ${p} failed`);
   }
   private async post<T>(p: string, body: unknown): Promise<T> {
     const r = await fetch(this.rpc(p), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -128,11 +142,13 @@ export class NodeClient implements ZiraClient {
       // The local node had no serving provider (still syncing, isolated, or no model loaded here). Retry
       // once against the always-on public gateway so the user still gets a real field answer. Free ask (no
       // tip) since the fallback answers come from the gateway's field; mining/earning stay on the local node.
-      if (this.fieldFallback && !this.base.startsWith(PUBLIC_GATEWAY) && !args.signal?.aborted) {
-        try {
-          const gw = new NodeClient(PUBLIC_GATEWAY, false);
-          return await gw.askField({ ...args, pay: false });
-        } catch { /* gateway unreachable too: fall through to the guidance message */ }
+      if (this.fieldFallback && !PUBLIC_GATEWAYS.some((g) => this.base.startsWith(g)) && !args.signal?.aborted) {
+        for (const gateway of PUBLIC_GATEWAYS) {
+          try {
+            const gw = new NodeClient(gateway, false);
+            return await gw.askField({ ...args, pay: false });
+          } catch { /* this gateway unreachable: try the next, else fall through to the guidance message */ }
+        }
       }
       const msg = own?.enabled
         ? "No answer came back in time. This machine has no local model — but you don't need one: the field answers for you. Authorized models are distributed to miners across the network, and your question is answered here as soon as one is serving. The field may just be warming up; please try again in a moment."

@@ -334,7 +334,11 @@ function TopBar({ title }: { title: string }) {
           </NavLink>
         )}
         {address && (
-          <Badge tone="teal" className="mono hidden sm:inline-flex">{formatZir(balanceUZIR)} ZIR</Badge>
+          // While the node has not finalized anything yet (fresh start / catching up), a "0 ZIR" badge
+          // reads as "my funds are gone". Say what is actually happening instead.
+          balanceUZIR === 0 && stats && (stats as { finalizedEpoch?: number }).finalizedEpoch !== undefined && ((stats as { finalizedEpoch?: number }).finalizedEpoch ?? -1) < 0
+            ? <Badge tone="warn" className="hidden sm:inline-flex">Syncing…</Badge>
+            : <Badge tone="teal" className="mono hidden sm:inline-flex">{formatZir(balanceUZIR)} ZIR</Badge>
         )}
         <EventsPlus />
         <div className="hidden w-20 lg:block"><Meter value={userZti} /></div>

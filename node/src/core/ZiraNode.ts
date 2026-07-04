@@ -17,7 +17,7 @@ import {
 import { settlementWalletsFor, treasuryWalletsFor } from "../genesis-docs.js";
 import { launchModelsFor } from "../launch-models.js";
 import { verifyContribution, type WatchNetwork } from "../anchor/paymentWatcher.js";
-import { State, epochOf } from "./State.js";
+import { State, epochOf, SETTLE_ROUNDS } from "./State.js";
 import { SoftState } from "./SoftState.js";
 import { Checkpoints } from "./Checkpoints.js";
 import { Store } from "./Store.js";
@@ -76,12 +76,22 @@ const AUTONOMOUS_RESONATOR_DELIVER_MS = envMs("ZIRA_AUTONOMOUS_RESONATOR_DELIVER
 const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS", 5 * 60_000);
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
-const AUTONOMOUS_RESONANCE_MAX_PER_CYCLE = envInt("ZIRA_AUTONOMOUS_RESONANCE_MAX_PER_CYCLE", 2);
+// Per-cycle coordination batch. Every LISTED resonator rotates through autonomous coordination
+// (autonomousResonanceBatch walks the eligible set deterministically by bucket), so all of Discover
+// coordinates — this cap only sets how many per 5-minute cycle. At 8, the full 512-anchor set completes a
+// rotation in ~5 hours instead of ~21 (the old cap of 2 made most resonators look permanently idle).
+// Settlement stays safe at this volume: each query settles as ONE batch_transfer (single nonce).
+const AUTONOMOUS_RESONANCE_MAX_PER_CYCLE = envInt("ZIRA_AUTONOMOUS_RESONANCE_MAX_PER_CYCLE", 8);
 // Community redistribution. Base emission is minted to the settler alone (see State.emitBaseThrough); each
 // cycle the settler pays most of it out to the people running the network — a fixed per-cycle mining pool
 // split among verified participants, plus a per-driven-resonator reward to owners. Sized so the settler
 // redistributes the large majority of its per-cycle emission and keeps the rest as treasury. Env-tunable.
 const FIELD_PARTICIPATION_BUDGET_UZIR = envInt("ZIRA_FIELD_PARTICIPATION_BUDGET_UZIR", 5_000_000_000); // 5000 ZIR/cycle mining pool
+// Event-log compaction: once the log passes this size, drop persisted tx/observation/checkpoint events older
+// than the snapshot's replay window (keepFrom below). Keeps events.jsonl bounded so it can never exceed Node's
+// ~512MB max-string cap and brick the node on boot. Threshold well under 512MB; cushion is generous.
+const EVENTS_COMPACT_THRESHOLD_BYTES = envInt("ZIRA_EVENTS_COMPACT_THRESHOLD_BYTES", 48 * 1024 * 1024);
+const EVENTS_KEEP_CUSHION_EPOCHS = envInt("ZIRA_EVENTS_KEEP_CUSHION_EPOCHS", 2000);
 const AUTONOMOUS_RESONANCE_TASK_UZIR = envInt("ZIRA_AUTONOMOUS_RESONANCE_TASK_UZIR", 200_000_000);     // 200 ZIR / driven resonator / cycle
 // Real per-query coordination reward paid by the steward/founder funding wallet to the providers that
 // contributed accepted answers to an autonomous-resonance query. This is the money path that makes a
@@ -292,10 +302,11 @@ export class ZiraNode {
   private eventsActive = false;
   private eventsClaimUZIR = 10 * PROTOCOL.UZIR_PER_ZIR;
   private eventsClaimed = new Map<string, number>();
-  // Steward Anchor Event toggle (spec §2.1 / §6.2). When off (the default), the anchor contribute section
-  // is absent for every connected user; when on, the contribute flow is live. Steward-gated at the RPC
-  // layer. In-memory like the events toggle: the steward/gateway node holds it and serves it to clients.
-  private anchorEventEnabled = false;
+  // Steward Anchor Event toggle (spec §2.1 / §6.2). ON by default since the public launch: the contribute
+  // flow is live from first start, and the persisted anchor-state (loadAnchorState) still restores whatever
+  // the steward last set — an explicit steward OFF survives restarts. Steward-gated at the RPC layer.
+  // ZIRA_ANCHOR_EVENT=0 forces it off for private/dev deployments.
+  private anchorEventEnabled = process.env.ZIRA_ANCHOR_EVENT !== "0";
   // Built-in defaults so the contribution flow is turnkey (the steward only flips the event ON). All public
   // values: the receiving addresses are meant to be shown to contributors, and a WalletConnect project id
   // is a public client identifier. The steward can still override any of them at runtime via setAnchorEvent.
@@ -457,6 +468,44 @@ export class ZiraNode {
   }
 
   /**
+   * Restore the settler payout watermarks so a RESTART does not re-issue a payout for a bucket it already
+   * settled. Without this, a restarted settler re-pays the current bucket with a DIFFERENT live-peer-derived
+   * payee set (fewer miners reconnected), and the conflicting txs diverge the masters and freeze quorum — a
+   * real production incident (2026-07-04). Only the settler ever writes this file; on other nodes it is inert.
+   */
+  private restoreSettlerProgress(): void {
+    const saved = this.store.loadSettlerProgress();
+    if (!saved) return;
+    if (typeof saved.lastParticipationBucket === "number") this.lastParticipationBucket = saved.lastParticipationBucket;
+    if (typeof saved.lastAutonomousResonanceBucket === "number") this.lastAutonomousResonanceBucket = saved.lastAutonomousResonanceBucket;
+    if (Array.isArray(saved.paidResonatorRewards)) this.paidResonatorRewards = new Set(saved.paidResonatorRewards.slice(-5000));
+    if (Array.isArray(saved.settledCoordinationQueries)) this.settledCoordinationQueries = new Set(saved.settledCoordinationQueries.slice(-5000));
+    log.info(`settler progress restored: participationBucket=${this.lastParticipationBucket} resonanceBucket=${this.lastAutonomousResonanceBucket} paidRewards=${this.paidResonatorRewards.size} settledQueries=${this.settledCoordinationQueries.size}`);
+  }
+
+  /** Current settler payout watermarks (diagnostics + tests). Reflects what this node has already settled. */
+  settlerProgress(): { lastParticipationBucket: number; lastAutonomousResonanceBucket: number; paidResonatorRewards: number; settledCoordinationQueries: number } {
+    return {
+      lastParticipationBucket: this.lastParticipationBucket,
+      lastAutonomousResonanceBucket: this.lastAutonomousResonanceBucket,
+      paidResonatorRewards: this.paidResonatorRewards.size,
+      settledCoordinationQueries: this.settledCoordinationQueries.size,
+    };
+  }
+
+  /** Persist the settler payout watermarks after each payout so a restart is idempotent (atomic write). */
+  private persistSettlerProgress(): void {
+    try {
+      this.store.saveSettlerProgress({
+        lastParticipationBucket: this.lastParticipationBucket,
+        lastAutonomousResonanceBucket: this.lastAutonomousResonanceBucket,
+        paidResonatorRewards: [...this.paidResonatorRewards],
+        settledCoordinationQueries: [...this.settledCoordinationQueries],
+      });
+    } catch { /* best effort; in-memory guard still holds until next restart */ }
+  }
+
+  /**
    * Payment watcher (spec §2.5). Verifies each still-pending contribution ON-CHAIN by its tx hash: it must
    * be a USDT transfer to the steward's receiving address for exactly the class x quantity amount, with
    * enough confirmations. Confirmed ones flip to "confirmed" (with the real sender) so the steward assigns
@@ -604,12 +653,18 @@ export class ZiraNode {
     // replay durable events, then catch up the epoch clock
     const persisted = this.store.loadSnapshot();
     if (persisted) this.state.loadSnapshot(persisted);
+    // Compact BEFORE replay: on top of a snapshot only the recent window is needed, and replaying a bloated
+    // log (verifying every stale tx signature) can stall startup for minutes before RPC ever binds. Guarded
+    // to the snapshot path — a fresh node replaying from genesis keeps its full history.
+    if (persisted) this.compactEventLog(true);
     let replayed = 0;
     for (const env of this.store.readEvents()) { this.ingest(env, false); replayed++; }
     if (replayed) log.info(`replayed ${replayed} durable events`);
     // Re-hydrate the steward-run anchor event + contribution queue (non-consensus), so a gateway restart
     // does not switch the event off for everyone or drop contributions the steward still owes seats for.
     this.restoreAnchorState();
+    // Re-hydrate the settler payout watermarks so a restart never re-issues a divergent duplicate payout.
+    this.restoreSettlerProgress();
     // a brand new node (no snapshot, no durable events) is eligible to fast sync from a peer
     this.startedFresh = persisted === null && replayed === 0;
     this.state.advance(Date.now());
@@ -641,7 +696,7 @@ export class ZiraNode {
     // Keep dialing saved peers until we have a small healthy spread of connections, not just one. The
     // libp2p layer also actively discovers peers via bootstrap + DHT; this is the node-level complement
     // that re-dials previously-seen peers. The target stays well under the F7 maxConnections cap.
-    const redialTarget = envInt("ZIRA_PEER_REDIAL_TARGET", 4);
+    const redialTarget = envInt("ZIRA_PEER_REDIAL_TARGET", 6);
     this.peerDialTimer = setInterval(() => {
       if (this.net.peerCount() < redialTarget) void this.dialSavedPeers();
     }, 30_000);
@@ -1145,7 +1200,13 @@ export class ZiraNode {
       //    real, reachable, participating node. Mining/coordination alone earns the baseline emission (no
       //    model download required), so a new user starts earning the moment they are a live peer of the
       //    field. Bounded per round; each probe is timeout-guarded so a stalled peer never blocks the set.
-      for (const peerId of this.net.peers().slice(0, 24)) {
+      // Probe connected peers SEQUENTIALLY (proven-stable; a concurrent burst of liveness streams starved the
+      // whole set). The only change from the original is a higher cap (was 24): on a busy public master that
+      // starved late-ordered peers so real, synced, mining nodes never got vouched and never earned. This is
+      // consensus-safe: it only changes which miners this master vouches for, which rides on its SIGNED
+      // observation / settled payout tx and is applied byte-identically by every node (old builds included).
+      const probeCap = Number(process.env.ZIRA_VOUCH_PROBE_CAP ?? 64);
+      for (const peerId of this.net.peers().slice(0, probeCap)) {
         const addr = await this.verifyPeerLive(peerId);
         if (addr && addr !== this.identity.address) { this.verifiedMiners.set(addr, now); live++; }
       }
@@ -1154,7 +1215,7 @@ export class ZiraNode {
       //    reward comes from their storage weight in the split. Only when we hold a model to probe against.
       const modelId = this.models.localHeldModelId();
       if (modelId) {
-        for (const { peerId, address } of this.models.peersServing(modelId).slice(0, 16)) {
+        for (const { peerId, address } of this.models.peersServing(modelId).slice(0, probeCap)) {
           try { if (await this.models.verifyPeerStorage(peerId, modelId)) { this.verifiedMiners.set(address, now); stored++; } }
           catch { /* unreachable peer: skip */ }
         }
@@ -1176,6 +1237,7 @@ export class ZiraNode {
   private lastAutonomousResonanceBucket = -1;
   private lastParticipationBucket = -1;
   private lastParticipationDeferLog = -1;
+  private loggedSettlerGate = false;
   private lastHeartbeatBucket = -1;
   /** The reward a single driven resonator's owner earns per cycle (fixed pool, funded from the settler's base
    *  emission). Used for BOTH the owner payment and the task's displayed totalEarned, so they match. */
@@ -1192,11 +1254,27 @@ export class ZiraNode {
    * deterministic set and finality never diverges. Genesis masters and the settler itself are excluded.
    */
   private settleFieldParticipation(now: number): void {
+    // One-time observability at first invocation: which gate applies. A silent early return here once hid a
+    // paused payout pipeline for a whole evening — never let this function go quiet without saying why.
+    if (!this.loggedSettlerGate) {
+      this.loggedSettlerGate = true;
+      const masters0 = (this.genesis.masters ?? [])[0]?.address ?? this.genesis.founder;
+      log.info(`field participation gate: budget=${FIELD_PARTICIPATION_BUDGET_UZIR} settler=${masters0.slice(0, 20)} me=${this.identity.address.slice(0, 20)} isSettler=${this.isNetworkSettler()}`);
+    }
     if (FIELD_PARTICIPATION_BUDGET_UZIR <= 0 || !this.isNetworkSettler()) return;
     const bucket = Math.floor(now / AUTONOMOUS_RESONANCE_CYCLE_MS);
-    if (this.lastParticipationBucket === bucket) return;
+    // Watermark (<=), not equality: once a bucket is paid, NEVER pay it (or any earlier bucket) again — even
+    // across a restart, where lastParticipationBucket is restored from disk. Buckets are monotonic wall-clock
+    // time, so this only skips already-settled work. This is the guard that stops a restarted settler from
+    // re-paying a bucket with a different live-peer payee set (the 2026-07-04 finality freeze).
+    if (bucket <= this.lastParticipationBucket) return;
     const pool = FIELD_PARTICIPATION_BUDGET_UZIR;
-    const payees = this.freshVouchedMiners(now)
+    // Pay the UNION of miners vouched by ANY master (from their gossiped heartbeats), not just the settler's
+    // own directly-connected peers. Earning must not hinge on which master a miner happens to connect to, nor
+    // collapse if the settler briefly loses peers (e.g. after a restart) while node2/3/4 still hold the mesh.
+    // Consensus-safe: this is the settler's own payee choice for its signed batch payout, applied identically
+    // by every node. Genesis masters and the settler itself are excluded.
+    const payees = [...new Set([...this.freshVouchedMiners(now), ...this.state.aggregateVouchedMiners(now, ZiraNode.VOUCH_FRESH_MS)])]
       .filter((a) => /^zir1[0-9a-z]{6,}$/.test(a) && a !== this.identity.address && !this.state.isGenesisMaster(a))
       .sort()
       .slice(0, FIELD_PARTICIPATION_MAX_PAYEES);
@@ -1228,9 +1306,15 @@ export class ZiraNode {
       nonce: this.state.provisionalNonce(this.identity.address), kind: "batch_transfer",
       parents: [], timestamp: now, memo: JSON.stringify({ o: outputs }),
     }, this.identity.privateKey);
-    if (this.submitTx(tx).accepted) {
+    const res = this.submitTx(tx);
+    if (res.accepted) {
       this.lastParticipationBucket = bucket;
+      this.persistSettlerProgress(); // survive restart: never re-pay this bucket with a different payee set
       log.info(`field participation payout: ${payees.length} miner(s) x ~${per} uZIR in ONE batch (bucket ${bucket})`);
+    } else if (this.lastParticipationDeferLog !== bucket) {
+      // A rejected payout would otherwise retry silently forever — surface WHY so it can be fixed.
+      this.lastParticipationDeferLog = bucket;
+      log.warn(`field participation payout REJECTED (${payees.length} payees, bucket ${bucket}): ${res.reason ?? "no reason"}`);
     }
   }
 
@@ -1402,6 +1486,7 @@ export class ZiraNode {
     if (this.submitTx(tx).accepted) {
       this.paidResonatorRewards.add(key);
       if (this.paidResonatorRewards.size > 5000) this.paidResonatorRewards = new Set([...this.paidResonatorRewards].slice(-2500));
+      this.persistSettlerProgress(); // survive restart: never re-pay this (resonator, bucket)
     }
   }
 
@@ -1440,6 +1525,7 @@ export class ZiraNode {
         const keep = [...this.settledCoordinationQueries].slice(-2500);
         this.settledCoordinationQueries = new Set(keep);
       }
+      this.persistSettlerProgress(); // survive restart: never re-settle this query with a different answer set
       log.info(`coordination payout for query ${queryId.slice(0, 12)}: ${result.payouts?.length ?? 0} contributors, network ${result.networkUZIR ?? 0}, pool ${result.resonatorPoolUZIR ?? 0}, burn ${result.burnUZIR ?? 0}`);
     }
   }
@@ -1687,6 +1773,8 @@ export class ZiraNode {
 
   private fastSynced = false;
   private fastSyncStarted = false;
+  private fastSyncFailedAttempts = 0;
+  private static FAST_SYNC_MAX_ATTEMPTS = 12;
   private startedFresh = false;
   // Finality watchdog (auto-resync). If finalizedEpoch freezes while the chain clock keeps moving, the node
   // re-adopts a current, verified peer snapshot, the same self-heal a fresh node uses on join. Conservative
@@ -1695,8 +1783,13 @@ export class ZiraNode {
   private finalizedProgressAt = 0;
   private resyncInFlight = false;
   private lastResyncAt = 0;
-  private readonly resyncStallMs = 30_000;     // finalizedEpoch must stay frozen this long to count as stalled
-  private readonly resyncMinGap = 5;           // and the processed head must be at least this far ahead
+  // Thresholds sit ABOVE the normal finality lag or the watchdog false-alarms every cycle: finality trails the
+  // processed head by the settle window (SETTLE_ROUNDS=8 epochs + GRACE 20s ~= 60-70s, ~12-18 epochs at
+  // EPOCH_MS=5s) even when perfectly healthy. A REAL stall (the 2026-07-04 freeze) leaves finality frozen for
+  // MINUTES while the processed head runs hundreds of epochs ahead, so these looser bounds still catch it fast
+  // while no longer firing spurious "stalled" warnings + no-op resyncs during ordinary settle lag.
+  private readonly resyncStallMs = 120_000;    // finalizedEpoch must stay frozen this long to count as stalled
+  private readonly resyncMinGap = 40;          // and the processed head must be at least this far ahead
   private readonly resyncCooldownMs = 90_000;  // and at most one resync attempt per this window
 
   private liveNonce = 0;
@@ -1779,9 +1872,20 @@ export class ZiraNode {
       const best = got[0]!;
       if (!best.snapshot || !Array.isArray(best.snapshot.accounts) || best.snapshot.accounts.length === 0) return;
       if (!this.verifyFastSyncSnapshot(best)) {
-        log.warn("fast-sync: snapshot failed checkpoint verification, replaying from genesis");
-        this.fastSynced = true;
-        return;
+        // Do NOT give up after one failed verification. A snapshot fails exactly this check whenever the
+        // serving peer's live state has moved past its finalized root (finality jitter, catch-up windows) —
+        // a TRANSIENT condition. Giving up permanently ("replaying from genesis") stranded joining nodes at
+        // epoch -1 forever (the mainnet clock is hundreds of millions of epochs ahead of genesis), which
+        // users saw as a stuck 0 balance. Retry on later peer connects, bounded so a genuinely
+        // incompatible network still degrades to the old behavior instead of retrying forever.
+        this.fastSyncFailedAttempts++;
+        if (this.fastSyncFailedAttempts >= ZiraNode.FAST_SYNC_MAX_ATTEMPTS) {
+          log.warn(`fast-sync: snapshot verification failed ${this.fastSyncFailedAttempts} times; replaying from genesis`);
+          this.fastSynced = true;
+          return;
+        }
+        log.warn(`fast-sync: snapshot failed checkpoint verification (attempt ${this.fastSyncFailedAttempts} of ${ZiraNode.FAST_SYNC_MAX_ATTEMPTS}); retrying on the next peer`);
+        return; // finally() re-arms fastSyncStarted so a later peer connect retries
       }
       // Adopt the snapshot AND arm the fast-sync convergence floor: any backfilled event already covered
       // by the adopted epoch is dropped and never reprocessed, so the joiner converges exactly to the mesh
@@ -1976,28 +2080,29 @@ export class ZiraNode {
     const protocolTransfers: { to: string; amountUZIR: number; memo: string }[] = [];
     if (split.networkUZIR > 0 && wallets.network !== funder.address) protocolTransfers.push({ to: wallets.network, amountUZIR: split.networkUZIR, memo: `coordination network ${tag}` });
     if (split.resonatorPoolUZIR > 0 && poolTarget !== funder.address) protocolTransfers.push({ to: poolTarget, amountUZIR: split.resonatorPoolUZIR, memo: `coordination resonator-pool ${tag}` });
-    const payoutTxs = split.payouts.filter((p) => p.amountUZIR > 0).length;
-    const willBurn = split.burnUZIR > 0;
-    // Every outgoing tx (payouts + protocol transfers + the burn) carries one base fee; the funder must
-    // cover the whole budget plus those fees.
-    const needed = budgetUZIR + (payoutTxs + protocolTransfers.length + (willBurn ? 1 : 0)) * PROTOCOL.BASE_FEE_UZIR;
-    if (this.state.balanceOf(funder.address) < needed) return { ok: false, reason: "funding wallet has insufficient balance for the coordination payout" };
-    let nonce = this.state.provisionalNonce(funder.address);
+    // ONE batch_transfer covers the whole §9 split (contributors + network + pool as outputs), and the 5%
+    // burn slice is folded into the tx FEE (FEE_BURN=1.0 destroys the whole fee). So the entire settlement is
+    // a SINGLE settler tx with a SINGLE nonce. The previous N separate agent_spends were the coordination
+    // equivalent of the field-participation fork: one dropped tx opened a nonce gap that cascaded, dropped
+    // every later settler tx on that node, diverged its state root, and FROZE quorum finality. A single tx
+    // has no gap to cascade — applied byte-identically by every node (batch_transfer is a consensus kind).
+    const credits = new Map<string, number>();
+    for (const p of split.payouts) if (p.amountUZIR > 0) credits.set(p.address, (credits.get(p.address) ?? 0) + p.amountUZIR);
+    for (const t of protocolTransfers) if (t.amountUZIR > 0) credits.set(t.to, (credits.get(t.to) ?? 0) + t.amountUZIR);
+    const outputs: [string, number][] = [...credits.entries()].filter(([a]) => /^zir1[0-9a-z]{6,}$/.test(a));
+    if (outputs.length === 0) return { ok: false, reason: "no positive-value coordination outputs to settle" };
+    const outSum = outputs.reduce((s, [, a]) => s + a, 0);
+    const fee = Math.max(PROTOCOL.BASE_FEE_UZIR, split.burnUZIR); // the §9 burn IS the fee (all burned)
+    if (this.state.balanceOf(funder.address) < outSum + fee) return { ok: false, reason: "funding wallet has insufficient balance for the coordination payout" };
     const now = Date.now();
-    const tx = (to: string, amountUZIR: number, memo: string, kind: "agent_spend" | "bond_burn" = "agent_spend") => signTx({
-      network: this.genesis.network, from: funder.address, fromPubKey: funder.publicKey, to,
-      amountUZIR, feeUZIR: PROTOCOL.BASE_FEE_UZIR, nonce: nonce++, kind,
-      parents: [], timestamp: now, memo,
+    const tx = signTx({
+      network: this.genesis.network, from: funder.address, fromPubKey: funder.publicKey, to: funder.address,
+      amountUZIR: outSum, feeUZIR: fee, nonce: this.state.provisionalNonce(funder.address), kind: "batch_transfer",
+      parents: [], timestamp: now, memo: JSON.stringify({ o: outputs, k: `coord ${tag} ${domain}` }),
     }, funder.privateKey);
-    const paid: { address: string; amountUZIR: number }[] = [];
-    for (const p of split.payouts) {
-      if (p.amountUZIR <= 0) continue;
-      if (this.submitTx(tx(p.address, p.amountUZIR, `coordination payout ${tag} ${domain}`)).accepted) paid.push({ address: p.address, amountUZIR: p.amountUZIR });
-    }
-    for (const t of protocolTransfers) this.submitTx(tx(t.to, t.amountUZIR, t.memo));
-    // The burn slice is destroyed via a bond_burn (debits the funder, credits no one, increases burned).
-    if (willBurn) this.submitTx(tx(funder.address, split.burnUZIR, `coordination burn ${tag}`, "bond_burn"));
-    return { ok: true, payouts: paid, networkUZIR: split.networkUZIR, resonatorPoolUZIR: split.resonatorPoolUZIR, burnUZIR: split.burnUZIR, confidenceScore: split.confidenceScore };
+    const res = this.submitTx(tx);
+    const paid = res.accepted ? split.payouts.filter((p) => p.amountUZIR > 0).map((p) => ({ address: p.address, amountUZIR: p.amountUZIR })) : [];
+    return { ok: res.accepted, reason: res.accepted ? undefined : res.reason, payouts: paid, networkUZIR: split.networkUZIR, resonatorPoolUZIR: split.resonatorPoolUZIR, burnUZIR: split.burnUZIR, confidenceScore: split.confidenceScore };
   }
   private publishModelAnnounce(a: ModelAnnounce): void {
     const env: Envelope = { t: "model", data: a };
@@ -2100,7 +2205,36 @@ export class ZiraNode {
   }
 
   private persistSnapshot(): void {
-    try { this.store.writeSnapshot(this.state.snapshot()); } catch (e) { log.warn("snapshot failed", (e as Error).message); }
+    try {
+      this.store.writeSnapshot(this.state.snapshot());
+      this.compactEventLog(false);
+    } catch (e) { log.warn("snapshot failed", (e as Error).message); }
+  }
+
+  /**
+   * Compact events.jsonl to just the recent unsettled replay window. The snapshot holds all APPLIED state, so
+   * only events newer than (snapshotEpoch - SETTLE_ROUNDS - cushion) are needed to restart on top of it;
+   * everything older is redundant. Without this the log grows without bound — re-gossiped duplicate txs keep
+   * re-appending as their ids cycle out of the bounded dedup cache — until it exceeds Node's ~512MB max STRING
+   * length and the node cannot boot at all (readFileSync throws ERR_STRING_TOO_LONG), AND startup replay of a
+   * huge log stalls before RPC binds. Called at startup (force) and after each snapshot (size-gated). Only
+   * safe when a snapshot exists (a fresh node replaying from genesis needs its full history).
+   */
+  private compactEventLog(force: boolean): void {
+    if (!force && this.store.eventsSizeBytes() <= EVENTS_COMPACT_THRESHOLD_BYTES) return;
+    const keepFrom = this.state.lastProcessedEpoch - SETTLE_ROUNDS - EVENTS_KEEP_CUSHION_EPOCHS;
+    const res = this.store.compactEvents((env) => {
+      if (env.t === "tx" || env.t === "observation") {
+        const ts = (env.data as { timestamp?: number } | undefined)?.timestamp;
+        return typeof ts !== "number" || epochOf(ts) >= keepFrom;
+      }
+      if (env.t === "checkpoint") {
+        const ep = (env.data as { epoch?: number } | undefined)?.epoch;
+        return typeof ep !== "number" || ep >= keepFrom;
+      }
+      return true; // rare structural events (resonator/task/model/providerProfile/recommendation): keep
+    });
+    if (res.dropped > 0) log.info(`compacted event log: kept ${res.kept}, dropped ${res.dropped} stale events`);
   }
 
   identityAddress(): string { return this.identity.address; }

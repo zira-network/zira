@@ -174,6 +174,27 @@ export class State {
     return this.genesisMasters.has(address);
   }
 
+  /**
+   * Union of miners vouched by ANY genesis master in a recent field-heartbeat observation. The settler pays
+   * this set so field-participation earning does NOT depend on the settler's own peer connections: a miner
+   * that is a live/serving peer of any master earns, even if it never connected to the settler. Consensus-
+   * safe because it only feeds the settler's OWN signed payout tx (which every node applies identically);
+   * it is not a per-node consensus computation. Reads the same gossiped heartbeat observations runField uses.
+   */
+  aggregateVouchedMiners(now: number, freshMs: number): string[] {
+    const cutoff = now - freshMs;
+    const latestPerMaster = new Map<string, SignedObservation>();
+    for (const o of this.obsPool.values()) {
+      if (o.subject !== PROTOCOL.FIELD_HEARTBEAT_SUBJECT || o.timestamp < cutoff) continue;
+      if (!this.isGenesisMaster(addressFromPubKey(o.observer))) continue;
+      const prev = latestPerMaster.get(o.observer);
+      if (!prev || o.timestamp > prev.timestamp) latestPerMaster.set(o.observer, o);
+    }
+    const out = new Set<string>();
+    for (const o of latestPerMaster.values()) for (const m of o.vouchedMiners ?? []) out.add(m);
+    return [...out];
+  }
+
   setAuthorizedFounders(addresses: Address[]): void {
     this.authorizedFounders = new Set([this.founder, ...addresses.filter((a) => a.startsWith("zir1"))]);
     for (const founder of this.authorizedFounders) {

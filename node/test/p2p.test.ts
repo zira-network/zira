@@ -17,7 +17,7 @@ const genesis = standardGenesis("devnet", founder.address, 1_700_000_000_000);
 const gid = genesisId(genesis);
 const topicList = buildTopics(gid).all();
 
-test("two nodes gossip events and finalize a checkpoint", { timeout: 160_000 }, async () => {
+test("two nodes gossip events and finalize a checkpoint", { timeout: 280_000 }, async () => {
   const dir = (n: string) => join(tmpdir(), `zira-test-${process.pid}-${n}-${Date.now()}`);
 
   const netA = new Libp2pNetwork({ p2pPort: 19701, wsPort: 19702, bootstrap: [], announce: [], topics: topicList });
@@ -57,10 +57,11 @@ test("two nodes gossip events and finalize a checkpoint", { timeout: 160_000 }, 
   for (let i = 0; i < 60; i++) { if (nodeB.state.knownIds.has("tx:" + tx.id)) { gotTx = true; break; } await sleep(250); }
   assert.ok(gotTx, "node B should receive the gossiped transaction");
 
-  // A is the steward (bootstrap master), so checkpoints should finalize and reach B. Finality now trails
-  // wall-clock by the epoch grace plus the SETTLE_ROUNDS evidence lag (~25-30s), so allow ample time.
+  // A is the steward (bootstrap master), so checkpoints should finalize and reach B. Finality trails
+  // wall-clock by the epoch GRACE (20s) plus the SETTLE_ROUNDS (8) evidence lag at EPOCH_MS=5s — ~60s, more
+  // with mesh-graft and gossip jitter, so allow ~100s. (Loops were written for the old SETTLE_ROUNDS=3.)
   let finalized = false;
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < 400; i++) {
     if (nodeB.checkpoints.lastFinalizedEpoch >= 0) { finalized = true; break; }
     await sleep(250);
   }
@@ -68,7 +69,7 @@ test("two nodes gossip events and finalize a checkpoint", { timeout: 160_000 }, 
 
   // and the alice grant should converge on B once its epoch closes (plus the gossip + settle lag)
   let converged = false;
-  for (let i = 0; i < 240; i++) {
+  for (let i = 0; i < 400; i++) {
     if (nodeB.state.balanceOf(alice.address) === 1_000_000) { converged = true; break; }
     await sleep(250);
   }

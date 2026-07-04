@@ -82,6 +82,12 @@ decentralizes as more people run nodes and earn trust. Run your own node and ver
 yourself instead of trusting anyone. You could lose what you put in. Take part because you believe in
 the idea.
 
+## Community
+
+- Website: [zira.network](https://zira.network)
+- Discord: [discord.gg/y4Vj3qA7h7](https://discord.gg/y4Vj3qA7h7)
+- X: [@zira_network](https://x.com/zira_network) · Telegram: [t.me/ziranetwork](https://t.me/ziranetwork)
+
 ## License
 
 MIT. See [`LICENSE`](LICENSE).

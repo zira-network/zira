@@ -17,7 +17,7 @@ const founder = keypairFromPrivate("01".repeat(32));
 const genesis = standardGenesis("devnet", founder.address, 1_700_000_000_000);
 const topicList = buildTopics(genesisId(genesis)).all();
 
-test("a late joining node fast syncs state from a peer without replaying history", { timeout: 70_000 }, async () => {
+test("a late joining node fast syncs state from a peer without replaying history", { timeout: 220_000 }, async () => {
   const dir = (n: string) => join(tmpdir(), `zira-fs-${process.pid}-${n}-${Date.now()}`);
   const alice = generateKeypair();
 
@@ -35,9 +35,11 @@ test("a late joining node fast syncs state from a peer without replaying history
     }), founder.privateKey);
     assert.equal(nodeA.submitTx(tx).accepted, true);
 
-    // wait until A has actually committed it
+    // Wait until A has actually applied it. A tx is settle-lagged by SETTLE_ROUNDS (8) epochs plus the epoch
+    // GRACE (20s) so per-epoch state is byte-identical across nodes, so the balance only reflects ~70s after
+    // submission at EPOCH_MS=5s. (These waits were written for the old SETTLE_ROUNDS=3 timing.)
     let committed = false;
-    for (let i = 0; i < 80; i++) { if (nodeA.state.balanceOf(alice.address) === 7_000_000) { committed = true; break; } await sleep(250); }
+    for (let i = 0; i < 480; i++) { if (nodeA.state.balanceOf(alice.address) === 7_000_000) { committed = true; break; } await sleep(250); }
     assert.ok(committed, "A commits the grant");
     const aEpoch = nodeA.state.lastProcessedEpoch;
 
@@ -51,7 +53,7 @@ test("a late joining node fast syncs state from a peer without replaying history
 
     // B should fast sync to A's state and have alice's balance, without ever processing that epoch
     let synced = false;
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 200; i++) {
       if (nodeB.state.balanceOf(alice.address) === 7_000_000) { synced = true; break; }
       await sleep(250);
     }

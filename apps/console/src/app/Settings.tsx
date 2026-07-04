@@ -518,6 +518,16 @@ function About() {
         </div>
         <p className="mt-2 text-xs text-faint">Consensus is Proof of Resonance: master nodes co-sign state checkpoints, final at 0.67 of master trust. See Learn for the full path to decentralizing the bootstrap.</p>
       </Card>
+      <Card>
+        <div className="mb-3 flex items-center gap-2"><Info size={16} /><h3 className="text-sm font-semibold">Community &amp; links</h3></div>
+        <div className="flex flex-wrap gap-2">
+          <a href="https://zira.network" target="_blank" rel="noopener noreferrer" className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs text-muted transition hover:border-[var(--teal)] hover:text-text">Website</a>
+          <a href="https://discord.gg/y4Vj3qA7h7" target="_blank" rel="noopener noreferrer" className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs text-muted transition hover:border-[var(--teal)] hover:text-text">Discord</a>
+          <a href="https://github.com/zira-network/zira" target="_blank" rel="noopener noreferrer" className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs text-muted transition hover:border-[var(--teal)] hover:text-text">GitHub</a>
+          <a href="https://x.com/zira_network" target="_blank" rel="noopener noreferrer" className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs text-muted transition hover:border-[var(--teal)] hover:text-text">X</a>
+          <a href="https://t.me/ziranetwork" target="_blank" rel="noopener noreferrer" className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs text-muted transition hover:border-[var(--teal)] hover:text-text">Telegram</a>
+        </div>
+      </Card>
     </div>
   );
 }

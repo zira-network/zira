@@ -320,7 +320,11 @@ export const useZira = create<ZiraState>((set, get) => ({
         patch.hasWallet = true;
         patch.unlocked = true;
         patch.nodeWallet = true;
-        if (typeof st.balanceUZIR === "number") patch.balanceUZIR = st.balanceUZIR;
+        // Don't let a poll drop a positive balance to exactly 0: a local node still catching up reports
+        // balanceOf(self)=0 until it applies the epoch that paid it, then jumps to the real value. Treat
+        // 0-after-positive as a sync artifact and keep the last good value; the settled /balance read in
+        // refresh() remains authoritative for real decreases.
+        if (typeof st.balanceUZIR === "number" && !(st.balanceUZIR === 0 && (prev.balanceUZIR ?? 0) > 0)) patch.balanceUZIR = st.balanceUZIR;
       }
       if (st.address) {
         try {

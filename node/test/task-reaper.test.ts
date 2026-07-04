@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { keypairFromPrivate, generateKeypair, sign as edSign, signRecord, standardGenesis, PROTOCOL, TASK_VERIFY_TIMEOUT_MS, type Resonator, type Task } from "@zira/protocol";
+import { keypairFromPrivate, generateKeypair, sign as edSign, signRecord, signTx, standardGenesis, PROTOCOL, TASK_VERIFY_TIMEOUT_MS, type Resonator, type Task } from "@zira/protocol";
 import { ZiraNode } from "../src/core/ZiraNode.js";
 
 const founder = keypairFromPrivate("01".repeat(32));
@@ -19,6 +19,20 @@ function netStub() {
 
 function mkNode() {
   return new ZiraNode(genesis, founder, netStub(), join(tmpdir(), `zira-reap-${process.pid}-${Date.now()}-${Math.random()}`));
+}
+
+// A brand-new user Resonator must hold at least the creation cost in its AGENT wallet on-chain (anti-spam,
+// SoftState.upsertResonator checks provisionalBalance(r.address), NOT the record's balanceUZIR field). Move
+// creation-cost ZIR from the founder (the genesis holder) into the agent wallet so the gate clears — this
+// mirrors how a real owner funds their Resonator's operating float before it stands up on Discover.
+function fundAgent(node: ZiraNode, to: string, ts: number, nonce = 0) {
+  const tx = signTx({
+    network: genesis.network, from: founder.address, fromPubKey: founder.publicKey, to,
+    amountUZIR: PROTOCOL.RESONATOR_CREATION_COST_UZIR, feeUZIR: 1000, nonce, kind: "transfer",
+    parents: [], timestamp: ts, memo: "",
+  }, founder.privateKey);
+  const r = node.submitTx(tx);
+  assert.equal(r.accepted, true, `fundAgent tx rejected: ${r.reason}`);
 }
 
 function task(id: string, status: Task["status"], over: Partial<Task>): Task {
@@ -66,6 +80,7 @@ test("a funded resonance-enabled Resonator autonomously delivers assigned work",
     createdAt: now - 20_000, updatedAt: now - 20_000, status: "learning",
   }, owner.privateKey) as Resonator;
 
+  fundAgent(node, agent.address, now - 20_000);
   assert.equal(node.publishResonator(resonator), true);
   node.publishTask(task("t4", "assigned", { resonatorId: resonator.id, assignedAt: now - 20_000, expiresAt: now + 60_000 }));
   node.reapTasks(now);
@@ -74,7 +89,7 @@ test("a funded resonance-enabled Resonator autonomously delivers assigned work",
   assert.equal(typeof delivered.resultRef, "string");
 });
 
-test("AI-to-AI miner convergence releases zero-budget Resonator coordination work", () => {
+test("AI-to-AI miner convergence releases paid Resonator coordination work", () => {
   const node = mkNode();
   const owner = generateKeypair();
   const agent = generateKeypair();
@@ -92,6 +107,7 @@ test("AI-to-AI miner convergence releases zero-budget Resonator coordination wor
     createdAt: now, updatedAt: now, status: "learning",
   }, owner.privateKey) as Resonator;
 
+  fundAgent(node, agent.address, now);
   assert.equal(node.publishResonator(resonator), true);
   const first = node.coordinateAutonomousResonance(now);
   assert.equal(first.queries, 1);
@@ -106,10 +122,13 @@ test("AI-to-AI miner convergence releases zero-budget Resonator coordination wor
   assert.equal(settled.released, 1);
   const task = [...node.soft.tasks.values()].find((t) => t.resonatorId === resonator.id)!;
   assert.equal(task.status, "released");
-  assert.equal(task.budgetUZIR, 0);
+  // Current (paid) design: an autonomous coordination cycle carries the per-cycle resonator reward
+  // (AUTONOMOUS_RESONANCE_TASK_UZIR), so a driven Resonator earns real ZIR — not the old zero-budget model.
+  // The gossiped, tx-free released task grows the Resonator's displayed totalEarned by exactly that budget.
+  assert.ok(task.budgetUZIR > 0);
   assert.ok(["planning", "reasoning", "general"].includes(task.domain));
   assert.equal(node.soft.resonators.get(resonator.id)!.jobsDone, 1);
-  assert.equal(node.soft.resonators.get(resonator.id)!.totalEarnedUZIR, 0);
+  assert.equal(node.soft.resonators.get(resonator.id)!.totalEarnedUZIR, task.budgetUZIR);
   assert.ok((node.soft.resonators.get(resonator.id)!.ztiByDomain[task.domain] ?? 0) > 0);
 });
 
@@ -132,6 +151,7 @@ test("autonomous convergence ignores coordination fallback answers", () => {
     createdAt: now, updatedAt: now, status: "learning",
   }, owner.privateKey) as Resonator;
 
+  fundAgent(node, agent.address, now);
   assert.equal(node.publishResonator(resonator), true);
   node.coordinateAutonomousResonance(now);
   const query = [...node.soft.queries.values()][0]!;

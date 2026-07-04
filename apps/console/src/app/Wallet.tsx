@@ -10,6 +10,7 @@ import { Card, Button, Input, Badge, Meter, Modal, Select, useToast, EmptyState,
 import { useZira } from "../store/useZira";
 import { useUnlock } from "../store/useUnlock";
 import { extractPrivateKeyInput, Wallet } from "../lib/keys";
+import { NodeClient, PUBLIC_GATEWAYS } from "../client/NodeClient";
 import { NodeApi, type ZtiSnapshot, type EventsStatus } from "../lib/nodeApi";
 import { makeSignedTx, zirToUzir } from "../lib/tx";
 import { formatZir, formatUZir, shortAddress, shortHash, timeAgo } from "../lib/format";
@@ -35,7 +36,19 @@ export function WalletPage() {
     setHistoryLoading(true);
     setHistoryError("");
     try {
-      setHistory(await client.getTxHistory(address, 80));
+      let txs = await client.getTxHistory(address, 80);
+      // A freshly-synced local node only holds the recent tx window, so an imported (older) wallet can
+      // look history-less here even though it earned for weeks. When the local answer is empty, read the
+      // public gateway too — it serves the network's shared view of this address's recent activity.
+      if (txs.length === 0) {
+        for (const gateway of PUBLIC_GATEWAYS) {
+          try {
+            txs = await new NodeClient(gateway, false).getTxHistory(address, 80);
+            if (txs.length > 0) break;
+          } catch { /* gateway briefly unreachable: try the next */ }
+        }
+      }
+      setHistory(txs);
     } catch (e) {
       setHistoryError(e instanceof Error ? e.message : "Could not load wallet history.");
     } finally {

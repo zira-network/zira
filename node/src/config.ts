@@ -16,13 +16,25 @@ import {
   type NetworkId, type ProviderConfig, type Domain,
 } from "@zira/protocol";
 
-// The public VPS is the canonical mainnet sync source: full nodes dial it directly and mobile/web clients
-// read its gateway RPC. We intentionally do NOT depend on a website-hosted bootstrap registry. More
-// master/seed nodes can be appended here later. Keep this peer id in sync with the VPS seed node's stable
-// libp2p identity (its persisted peer-key.bin). ZIRA_BOOTSTRAP overrides this at runtime.
+// The canonical mainnet sync sources: ALL FOUR public master nodes plus the serving box, so a joining
+// node keeps a stable mesh even when one seed is briefly busy or restarting. A single seed proved fragile
+// in production: home nodes stranded at peers=0 whenever that one link flapped, stuck at genesis showing a
+// 0 balance. Peer ids are the seeds' stable libp2p identities (persisted peer-key.bin — the mainnet never
+// re-geneses, so they do not change). ZIRA_BOOTSTRAP overrides this at runtime; the signed bootstrap
+// registry (bootstrapRegistry.ts) can extend it without a release.
 const MAINNET_DEFAULT_BOOTSTRAP = [
+  // box1 masters
   "/ip4/157.173.106.50/tcp/9645/p2p/12D3KooWDybdhTxKevNHXktAAKioj24d5oKpDYLF8JAdBMy92U86",
   "/ip4/157.173.106.50/tcp/9646/ws/p2p/12D3KooWDybdhTxKevNHXktAAKioj24d5oKpDYLF8JAdBMy92U86",
+  "/ip4/157.173.106.50/tcp/9655/p2p/12D3KooWQGdpVUWBTCuZqyrFL4DPCizp7DmWJ3RXXmf3v5EpsLdF",
+  "/ip4/157.173.106.50/tcp/9656/ws/p2p/12D3KooWQGdpVUWBTCuZqyrFL4DPCizp7DmWJ3RXXmf3v5EpsLdF",
+  "/ip4/157.173.106.50/tcp/9665/p2p/12D3KooWNdZPJ8pqeKugEizSMmFvzau7nBxSv2592rZLgajHDkfj",
+  "/ip4/157.173.106.50/tcp/9666/ws/p2p/12D3KooWNdZPJ8pqeKugEizSMmFvzau7nBxSv2592rZLgajHDkfj",
+  "/ip4/157.173.106.50/tcp/9675/p2p/12D3KooWNDqUzsh8ZUhjKcskTBMnyaeYTX4fX2ZoiqFnSycGjco9",
+  "/ip4/157.173.106.50/tcp/9676/ws/p2p/12D3KooWNDqUzsh8ZUhjKcskTBMnyaeYTX4fX2ZoiqFnSycGjco9",
+  // box2 (model serving)
+  "/ip4/164.68.97.111/tcp/9645/p2p/12D3KooWL3koL9N8gYoPgEmAYn98cG9AsDEVyCZXigSvuy16BGuG",
+  "/ip4/164.68.97.111/tcp/9646/ws/p2p/12D3KooWL3koL9N8gYoPgEmAYn98cG9AsDEVyCZXigSvuy16BGuG",
 ];
 
 export interface NodeRuntimeConfig {

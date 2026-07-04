@@ -5,9 +5,10 @@ import { useEffect, useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { Modal, Button, Input, Textarea } from "../components/ui";
 import { HexField } from "../components/brand";
-import { Wallet } from "../lib/keys";
+import { Wallet, extractPrivateKeyInput } from "../lib/keys";
 import { useZira } from "../store/useZira";
 import { setClientMode, isLocalNode } from "../client/createClient";
+import { NodeApi } from "../lib/nodeApi";
 
 const KEY = "zira.onboarded";
 // Bump this on a major privacy/terms change to re-show the gate to everyone (spec §1).
@@ -74,6 +75,28 @@ export function Onboarding() {
     }
   }
 
+  // Desktop / own-node import: the wallet the app shows IS the node's mining identity, so an import must be
+  // adopted by the NODE (loopback /wallet/import), not only by the browser. Importing only browser-side left
+  // the app pinned back to the node's fresh identity on the next status poll — the imported wallet's balance
+  // never appeared. The passphrase still encrypts the local backup copy of the key on this device.
+  async function importWalletLocal() {
+    setError("");
+    if (pass.length < 6) { setError("Use a passphrase of at least 6 characters."); return; }
+    try {
+      const raw = extractPrivateKeyInput(importKey);
+      await Wallet.importPrivateKey(raw, pass);
+      const r = await NodeApi.walletImport(raw);
+      if (!r.ok) { setError(r.reason ?? "The node could not adopt that key."); return; }
+      // Persist completion BEFORE the relaunch so onboarding does not repeat.
+      localStorage.setItem(KEY, "true");
+      setStep(7);
+      const bridge = (window as unknown as { zira?: { relaunchApp?: () => void } }).zira;
+      if (bridge?.relaunchApp) setTimeout(() => bridge.relaunchApp!(), 1200);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "That private key did not import. Check it and try again.");
+    }
+  }
+
   return (
     <Modal open={open} onClose={() => { if (privacyAccepted()) finish(); }} title="Welcome to ZIRA" wide>
       {step === 0 && (
@@ -124,9 +147,9 @@ export function Onboarding() {
             localStorage.setItem("zira.privacy.version", PRIVACY_VERSION);
             localStorage.setItem("zira.privacy.accepted.date", now);
             localStorage.setItem("zira.analytics", analytics ? "on" : "off");
-            // On your own node (desktop app), the wallet is the node's mining identity, adopted
-            // automatically. No browser wallet to create, so go straight to the app.
-            if (isLocalNode()) { await refreshIdentity(); finish(); return; }
+            // On your own node (desktop app), the wallet is the node's mining identity. Offer to keep
+            // the wallet this device generated, or import an existing one the node adopts.
+            if (isLocalNode()) { await refreshIdentity(); setStep(6); return; }
             setStep(3);
           }} disabled={!termsAccepted}>Accept and continue</Button>
         </div>
@@ -178,6 +201,41 @@ export function Onboarding() {
             <div className="mono break-all text-sm">{created.privateKey}</div>
           </div>
           <Button variant="primary" onClick={() => setStep(5)}>I saved it</Button>
+        </div>
+      )}
+
+      {step === 6 && (
+        <div className="flex flex-col gap-3">
+          <h4 className="font-medium">Your wallet</h4>
+          <p className="text-sm text-muted">This device already created a wallet, and everything it earns goes there. Keep it, or bring a wallet you already have.</p>
+          <Button variant="primary" onClick={() => setStep(5)}>Keep this device&apos;s wallet</Button>
+          <div className="mt-1 border-t border-hairline pt-3">
+            <p className="mb-2 text-xs text-muted">Import an existing wallet instead. Paste a raw private key, a privateKey= line, or a full ZIRA backup section. The node restarts once to mine into it.</p>
+            <div className="relative">
+              <Input
+                type={show ? "text" : "password"}
+                placeholder="Choose an app passphrase (at least 6 characters)"
+                value={pass}
+                onChange={(e) => setPass(e.target.value)}
+                className="pr-10"
+              />
+              <button type="button" onClick={() => setShow((v) => !v)} aria-label={show ? "Hide passphrase" : "Show passphrase"}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text">
+                {show ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+            <Textarea rows={4} placeholder="privateKey=... or paste the wallet backup section" value={importKey} onChange={(e) => setImportKey(e.target.value)} className="mono mt-2" />
+            {error && <p className="mt-1 text-xs text-[var(--danger)]">{error}</p>}
+            <Button variant="secondary" className="mt-2" onClick={importWalletLocal} disabled={!importKey || pass.length < 6}>Import and restart</Button>
+          </div>
+        </div>
+      )}
+
+      {step === 7 && (
+        <div className="flex flex-col items-center gap-3 text-center">
+          <HexField size={80} />
+          <h4 className="font-medium">Wallet imported</h4>
+          <p className="max-w-sm text-sm text-muted">ZIRA is restarting to load your wallet. Your balance appears once the node finishes syncing — usually under a minute.</p>
         </div>
       )}
 
