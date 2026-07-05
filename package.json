@@ -1,7 +1,7 @@
 {
   "name": "zira-final",
   "private": true,
-  "version": "2.0.6",
+  "version": "2.0.8",
   "description": "ZIRA. A shared AI network that people run together, with no company in the middle. Peer to peer ZIRA Core nodes with a Console synced by peers.",
   "packageManager": "pnpm@11.5.2",
   "scripts": {

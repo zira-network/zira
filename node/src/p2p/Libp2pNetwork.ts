@@ -156,6 +156,15 @@ export class Libp2pNetwork implements ZiraNetwork {
       void this.maybeDialDiscovered(id, addrs);
     });
 
+    // If a seed/master connection drops, re-dial it IMMEDIATELY rather than waiting for the periodic sweep,
+    // so the window where the masters cannot probe us (and we silently stop being vouched) is as short as
+    // possible. A home node behind NAT losing its master link is the main cause of "1-2 peers, flapping,
+    // never earning" — this closes the gap to the next dial instead of up to a full sweep interval.
+    this.node.addEventListener("peer:disconnect", (evt: any) => {
+      const peer = evt.detail?.toString?.();
+      if (peer && this.seedPeerIds().has(peer)) void this.redialSeed(peer);
+    });
+
     await this.node.start();
     log.info("libp2p peer id", this.node.peerId.toString());
     for (const a of this.multiaddrs()) log.info("listening", a);
@@ -195,13 +204,48 @@ export class Libp2pNetwork implements ZiraNetwork {
     await Promise.allSettled(seeds.map((addr) => this.dialQuiet(addr)));
   }
 
-  /** Periodic sweep: while under the target, re-dial seeds and ask the DHT to find more peers. */
+  /** Periodic sweep: ALWAYS keep the masters held, then (while under target) discover more peers. */
   private async discoverySweep(): Promise<void> {
     if (!this.node) return;
-    if (this.peerCount() >= TARGET_PEERS) return;       // healthy mesh; nothing to do
+    // Keep the seed/master connections up FIRST, even when we are already at the peer target. Staying
+    // connected to the masters is what earns — they liveness-probe over that same connection — and a node
+    // can otherwise sit at TARGET_PEERS on DHT-discovered HOME peers while silently disconnected from every
+    // master, so it never gets vouched and never earns even though it "looks" healthy. Cheap: it only dials
+    // the seeds we are not already connected to.
+    await this.ensureSeedsConnected();
+    if (this.peerCount() >= TARGET_PEERS) return;       // enough peers; skip extra DHT discovery
     if (this.peerCount() >= this.maxConnections) return; // respect the F7 cap
-    await this.dialAllSeeds();
     await this.discoverViaDHT();
+  }
+
+  /** The peer ids of our configured seeds/masters, parsed from their /p2p/<id> multiaddrs. */
+  private seedPeerIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const a of [...this.opts.bootstrap, ...this.opts.announce]) {
+      const m = /\/p2p\/([A-Za-z0-9]+)/.exec(a);
+      if (m?.[1]) ids.add(m[1]);
+    }
+    return ids;
+  }
+
+  /** Re-dial every configured seed/master we are NOT currently connected to. Keeps the masters held even
+   *  once the general peer target is met, so a node never drifts off all masters and quietly stops earning. */
+  private async ensureSeedsConnected(): Promise<void> {
+    if (!this.node) return;
+    const connected = new Set(this.node.getConnections().map((c) => c.remotePeer.toString()));
+    const seeds = [...new Set([...this.opts.bootstrap, ...this.opts.announce])]
+      .filter((a) => a.startsWith("/") && a.includes("/p2p/"));
+    await Promise.allSettled(seeds.map(async (addr) => {
+      const m = /\/p2p\/([A-Za-z0-9]+)/.exec(addr);
+      if (m?.[1] && connected.has(m[1])) return;        // already connected to this master
+      await this.dialQuiet(addr);
+    }));
+  }
+
+  /** Immediately re-dial a specific seed/master by peer id (used the instant one disconnects). */
+  private async redialSeed(peerId: string): Promise<void> {
+    const addr = [...new Set([...this.opts.bootstrap, ...this.opts.announce])].find((a) => a.includes(`/p2p/${peerId}`));
+    if (addr) await this.dialQuiet(addr);
   }
 
   /** Use the Kademlia DHT to find peers close to our own id and dial them (up to the target/cap). */
