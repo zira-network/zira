@@ -78,13 +78,25 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "2.0.6";
-// Per-cycle coordination batch. Every LISTED resonator rotates through autonomous coordination
-// (autonomousResonanceBatch walks the eligible set deterministically by bucket), so all of Discover
-// coordinates — this cap only sets how many per 5-minute cycle. At 8, the full 512-anchor set completes a
-// rotation in ~5 hours instead of ~21 (the old cap of 2 made most resonators look permanently idle).
-// Settlement stays safe at this volume: each query settles as ONE batch_transfer (single nonce).
+const NODE_RELEASE_VERSION = "2.0.7";
+// Per-cycle coordination batch. Every funded+listed resonator is eligible; autonomousResonanceBatch picks
+// this many per 5-minute cycle by a DETERMINISTIC ZTI-WEIGHTED draw, so higher-trust resonators (anchors,
+// seeded 0.95/0.85/… by class) are driven most often and earn the most, while every other funded resonator
+// still rotates in proportional to its earned ZTI and earns its share of the 10% resonator pool. This cap
+// only sets how many run per cycle. Settlement stays safe at this volume: each query settles as ONE
+// batch_transfer (single nonce). Which resonators are driven is soft state (only the settler pays, via a
+// deterministic signed tx applied identically), so this never touches the state root.
 const AUTONOMOUS_RESONANCE_MAX_PER_CYCLE = envInt("ZIRA_AUTONOMOUS_RESONANCE_MAX_PER_CYCLE", 8);
+// Safety ceiling on how many funded resonators the settler considers per cycle before the ZTI-weighted draw.
+// Bounds the per-tick sort/sample cost on a very large field; sized well above the 512 anchors + expected
+// user resonators so it never silently starves a funded resonator in practice. Env-tunable.
+const AUTONOMOUS_RESONANCE_ELIGIBLE_CAP = envInt("ZIRA_AUTONOMOUS_RESONANCE_ELIGIBLE_CAP", 4096);
+// Bootstrap floor added to every resonator's ZTI in the weighted draw, so a brand-new funded resonator
+// (near-zero ZTI) still gets driven on a fair cadence — roughly once a day at the default — to earn its
+// first coordination reward, grow ZTI through verified convergence, and ramp up. Without it a fresh
+// resonator is near-starved (driven ~once every 3-4 days) and can never warm up. Anchors still lead ~6:1 by
+// their seeded score. Env-tunable so the newcomer ramp can be tuned without a release.
+const AUTONOMOUS_RESONANCE_ZTI_BOOTSTRAP = Number(process.env.ZIRA_AUTONOMOUS_RESONANCE_ZTI_BOOTSTRAP ?? 0.25);
 // Community redistribution. Base emission is minted to the settler alone (see State.emitBaseThrough); each
 // cycle the settler pays most of it out to the people running the network — a fixed per-cycle mining pool
 // split among verified participants, plus a per-driven-resonator reward to owners. Sized so the settler
@@ -1636,10 +1648,15 @@ export class ZiraNode {
   }
 
   private autonomousResonanceEligible(): Resonator[] {
+    // Every funded, listed, resonance-enabled resonator is eligible — NOT just the 12 alphabetically-first
+    // (the old `.slice(0, 12)` sorted by id starved every user-created resonator and ~500 anchors, so only
+    // anchor-A-001..012 ever earned). Ordered by ZTI desc (deterministic id tiebreak) so if the safety cap
+    // ever bites it keeps the highest-trust resonators; the per-cycle ZTI-weighted draw in
+    // autonomousResonanceBatch does the actual prioritization.
     return [...this.soft.resonators.values()]
       .filter((r) => r.listed && r.resonanceEnabled && r.status !== "paused" && (r.balanceUZIR ?? 0) > 0)
-      .sort((a, b) => a.id.localeCompare(b.id))
-      .slice(0, 12);
+      .sort((a, b) => (b.zti ?? 0) - (a.zti ?? 0) || a.id.localeCompare(b.id))
+      .slice(0, AUTONOMOUS_RESONANCE_ELIGIBLE_CAP);
   }
 
   /**
@@ -1694,10 +1711,33 @@ export class ZiraNode {
     });
   }
 
+  // Pick this cycle's driven resonators by a DETERMINISTIC ZTI-weighted draw (Efraimidis-Spirakis weighted
+  // sampling, made reproducible by hashing id+bucket instead of using an RNG): each resonator gets a key
+  // u^(1/weight) with weight = its ZTI and u a hash-derived unit value, and we take the top
+  // AUTONOMOUS_RESONANCE_MAX_PER_CYCLE keys. Higher ZTI ⇒ key nearer 1 ⇒ selected far more often, so anchors
+  // (0.95/0.85/…) lead and earn the most, yet every funded resonator is drawn with probability rising in its
+  // ZTI and rotates in across buckets (the bucket term reshuffles the draw each cycle, so equal-ZTI
+  // resonators take turns rather than the same ids always winning). Pure function of (id, bucket, zti): no
+  // RNG, identical on every node, restart-stable. Soft state — only the settler pays, via a signed tx applied
+  // byte-identically — so the selection never affects the state root.
   private autonomousResonanceBatch(resonators: Resonator[], bucket: number): Resonator[] {
     if (resonators.length <= AUTONOMOUS_RESONANCE_MAX_PER_CYCLE) return resonators;
-    const start = (bucket * AUTONOMOUS_RESONANCE_MAX_PER_CYCLE) % resonators.length;
-    return Array.from({ length: AUTONOMOUS_RESONANCE_MAX_PER_CYCLE }, (_, i) => resonators[(start + i) % resonators.length]!);
+    const hashUnit = (id: string): number => {
+      let h = 2166136261 >>> 0;
+      const s = `${id}:${bucket}`;
+      for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+      return ((h >>> 0) + 1) / 4294967297; // in (0, 1)
+    };
+    return resonators
+      .map((r) => {
+        // Weight = ZTI + a bootstrap floor, so a brand-new (near-zero ZTI) resonator still draws a fair
+        // baseline and can warm up, while a high-ZTI anchor still leads. Clamped to a sane positive range.
+        const w = Math.min(2, Math.max(0.05, (r.zti ?? 0) + AUTONOMOUS_RESONANCE_ZTI_BOOTSTRAP));
+        return { r, key: Math.pow(hashUnit(r.id), 1 / w) };
+      })
+      .sort((a, b) => b.key - a.key || a.r.id.localeCompare(b.r.id))
+      .slice(0, AUTONOMOUS_RESONANCE_MAX_PER_CYCLE)
+      .map((x) => x.r);
   }
 
   private autonomousResonanceQuery(resonator: Resonator, bucket: number, now: number): QueryMsg {
