@@ -175,8 +175,12 @@ async function handle(node: ZiraNode, req: IncomingMessage, res: ServerResponse,
     catch (e) { return json(res, { error: (e as Error).message }, 500); }
   }
 
-  if (opts.consoleDir && existsSync(opts.consoleDir)) return serveStatic(opts.consoleDir, path, res);
-  return json(res, { error: "not found", hint: "RPC is under /rpc, the Console is not bundled with this node" }, 404);
+  // A PUBLIC GATEWAY serves the RPC/WS API only, never the clickable Console UI. Otherwise anyone could point
+  // a browser at the raw gateway host (e.g. http://<ip>:8646/) and drive a full app against it as if it were
+  // their own node. Local/desktop nodes are not in gateway mode and still serve their bundled Console to their
+  // own webview; client apps (mobile/web) ship their own UI and only consume the gateway's RPC.
+  if (opts.consoleDir && existsSync(opts.consoleDir) && !opts.gateway) return serveStatic(opts.consoleDir, path, res);
+  return json(res, { error: "not found", hint: "RPC is under /rpc; a public gateway does not serve the Console UI" }, 404);
 }
 
 function isLoopbackHost(host: string): boolean {
