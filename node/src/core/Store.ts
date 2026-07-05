@@ -152,16 +152,26 @@ export class Store {
     this.ztiLoaded = true;
     if (!existsSync(this.ztiPath)) return;
     try {
-      for (const line of readFileSync(this.ztiPath, "utf8").split("\n")) {
-        const t = line.trim();
-        if (!t) continue;
-        try {
-          const row = JSON.parse(t) as ZtiRow;
-          const arr = this.ztiByAddress.get(row.address) ?? [];
-          arr.push(row);
-          if (arr.length > 1000) arr.shift();
-          this.ztiByAddress.set(row.address, arr);
-        } catch { /* skip torn line */ }
+      // Decode line-by-line from a Buffer (NOT one giant utf8 string): zti-history.jsonl is append-only and
+      // can grow past Node's ~512MB max STRING length, at which point readFileSync(path,"utf8") throws
+      // ERR_STRING_TOO_LONG. Same pattern as readEvents; here the throw was swallowed but silently lost ALL
+      // sparkline history once the file got large.
+      const buf = readFileSync(this.ztiPath); // Buffer, no encoding -> ~2GB limit, no single-string cap
+      let start = 0;
+      for (let i = 0; i <= buf.length; i++) {
+        if (i === buf.length || buf[i] === 0x0a /* \n */) {
+          if (i > start) {
+            const t = buf.toString("utf8", start, i).trim();
+            if (t) try {
+              const row = JSON.parse(t) as ZtiRow;
+              const arr = this.ztiByAddress.get(row.address) ?? [];
+              arr.push(row);
+              if (arr.length > 1000) arr.shift();
+              this.ztiByAddress.set(row.address, arr);
+            } catch { /* skip torn line */ }
+          }
+          start = i + 1;
+        }
       }
     } catch { /* best effort */ }
   }

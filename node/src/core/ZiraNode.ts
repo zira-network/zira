@@ -78,7 +78,7 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "2.0.5";
+const NODE_RELEASE_VERSION = "2.0.6";
 // Per-cycle coordination batch. Every LISTED resonator rotates through autonomous coordination
 // (autonomousResonanceBatch walks the eligible set deterministically by bucket), so all of Discover
 // coordinates — this cap only sets how many per 5-minute cycle. At 8, the full 512-anchor set completes a
@@ -604,7 +604,7 @@ export class ZiraNode {
       memo: "ZIRA events airdrop",
     };
     const r = this.submitTx(signTx(body, this.eventsKp.privateKey));
-    if (r.accepted) this.eventsClaimed.set(address, 1);
+    if (r.accepted) { this.eventsClaimed.set(address, 1); this.persistEventsClaimed(); }
     return { ok: r.accepted, amountUZIR: r.accepted ? this.eventsClaimUZIR : undefined, reason: r.reason };
   }
 
@@ -704,6 +704,8 @@ export class ZiraNode {
     this.restoreAnchorState();
     // Re-hydrate the settler payout watermarks so a restart never re-issues a divergent duplicate payout.
     this.restoreSettlerProgress();
+    // Re-hydrate the events-airdrop already-claimed guard so a restart cannot let every address claim again.
+    this.restoreEventsClaimed();
     // a brand new node (no snapshot, no durable events) is eligible to fast sync from a peer
     this.startedFresh = persisted === null && replayed === 0;
     this.state.advance(Date.now());
@@ -956,6 +958,16 @@ export class ZiraNode {
   /** True when a Tier 2 endpoint provider is already answering for this identity. */
   endpointProviderReady(): boolean {
     return Boolean(this.inferenceProvider?.status().reachable);
+  }
+
+  // The events-airdrop already-claimed guard, persisted so a node restart cannot reset it and let every
+  // address re-claim (which would drain the events reserve to its floor faster than intended).
+  private eventsClaimedPath(): string { return join(this.dataDir, "claimed-events.json"); }
+  private restoreEventsClaimed(): void {
+    try { if (existsSync(this.eventsClaimedPath())) for (const a of JSON.parse(readFileSync(this.eventsClaimedPath(), "utf8")) as string[]) this.eventsClaimed.set(a, 1); } catch { /* best effort */ }
+  }
+  private persistEventsClaimed(): void {
+    try { writeFileSync(this.eventsClaimedPath(), JSON.stringify([...this.eventsClaimed.keys()])); } catch { /* best effort */ }
   }
 
   private providerCfgPath(): string { return join(this.dataDir, "provider.json"); }

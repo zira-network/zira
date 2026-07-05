@@ -16,10 +16,13 @@ export interface MinerConfig {
 export function startMiner(node: ZiraNode, identity: Keypair, cfg: MinerConfig): () => void {
   let stopped = false;
   const answered = new Set<string>();
+  // Bound the dedup set on a long-running miner: query ids are bucketed and never reappear once TTL-pruned,
+  // so trimming the oldest is safe. Mirrors the InferenceProvider guard (else this Set leaks forever).
+  const markAnswered = (id: string): void => { answered.add(id); if (answered.size > 4000) for (const old of [...answered].slice(0, 2000)) answered.delete(old); };
   const inFlight = new Set<string>();
   const MAX_INFLIGHT = 1;          // a CPU node answers one query at a time (full cores -> fast enough to beat the TTL); the field parallelizes across nodes
   const EXPECTED_GEN_MS = 35_000;  // a CPU generation takes tens of seconds; skip work that can't beat the TTL
-  const QUERY_TTL_MS = 60_000;     // mirrors SoftState.QUERY_TTL_MS: the field drops a query after this
+  const QUERY_TTL_MS = 240_000;    // MUST match SoftState.QUERY_TTL_MS (240s): the field retains a query this long, so a serving miner must answer it across that whole window, not skip it after ~25s (which starved coordination answers)
 
   // The model this node serves can change at runtime (the steward adds models; an atomic swap moves us onto
   // a better local one), so resolve the served model's routing domains live each cycle rather than freezing
@@ -51,7 +54,7 @@ export function startMiner(node: ZiraNode, identity: Keypair, cfg: MinerConfig):
       const id = node.identityAddress() + ":" + query.id;
       const sig = edSign(query.id + "\n" + answer, identity.privateKey);
       node.publishAnswer({ id, queryId: query.id, provider: identity.publicKey, answer, confidence: 0.75, sig, ts: Date.now() });
-      answered.add(query.id);
+      markAnswered(query.id);
     } catch (e) { log.debug("answer failed", (e as Error).message); }
   }
 
@@ -66,7 +69,7 @@ export function startMiner(node: ZiraNode, identity: Keypair, cfg: MinerConfig):
         if (answered.has(query.id) || inFlight.has(query.id)) continue;
         // Skip queries whose remaining time-to-live is shorter than a generation takes: the answer would
         // land after the query has TTL-expired from the field, wasting CPU and backing up the engine.
-        if (typeof query.postedAt === "number" && (query.postedAt + QUERY_TTL_MS - now) < EXPECTED_GEN_MS) { answered.add(query.id); continue; }
+        if (typeof query.postedAt === "number" && (query.postedAt + QUERY_TTL_MS - now) < EXPECTED_GEN_MS) { markAnswered(query.id); continue; }
         inFlight.add(query.id);
         // Fire-and-forget up to MAX_INFLIGHT at once (matching the subprocess pool) instead of awaiting each
         // generation in series, so a slow answer never blocks picking up the next query.
