@@ -1270,27 +1270,42 @@ export class ZiraNode {
       //    real, reachable, participating node. Mining/coordination alone earns the baseline emission (no
       //    model download required), so a new user starts earning the moment they are a live peer of the
       //    field. Bounded per round; each probe is timeout-guarded so a stalled peer never blocks the set.
-      // Probe connected peers SEQUENTIALLY (proven-stable; a concurrent burst of liveness streams starved the
-      // whole set). The only change from the original is a higher cap (was 24): on a busy public master that
-      // starved late-ordered peers so real, synced, mining nodes never got vouched and never earned. This is
-      // consensus-safe: it only changes which miners this master vouches for, which rides on its SIGNED
-      // observation / settled payout tx and is applied byte-identically by every node (old builds included).
-      // Probe ALL connected peers (maxConnections is 128), not just the first 64: on a busy master a correctly
-      // configured new miner past index 64 would otherwise never be liveness-probed, never vouched, never paid.
+      // Probe connected peers with BOUNDED CONCURRENCY. A purely sequential walk (the prior approach) let a
+      // handful of slow/dead peers each burn the full 8s request timeout, so on a busy public master the loop
+      // ran for minutes and real, synced mining nodes late in the list were never probed, never vouched, never
+      // paid — bare mining looked like it earned nothing. An UNBOUNDED concurrent burst (the approach before
+      // that) opened too many liveness streams at once and starved the connection. A small fixed pool is the
+      // stable middle: every connected miner gets probed each round in seconds, so mining alone earns the
+      // baseline the moment a node is a live peer (no model bytes required). Consensus-safe: it only changes
+      // which miners this master vouches for, which rides on its SIGNED observation / settled payout tx and is
+      // applied byte-identically by every node (old builds included).
       const probeCap = Number(process.env.ZIRA_VOUCH_PROBE_CAP ?? 128);
-      for (const peerId of this.net.peers().slice(0, probeCap)) {
-        const addr = await this.verifyPeerLive(peerId);
-        if (addr && addr !== this.identity.address) { this.verifiedMiners.set(addr, now); live++; }
-      }
+      const probeConc = Math.max(1, Number(process.env.ZIRA_VOUCH_PROBE_CONCURRENCY ?? 8));
+      const livePeers = this.net.peers().slice(0, probeCap);
+      let li = 0;
+      const liveWorker = async (): Promise<void> => {
+        while (li < livePeers.length) {
+          const peerId = livePeers[li++]!;
+          const addr = await this.verifyPeerLive(peerId);
+          if (addr && addr !== this.identity.address) { this.verifiedMiners.set(addr, now); live++; }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(probeConc, livePeers.length) }, () => liveWorker()));
       // 2) STORAGE serving (earns MORE via storageRewardMultiplier). Peers advertising the model that pass a
       //    random-chunk challenge prove they actually hold+serve the bytes. Same freshness stamp; the extra
       //    reward comes from their storage weight in the split. Only when we hold a model to probe against.
       const modelId = this.models.localHeldModelId();
       if (modelId) {
-        for (const { peerId, address } of this.models.peersServing(modelId).slice(0, probeCap)) {
-          try { if (await this.models.verifyPeerStorage(peerId, modelId)) { this.verifiedMiners.set(address, now); this.storageServingMiners.set(address, now); stored++; } }
-          catch { /* unreachable peer: skip */ }
-        }
+        const servers = this.models.peersServing(modelId).slice(0, probeCap);
+        let si = 0;
+        const storeWorker = async (): Promise<void> => {
+          while (si < servers.length) {
+            const { peerId, address } = servers[si++]!;
+            try { if (await this.models.verifyPeerStorage(peerId, modelId)) { this.verifiedMiners.set(address, now); this.storageServingMiners.set(address, now); stored++; } }
+            catch { /* unreachable peer: skip */ }
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(probeConc, servers.length) }, () => storeWorker()));
       }
       // prune stale entries so the vouch set stays current and bounded
       for (const [a, ts] of this.verifiedMiners) if (now - ts > ZiraNode.VOUCH_FRESH_MS) this.verifiedMiners.delete(a);
