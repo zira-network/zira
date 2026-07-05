@@ -77,6 +77,8 @@ const AUTONOMOUS_RESONATOR_DELIVER_MS = envMs("ZIRA_AUTONOMOUS_RESONATOR_DELIVER
 const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS", 5 * 60_000);
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
+// Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
+const NODE_RELEASE_VERSION = "2.0.5";
 // Per-cycle coordination batch. Every LISTED resonator rotates through autonomous coordination
 // (autonomousResonanceBatch walks the eligible set deterministically by bucket), so all of Discover
 // coordinates — this cap only sets how many per 5-minute cycle. At 8, the full 512-anchor set completes a
@@ -1829,6 +1831,12 @@ export class ZiraNode {
       }
       case "checkpoint": {
         if (this.checkpoints.isVoteKnown(env.data.id)) return { ok: true, isNew: false };
+        // Drop votes for an epoch that is already finalized (well behind the head). They can no longer change
+        // finality, and each re-vote of an already-settled epoch carries a fresh prevRoot -> a new vote id, so
+        // the id-dedup above does not catch them. Persisting every such vote is what bloated events.jsonl into
+        // a startup hot-loop ("could not start / node not reachable"). Local persistence decision, made
+        // identically by every node, so it never affects consensus.
+        if (env.data.epoch <= this.checkpoints.lastFinalizedEpoch) return { ok: true, isNew: false };
         const fin = this.checkpoints.receiveVote(env.data, this.state.totalMasterTrust(), this.state.masterZtiMap());
         this.store.appendEvent(env);
         void fin;
@@ -2291,8 +2299,8 @@ export class ZiraNode {
     const issued = PROTOCOL.RESERVE_UZIR + this.state.supply.emitted;
     return {
       // Release version, exposed so the Console can negotiate features against older nodes (upgrade
-      // without ruptures). Tracks the node package version / installer release.
-      version: "1.9.19",
+      // without ruptures). Tracks the node package version / installer release (bump per release).
+      version: NODE_RELEASE_VERSION,
       network: this.genesis.network,
       phase: "live",
       providersOnline: this.soft.onlineProviders(now).length,
