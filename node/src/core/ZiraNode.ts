@@ -78,7 +78,7 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "2.0.11";
+const NODE_RELEASE_VERSION = "2.0.12";
 // Per-cycle coordination batch. Every funded+listed resonator is eligible; autonomousResonanceBatch picks
 // this many per 5-minute cycle by a DETERMINISTIC ZTI-WEIGHTED draw, so higher-trust resonators (anchors,
 // seeded 0.95/0.85/… by class) are driven most often and earn the most, while every other funded resonator
@@ -164,6 +164,17 @@ const FIELD_HEARTBEAT_SUBJECT = PROTOCOL.FIELD_HEARTBEAT_SUBJECT;  // shared so 
 // long a master honours a push (must exceed INTERVAL so a couple of missed pushes don't drop the vouch).
 const PUSH_LIVENESS_INTERVAL_MS = envMs("ZIRA_PUSH_LIVENESS_MS", 20_000);
 const PUSH_LIVENESS_MAX_AGE_MS = envMs("ZIRA_PUSH_LIVENESS_MAX_AGE_MS", 90_000);
+// How many connected peers a miner pushes its liveness to per interval. A home node holds only a handful of
+// connections (all of them masters); the cap only bounds a well-connected public node so it does not open an
+// unreasonable number of best-effort streams each interval. Only masters record the push, so extra targets are
+// harmless no-ops.
+const PUSH_LIVENESS_MAX_TARGETS = Number(process.env.ZIRA_PUSH_LIVENESS_MAX_TARGETS ?? 32);
+// A follower keeps this many recent per-epoch local roots to self-check against finalized consensus roots.
+const LOCAL_ROOT_HISTORY = 512;
+// Consecutive DISTINCT finalized epochs whose consensus root disagrees with our own recorded root before we
+// conclude our applied state has diverged and re-adopt a verified master snapshot. >1 so a single off-by-one
+// settle-timing sample never triggers a needless resync; the roots are deterministic, so real divergence persists.
+const DIVERGENCE_STREAK_TRIGGER = Number(process.env.ZIRA_DIVERGENCE_STREAK_TRIGGER ?? 3);
 const COORDINATION_FALLBACK_RE = /This node is mining in coordination mode|Full generative AI answers require/i;
 
 /** Graded textual agreement in [0,1]: the mean Jaccard overlap of an answer's significant vocabulary with
@@ -1183,6 +1194,7 @@ export class ZiraNode {
     const advanced = this.state.advance(now);
     if (advanced > 0) this.voteCheckpoints(now);
     this.maybeResyncOnStall(now);   // finality watchdog: self-heal if finalizedEpoch freezes behind the mesh
+    this.maybeResyncOnDivergence(now); // state watchdog: self-heal if our applied state stops matching consensus
     this.soft.prune(now);
     // periodically re-gossip pending events so peers converge despite gossipsub mesh races and
     // late joiners. Cheap: the pool is small and drains every epoch.
@@ -1922,12 +1934,22 @@ export class ZiraNode {
   ztiHistory(address: string, domain?: Domain, limit = 100) { return this.store.getZtiHistory(address, domain, limit); }
 
   private voteCheckpoints(now: number): void {
-    const me = this.state.accounts.get(this.identity.address);
-    if (!me || !me.isMaster) return;
     const epoch = this.state.lastProcessedEpoch;
     if (epoch <= this.lastVotedEpoch) return;
     this.lastVotedEpoch = epoch;
+    // EVERY node records its OWN state root for this settle epoch. A master additionally signs+gossips it as its
+    // finality vote; a follower keeps it only to self-check later (see maybeResyncOnDivergence). If a follower's
+    // applied state ever stops hashing to the finalized consensus root, it has silently diverged (typically a
+    // missed gossiped payout tx) and must re-adopt a verified master snapshot, or balanceOf reads a stale balance
+    // forever — a mining node then looks like it earns nothing even though every master has credited it.
     const root = this.state.stateRoot();
+    this.localRootByEpoch.set(epoch, root);
+    if (this.localRootByEpoch.size > LOCAL_ROOT_HISTORY) {
+      const cutoff = epoch - LOCAL_ROOT_HISTORY;
+      for (const e of this.localRootByEpoch.keys()) if (e <= cutoff) this.localRootByEpoch.delete(e);
+    }
+    const me = this.state.accounts.get(this.identity.address);
+    if (!me || !me.isMaster) return;
     const vote = this.checkpoints.createVote(epoch, root, this.state.supply, this.identity, me.zti, now);
     const fin = this.checkpoints.receiveVote(vote, this.state.totalMasterTrust(), this.state.masterZtiMap());
     void fin;
@@ -2030,6 +2052,12 @@ export class ZiraNode {
   private finalizedProgressAt = 0;
   private resyncInFlight = false;
   private lastResyncAt = 0;
+  // State-divergence watchdog bookkeeping (see maybeResyncOnDivergence). Our own recorded root per settle epoch,
+  // a streak of finalized epochs whose consensus root disagreed with ours, and rate-limit stamps.
+  private localRootByEpoch = new Map<number, string>();
+  private divergentFinalizedStreak = 0;
+  private lastDivergenceCheckedEpoch = -1;
+  private lastDivergenceResyncAt = 0;
   // Thresholds sit ABOVE the normal finality lag or the watchdog false-alarms every cycle: finality trails the
   // processed head by the settle window (SETTLE_ROUNDS=8 epochs + GRACE 20s ~= 60-70s, ~12-18 epochs at
   // EPOCH_MS=5s) even when perfectly healthy. A REAL stall (the 2026-07-04 freeze) leaves finality frozen for
@@ -2081,13 +2109,20 @@ export class ZiraNode {
     const bucket = Math.floor(now / PUSH_LIVENESS_INTERVAL_MS);
     if (bucket === this.lastPushLivenessBucket) return;
     this.lastPushLivenessBucket = bucket;
-    const seeds = this.net.seedPeers?.() ?? [];
-    if (!seeds.length) return;
+    // Push to EVERY connected peer, not only those whose peer id matches a configured seed multiaddr. A home/NAT
+    // node usually reaches the masters via discovery or a relay rather than an exact "/p2p/<id>" seed entry, so
+    // seedPeers() is empty for it and the old code returned here without ever pushing — the node stayed connected
+    // and syncing yet was never vouched or paid. Only a master RECORDS the push (serveLiveness verifies isMaster +
+    // the signature, binding one address per connection), so pushing to non-master peers is a harmless no-op and
+    // adds no sybil surface. Seeds first so masters stay within the cap even on a node with many peers.
+    const seeded = this.net.seedPeers?.() ?? [];
+    const targets = [...new Set([...seeded, ...this.net.peers()])].slice(0, PUSH_LIVENESS_MAX_TARGETS);
+    if (!targets.length) return;
     const body = enc.encode(JSON.stringify({
       push: true, address: this.identity.address, pubKey: this.identity.publicKey, ts: now,
       sig: edSign("zira-live-push:" + now, this.identity.privateKey),
     }));
-    for (const peerId of seeds) void this.net.request(peerId, LIVENESS_PROTOCOL, body, 8_000).catch(() => { /* best effort; retry next bucket */ });
+    for (const peerId of targets) void this.net.request(peerId, LIVENESS_PROTOCOL, body, 8_000).catch(() => { /* best effort; retry next bucket */ });
   }
 
   /** Probe a directly-connected peer's liveness. Returns its verified ZIR address, or null if it did not
@@ -2212,6 +2247,74 @@ export class ZiraNode {
     this.lastResyncAt = now;
     log.warn(`finality stalled: finalizedEpoch ${fin} unchanged for ${Math.round((now - this.finalizedProgressAt) / 1000)}s (processed ${this.state.lastProcessedEpoch}); attempting resync from peers`);
     void this.attemptResyncFromPeers();
+  }
+
+  /**
+   * State-divergence watchdog. The finality watchdog above only catches a FROZEN finalized epoch. A follower can
+   * instead keep finalizing the master-signed roots normally while its own applied state quietly drifts from them:
+   * it missed a gossiped payout tx, so balanceOf under-reports and a mining node looks like it earns nothing even
+   * though every master has credited it. We detect that directly — our own recorded root for the latest finalized
+   * epoch must equal the finalized consensus root — and, if it disagrees for a few consecutive finalized epochs,
+   * re-adopt a verified master snapshot. Consensus-neutral: a master's own root always equals its own vote, so
+   * this only ever heals followers and changes nothing a master finalizes.
+   */
+  private maybeResyncOnDivergence(now: number): void {
+    if (!this.opts.fastSync || process.env.ZIRA_FULL_SYNC === "1") return;
+    if (this.net.peerCount() === 0) return;
+    const fin = this.checkpoints.lastFinalizedEpoch;
+    if (fin < 0 || fin === this.lastDivergenceCheckedEpoch) return;   // one check per new finalized epoch
+    const localRoot = this.localRootByEpoch.get(fin);
+    if (localRoot === undefined) return;                             // have not computed our own root for it yet
+    this.lastDivergenceCheckedEpoch = fin;
+    if (localRoot === this.checkpoints.lastFinalizedRoot) { this.divergentFinalizedStreak = 0; return; }
+    this.divergentFinalizedStreak++;
+    if (this.divergentFinalizedStreak < DIVERGENCE_STREAK_TRIGGER) return;
+    if (this.resyncInFlight || now - this.lastDivergenceResyncAt < this.resyncCooldownMs) return;
+    this.lastDivergenceResyncAt = now;
+    log.warn(`state diverged from consensus: our root for finalized epoch ${fin} != finalized root over ${this.divergentFinalizedStreak} epochs; re-adopting a verified master snapshot`);
+    void this.attemptResyncOnDivergence();
+  }
+
+  /** Re-adopt the most-advanced verified master snapshot to heal a diverged (not merely stalled) follower. Unlike
+   *  attemptResyncFromPeers this does NOT require the peer to be further ahead — a diverged node's finalized epoch
+   *  is current, only its state is wrong — but it keeps the identical checkpoint-verification gate, so a forged or
+   *  forked snapshot can never be adopted. */
+  private async attemptResyncOnDivergence(): Promise<void> {
+    if (this.resyncInFlight) return;
+    this.resyncInFlight = true;
+    try {
+      const got: Snap[] = [];
+      for (const p of this.net.peers().slice(0, 8)) {
+        try {
+          const frames = await this.net.request(p, SNAPSHOT_PROTOCOL, enc.encode("{}"));
+          if (frames[0]) got.push(JSON.parse(dec.decode(frames[0])) as Snap);
+        } catch { /* try the next peer */ }
+      }
+      if (!got.length) return;
+      // Try EVERY candidate, most-advanced first, and adopt the first that verifies. A single snapshot commonly
+      // fails verifyFastSyncSnapshot only transiently — the serving peer's live state has moved a few epochs past
+      // its own finalized root, so the returned account table no longer hashes to the finalized root it carries.
+      // Picking just the most-advanced one (as the stall path does, which relies on retrying later) would leave a
+      // diverged follower stuck at 0 across the cooldown; iterating the batch heals on the first round instead.
+      got.sort((a, b) => (b.finalizedEpoch ?? -1) - (a.finalizedEpoch ?? -1));
+      for (const cand of got) {
+        if (!cand.snapshot || !Array.isArray(cand.snapshot.accounts) || cand.snapshot.accounts.length === 0) continue;
+        if (!this.verifyFastSyncSnapshot(cand)) continue;                 // this peer's live state raced its root; try the next
+        const dropped = this.state.adoptFastSyncSnapshot(cand.snapshot);
+        this.checkpoints.lastFinalizedEpoch = cand.finalizedEpoch;
+        this.checkpoints.lastFinalizedRoot = cand.finalizedRoot;
+        this.lastFinalizedSeen = cand.finalizedEpoch;
+        this.finalizedProgressAt = Date.now();
+        this.divergentFinalizedStreak = 0;
+        this.lastDivergenceCheckedEpoch = -1;
+        this.localRootByEpoch.clear();
+        log.info(`divergence resync: adopted verified master snapshot at finalized epoch ${cand.finalizedEpoch} (dropped ${dropped.txs} txs/${dropped.observations} obs already in snapshot); balances now match consensus`);
+        return;
+      }
+      log.warn(`divergence resync: no peer served a verifiable snapshot this round (${got.length} tried); will retry`);
+    } finally {
+      this.resyncInFlight = false;
+    }
   }
 
   /** Adopt the most-advanced verified peer snapshot to recover from a finality stall. See maybeResyncOnStall. */

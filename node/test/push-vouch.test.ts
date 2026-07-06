@@ -132,3 +132,36 @@ test("a master will not vouch another genesis master via push (masters are not m
   await deliver(master, pushBytes(masters[1]!, now), "peerA");
   assert.ok(!fresh(master, now).includes(masters[1]!.address), "a genesis master is never a push-vouched miner");
 });
+
+// SENDING side (the v2.0.12 fix). The regression: a home/NAT miner reaches the masters via discovery or a relay,
+// not via an exact "/p2p/<id>" configured-seed multiaddr, so seedPeers() is empty and the old code returned
+// without ever pushing — connected and syncing, yet never vouched or paid. The miner must push to EVERY connected
+// peer (masters record it, non-masters ignore it), so it no longer depends on the connected master being a seed.
+function capturingNet(peers: string[], seeds: string[], calls: string[]): ZiraNetwork {
+  return {
+    start: async () => {}, stop: async () => {}, publish: async () => {}, onMessage: () => {},
+    setSyncProvider: () => {}, onSyncFrame: () => {}, handle: () => {}, onPeerConnect: () => {},
+    dial: async () => {}, multiaddrs: () => [], peerId: () => "self", peerCount: () => peers.length,
+    peers: () => peers, seedPeers: () => seeds,
+    request: async (peerId: string) => { calls.push(peerId); return []; },
+  } as unknown as ZiraNetwork;
+}
+async function pushLiveness(miner: ReturnType<typeof generateKeypair>, net: ZiraNetwork): Promise<void> {
+  const dir = join(tmpdir(), `zira-pushall-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const node = new ZiraNode(genesis, miner, net, dir, {});
+  await (node as unknown as { models: { setMining(p: { enabled: boolean }): Promise<unknown> } }).models.setMining({ enabled: true });
+  await (node as unknown as { contributePushLiveness(n: number): Promise<void> }).contributePushLiveness(Date.now());
+}
+
+test("a miner pushes liveness to EVERY connected peer even when seedPeers() is empty (the NAT earn fix)", async () => {
+  const calls: string[] = [];
+  await pushLiveness(generateKeypair(), capturingNet(["pA", "pB", "pC"], [], calls));
+  assert.deepEqual([...calls].sort(), ["pA", "pB", "pC"], "pushed to all connected peers despite no configured-seed match");
+});
+
+test("push targets are the union of seeds and connected peers, de-duplicated", async () => {
+  const calls: string[] = [];
+  // seedPeers() reports pA (a seed we are connected to); peers() reports pA + two discovered peers.
+  await pushLiveness(generateKeypair(), capturingNet(["pA", "pB", "pC"], ["pA"], calls));
+  assert.deepEqual([...calls].sort(), ["pA", "pB", "pC"], "each peer pushed exactly once (no duplicate for the seed)");
+});
