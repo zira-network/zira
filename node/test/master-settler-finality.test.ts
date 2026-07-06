@@ -72,7 +72,7 @@ test("the network settler funds coordination payouts without breaking finality",
 
     // let the payouts settle through the lagged tx window and a few more epochs finalize
     let paid = false;
-    for (let i = 0; i < 320; i++) {
+    for (let i = 0; i < 640; i++) {
       if (nodes.every((n) => n.state.balanceOf(miner.address) > 0)) { paid = true; break; }
       await sleep(250);
     }

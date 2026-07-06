@@ -361,13 +361,22 @@ export class Libp2pNetwork implements ZiraNetwork {
   onPeerConnect(cb: (peerId: string) => void | Promise<void>): void { this.peerConnectCb = cb; }
   private peerConnectCb: (peerId: string) => void | Promise<void> = () => {};
 
-  handle(protocol: string, handler: (req: Uint8Array) => AsyncIterable<Uint8Array>): void {
+  handle(protocol: string, handler: (req: Uint8Array, from: string) => AsyncIterable<Uint8Array>): void {
     if (!this.node) { this.pendingHandlers.push([protocol, handler]); return; }
     void this.registerHandler(protocol, handler);
   }
-  private pendingHandlers: Array<[string, (req: Uint8Array) => AsyncIterable<Uint8Array>]> = [];
-  private async registerHandler(protocol: string, handler: (req: Uint8Array) => AsyncIterable<Uint8Array>): Promise<void> {
-    await this.node!.handle(protocol, ({ stream }) => {
+
+  /** Connected peers whose id is one of our configured seeds/masters. A miner pushes its signed liveness to
+   *  these over its own outbound connection, so it stays vouched even when the reverse probe cannot reach it. */
+  seedPeers(): string[] {
+    if (!this.node) return [];
+    const seeds = this.seedPeerIds();
+    return [...new Set(this.node.getConnections().map((c) => c.remotePeer.toString()))].filter((p) => seeds.has(p));
+  }
+  private pendingHandlers: Array<[string, (req: Uint8Array, from: string) => AsyncIterable<Uint8Array>]> = [];
+  private async registerHandler(protocol: string, handler: (req: Uint8Array, from: string) => AsyncIterable<Uint8Array>): Promise<void> {
+    await this.node!.handle(protocol, ({ stream, connection }) => {
+      const from = connection?.remotePeer?.toString?.() ?? "";
       void pipe(
         stream,
         (s) => lp.decode(s),
@@ -375,7 +384,7 @@ export class Libp2pNetwork implements ZiraNetwork {
           let req: Uint8Array | undefined;
           for await (const f of source) { req = f.subarray(); break; }
           if (!req) return;
-          yield* handler(req);
+          yield* handler(req, from);
         },
         (s) => lp.encode(s),
         stream,
@@ -385,33 +394,45 @@ export class Libp2pNetwork implements ZiraNetwork {
 
   async request(peerIdStr: string, protocol: string, req: Uint8Array, timeoutMs = 25_000): Promise<Uint8Array[]> {
     if (!this.node) return [];
-    const conn = this.node.getConnections().find((c) => c.remotePeer.toString() === peerIdStr);
-    if (!conn) throw new Error("not connected to peer " + peerIdStr);
-    const stream = await conn.newStream(protocol);
-    const frames: Uint8Array[] = [];
-    // A peer can open the stream and then stall forever (accepts the request, never responds). Without a
-    // timeout the caller hangs indefinitely. This is exactly what froze the P2P model download at 0 B and
-    // never let it fall through to the URL fallback. Bound every request: on timeout, abort the stream and
-    // throw so the caller moves to the next peer / source.
-    const run = pipe(
-      [req],
-      (s) => lp.encode(s),
-      stream,
-      (s) => lp.decode(s),
-      async (source) => { for await (const f of source) frames.push(f.subarray()); },
-    );
-    run.catch(() => {});   // a late error after a timeout-abort must not surface as an unhandled rejection
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error(`request to ${peerIdStr.slice(0, 8)} timed out after ${timeoutMs}ms`)), timeoutMs); });
-    try {
-      await Promise.race([run, timeout]);
-      return frames;
-    } catch (e) {
-      try { stream.abort(e as Error); } catch { /* best effort */ }
-      throw e;
-    } finally {
-      if (timer) clearTimeout(timer);
+    const conns = this.node.getConnections().filter((c) => c.remotePeer.toString() === peerIdStr);
+    if (!conns.length) throw new Error("not connected to peer " + peerIdStr);
+    // Try a FULL (non-limited) connection first. A limited connection — a circuit-relay v2 hop, which is how a
+    // peer behind NAT is often reached — rejects opening a normal protocol stream, so if we picked it the
+    // request would fail even though the peer is perfectly reachable. That made a huge share of connected
+    // miners look "unreachable" to the liveness probe and never get vouched or paid. We order full connections
+    // first, fall back to any (opening the stream on a limited conn via runOnLimitedConnection), and move to
+    // the next connection if one cannot carry the stream.
+    const isLimited = (c: unknown): boolean => Boolean((c as { limits?: unknown; transient?: unknown }).limits ?? (c as { transient?: unknown }).transient);
+    const ordered = [...conns.filter((c) => !isLimited(c)), ...conns.filter(isLimited)];
+    let lastErr: unknown;
+    for (const conn of ordered) {
+      let stream;
+      try { stream = await conn.newStream(protocol, isLimited(conn) ? { runOnLimitedConnection: true } as never : undefined); }
+      catch (e) { lastErr = e; continue; }   // this connection cannot carry the stream: try the next one
+      const frames: Uint8Array[] = [];
+      // A peer can open the stream and then stall forever (accepts the request, never responds). Bound every
+      // request: on timeout, abort the stream and try the next connection / caller falls through.
+      const run = pipe(
+        [req],
+        (s) => lp.encode(s),
+        stream,
+        (s) => lp.decode(s),
+        async (source) => { for await (const f of source) frames.push(f.subarray()); },
+      );
+      run.catch(() => {});   // a late error after a timeout-abort must not surface as an unhandled rejection
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error(`request to ${peerIdStr.slice(0, 8)} timed out after ${timeoutMs}ms`)), timeoutMs); });
+      try {
+        await Promise.race([run, timeout]);
+        return frames;
+      } catch (e) {
+        try { stream.abort(e as Error); } catch { /* best effort */ }
+        lastErr = e;   // try the next connection to this peer, if any
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     }
+    throw lastErr ?? new Error("no usable connection to " + peerIdStr);
   }
 
   async dial(addr: string): Promise<void> {

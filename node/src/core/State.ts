@@ -619,8 +619,26 @@ export class State {
         if (epochOf(tx.timestamp) < epoch - State.TX_GAP_TTL_EPOCHS) this.txPool.delete(tx.id); // predecessor never came
         continue;
       }
-      this.applyTx(tx, epoch);                                                      // nonce matches: apply now
-      this.txPool.delete(tx.id);
+      // nonce matches the sender's committed nonce: try to apply. applyTx advances the sender's nonce on every
+      // path EXCEPT an unaffordable spend (overspend), which it drops WITHOUT consuming the nonce so a
+      // temporarily-underfunded sender can retry once it accrues. Left unbounded that is a WEDGE: an
+      // unaffordable tx pinned at the committed nonce blocks every later tx from that sender FOREVER, because
+      // the sender keeps issuing at provisionalNonce = committed + pooledCount (nonce+1, +2, ...), which are all
+      // future-nonce gaps that can never apply while the wedge sits at the committed nonce. This is the
+      // 2026-07-05 incident: one unaffordable settler payout silently froze the settler's nonce and stopped
+      // EVERY field-participation payout, so miners earned nothing. Fix: retry while the wedge is young, but once
+      // it has been unable to apply for longer than the gap TTL, SKIP it (advance the nonce, drop the tx) so no
+      // single stuck tx can permanently wedge a sender. The skip is a pure function of (nonce, timestamp, epoch)
+      // — identical on every node and every event-log replay — so the state root never diverges. In the same
+      // sorted drain pass the freed nonce lets the sender's later txs apply immediately (no extra epochs).
+      const nonceBefore = this.acct(tx.from).nonce;
+      this.applyTx(tx, epoch);
+      if (this.acct(tx.from).nonce > nonceBefore) { this.txPool.delete(tx.id); continue; }   // applied or nonce-consumed
+      if (epochOf(tx.timestamp) < epoch - State.TX_GAP_TTL_EPOCHS) {                          // unaffordable too long: skip
+        this.acct(tx.from).nonce += 1;
+        this.txPool.delete(tx.id);
+      }
+      // else: keep it pooled and retry next epoch (the sender may yet accrue enough to pay).
     }
 
     // 2. field convergence over the trailing observation window ending at this epoch

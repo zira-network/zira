@@ -78,7 +78,7 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "2.0.8";
+const NODE_RELEASE_VERSION = "2.0.11";
 // Per-cycle coordination batch. Every funded+listed resonator is eligible; autonomousResonanceBatch picks
 // this many per 5-minute cycle by a DETERMINISTIC ZTI-WEIGHTED draw, so higher-trust resonators (anchors,
 // seeded 0.95/0.85/… by class) are driven most often and earn the most, while every other funded resonator
@@ -102,6 +102,12 @@ const AUTONOMOUS_RESONANCE_ZTI_BOOTSTRAP = Number(process.env.ZIRA_AUTONOMOUS_RE
 // split among verified participants, plus a per-driven-resonator reward to owners. Sized so the settler
 // redistributes the large majority of its per-cycle emission and keeps the rest as treasury. Env-tunable.
 const FIELD_PARTICIPATION_BUDGET_UZIR = envInt("ZIRA_FIELD_PARTICIPATION_BUDGET_UZIR", 5_000_000_000); // 5000 ZIR/cycle mining pool
+// Settler-nonce watchdog: if the settler's committed nonce has not advanced for this long while its later
+// payouts have piled up as future-nonce gaps (provisionalNonce ran ahead of committed), the payout pipeline is
+// wedged — there is no tx sitting at the committed nonce, so nothing applies and every gapped payout waits
+// forever (the 2026-07-05 "pure gap" freeze the settle-drain skip could not reach). Well above the normal
+// ~60s settle-lag so a healthy in-flight payout is never mistaken for a wedge.
+const SETTLER_NONCE_STUCK_MS = envMs("ZIRA_SETTLER_NONCE_STUCK_MS", 120_000);
 // Event-log compaction: once the log passes this size, drop persisted tx/observation/checkpoint events older
 // than the snapshot's replay window (keepFrom below). Keeps events.jsonl bounded so it can never exceed Node's
 // ~512MB max-string cap and brick the node on boot. Threshold well under 512MB; cushion is generous.
@@ -152,6 +158,12 @@ const FIELD_ANSWER_DECAY = Number(process.env.ZIRA_FIELD_ANSWER_DECAY ?? 0.8);
 // path (the whitepaper's mining reward); paid inference coordination earns on top of it.
 const FIELD_HEARTBEAT_INTERVAL_MS = envMs("ZIRA_FIELD_HEARTBEAT_MS", 30_000);
 const FIELD_HEARTBEAT_SUBJECT = PROTOCOL.FIELD_HEARTBEAT_SUBJECT;  // shared so the work-gate matches exactly
+// Push-liveness: a mining node proactively asserts liveness to each connected master over its OWN outbound
+// connection (which works through any NAT/CGNAT), instead of relying on the master probing it back — a reverse
+// probe that a churning residential connection keeps failing. INTERVAL is how often it pushes; MAX_AGE is how
+// long a master honours a push (must exceed INTERVAL so a couple of missed pushes don't drop the vouch).
+const PUSH_LIVENESS_INTERVAL_MS = envMs("ZIRA_PUSH_LIVENESS_MS", 20_000);
+const PUSH_LIVENESS_MAX_AGE_MS = envMs("ZIRA_PUSH_LIVENESS_MAX_AGE_MS", 90_000);
 const COORDINATION_FALLBACK_RE = /This node is mining in coordination mode|Full generative AI answers require/i;
 
 /** Graded textual agreement in [0,1]: the mean Jaccard overlap of an answer's significant vocabulary with
@@ -730,7 +742,7 @@ export class ZiraNode {
     });
     // fast sync: a joining node adopts a finalized snapshot from a peer instead of replaying history
     this.net.handle(SNAPSHOT_PROTOCOL, () => this.serveSnapshot());
-    this.net.handle(LIVENESS_PROTOCOL, (req) => this.serveLiveness(req));
+    this.net.handle(LIVENESS_PROTOCOL, (req, from) => this.serveLiveness(req, from));
     this.net.onPeerConnect((peer) => {
       this.models.announceLocal();
       void this.models.reconcileStorage();
@@ -1210,10 +1222,11 @@ export class ZiraNode {
       this.seedAnchorResonators();
     }
     // task reaper: expire undelivered tasks, auto-release silently-verified ones.
-    if (now - this.lastReapAt >= this.opts.taskReapMs) { this.lastReapAt = now; this.reapTasks(now); this.coordinateAutonomousResonance(now); this.settleFieldParticipation(now); }
+    if (now - this.lastReapAt >= this.opts.taskReapMs) { this.lastReapAt = now; this.reapTasks(now); this.coordinateAutonomousResonance(now); this.settleFieldParticipation(now); this.unstickSettlerNonce(now); }
     // Field heartbeat: contributing (mining/storage) nodes attest participation so PoR Locks form and the
     // round emission flows to them (storage-weighted). Self-throttled to FIELD_HEARTBEAT_INTERVAL_MS.
     this.contributeFieldHeartbeat(now);
+    void this.contributePushLiveness(now);   // push liveness to masters over our own connection (NAT-proof vouch)
     // Storage proof: a master that holds the model periodically probes peers serving it and attests the ones
     // that prove they hold the bytes (a random-chunk probe), so genuine storage/serving miners earn the
     // heartbeat emission, not only paid coordination.
@@ -1245,6 +1258,11 @@ export class ZiraNode {
   // runField credits any miner vouched by enough masters in the converged Lock. No ledger tx is created, so
   // this is consensus-safe (the credit derives from converged observations, not divergent per-master txs).
   private verifiedMiners = new Map<string, number>();
+  // Push-vouched miners (this master only): peerId -> {address it asserted, when}. A miner pushes a signed
+  // liveness assertion over its own outbound connection; keying by peerId bounds it to one address per live
+  // connection (the same sybil property as the reverse probe) and lets a NAT'd miner stay vouched even when
+  // the master cannot probe it back. Consumed by freshVouchedMiners while the connection is still live.
+  private pushVouch = new Map<string, { address: string; ts: number }>();
   // Which vouched miners passed the STORAGE chunk challenge this window (address -> last-verified ms). A
   // subset of verifiedMiners; used to give storage-servers the payout bonus. Settler-local, consensus-safe.
   private storageServingMiners = new Map<string, number>();
@@ -1282,12 +1300,13 @@ export class ZiraNode {
       const probeCap = Number(process.env.ZIRA_VOUCH_PROBE_CAP ?? 128);
       const probeConc = Math.max(1, Number(process.env.ZIRA_VOUCH_PROBE_CONCURRENCY ?? 8));
       const livePeers = this.net.peers().slice(0, probeCap);
-      let li = 0;
+      let li = 0, liveFail = 0;
       const liveWorker = async (): Promise<void> => {
         while (li < livePeers.length) {
           const peerId = livePeers[li++]!;
           const addr = await this.verifyPeerLive(peerId);
           if (addr && addr !== this.identity.address) { this.verifiedMiners.set(addr, now); live++; }
+          else if (!addr) liveFail++;
         }
       };
       await Promise.all(Array.from({ length: Math.min(probeConc, livePeers.length) }, () => liveWorker()));
@@ -1310,7 +1329,7 @@ export class ZiraNode {
       // prune stale entries so the vouch set stays current and bounded
       for (const [a, ts] of this.verifiedMiners) if (now - ts > ZiraNode.VOUCH_FRESH_MS) this.verifiedMiners.delete(a);
       for (const [a, ts] of this.storageServingMiners) if (now - ts > ZiraNode.VOUCH_FRESH_MS) this.storageServingMiners.delete(a);
-      if (live > 0 || stored > 0) log.info(`vouch probe: ${live} live coordinating peer(s), ${stored} storage-serving -> vouching ${this.verifiedMiners.size} in heartbeat`);
+      if (live > 0 || stored > 0 || liveFail > 0 || this.pushVouch.size > 0) log.info(`vouch probe: ${livePeers.length} peers, ${live} live, ${liveFail} unreachable, ${stored} storage-serving, ${this.pushVouch.size} push-vouched -> vouching ${this.freshVouchedMiners(now).length} in heartbeat`);
     } finally {
       this.storageProbeBusy = false;
     }
@@ -1320,7 +1339,16 @@ export class ZiraNode {
   private freshVouchedMiners(now: number): string[] {
     const out: string[] = [];
     for (const [a, ts] of this.verifiedMiners) if (now - ts <= ZiraNode.VOUCH_FRESH_MS) out.push(a);
-    return out;
+    // Push-vouched miners: honour a fresh signed push for its full freshness window, regardless of whether the
+    // connection happens to be up at THIS instant — that is the whole point, because a churning NAT'd link is
+    // rarely up at the exact payout tick. Keying by peerId already caps this at one address per connection (the
+    // node must have pushed over a real connection within the last PUSH_LIVENESS_MAX_AGE_MS, and must keep
+    // reconnecting to re-push), so there is no extra sybil surface beyond the reverse probe. Prune only on age.
+    for (const [peerId, v] of this.pushVouch) {
+      if (now - v.ts > PUSH_LIVENESS_MAX_AGE_MS) { this.pushVouch.delete(peerId); continue; }
+      out.push(v.address);
+    }
+    return [...new Set(out)];
   }
 
   /**
@@ -1437,6 +1465,38 @@ export class ZiraNode {
       this.lastParticipationDeferLog = bucket;
       log.warn(`field participation payout REJECTED (${payees.length} payees, bucket ${bucket}): ${res.reason ?? "no reason"}`);
     }
+  }
+
+  private settlerNonceMark = -1;
+  private settlerNonceMarkAt = 0;
+  private lastNonceUnstickAt = 0;
+  /**
+   * Settler-nonce watchdog. The settler builds each payout at provisionalNonce = committed + (its pooled txs).
+   * If a tx at the committed nonce is dropped and never re-filled (e.g. it was deleted on an old build, or a
+   * predecessor was lost), every later payout the settler issues lands at a FUTURE nonce (a gap) and can never
+   * apply — the committed nonce is empty, so nothing advances it, and the pipeline is wedged forever with NO tx
+   * sitting at the committed nonce for the settle-drain to skip. This is the "pure gap" variant of the
+   * 2026-07-05 payout freeze. Recovery must come from the settler itself (the single authority on its payouts):
+   * when its committed nonce has been stuck for SETTLER_NONCE_STUCK_MS while later payouts have piled up above
+   * it, re-issue a minimal payout at EXACTLY the committed nonce. That is a normal signed tx — it gossips and
+   * applies byte-identically on every node (no consensus rule change, fork-safe) — so it fills the hole, the
+   * nonce advances, and the queued payouts drain in order. Idempotent and self-throttled.
+   */
+  private unstickSettlerNonce(now: number): void {
+    if (!this.isNetworkSettler()) return;
+    const committed = this.state.nonceOf(this.identity.address);
+    if (committed !== this.settlerNonceMark) { this.settlerNonceMark = committed; this.settlerNonceMarkAt = now; return; } // advanced: healthy
+    if (this.state.provisionalNonce(this.identity.address) <= committed) return;   // nothing queued above committed: not wedged
+    if (now - this.settlerNonceMarkAt < SETTLER_NONCE_STUCK_MS) return;             // give a normal payout time to settle first
+    if (now - this.lastNonceUnstickAt < SETTLER_NONCE_STUCK_MS) return;             // at most one unstick attempt per window
+    this.lastNonceUnstickAt = now;
+    const tx = signTx({
+      network: this.genesis.network, from: this.identity.address, fromPubKey: this.identity.publicKey,
+      to: this.identity.address, amountUZIR: 1, feeUZIR: PROTOCOL.BASE_FEE_UZIR, nonce: committed,
+      kind: "batch_transfer", parents: [], timestamp: now, memo: JSON.stringify({ o: [[this.genesis.founder, 1]] }),
+    }, this.identity.privateKey);
+    const r = this.submitTx(tx);
+    log.warn(`settler nonce wedged at ${committed} while payouts queued above it; re-issued a committed-nonce payout to drain the pipeline (accepted=${r.accepted}${r.reason ? " " + r.reason : ""})`);
   }
 
   /**
@@ -1983,9 +2043,26 @@ export class ZiraNode {
   /** Answer a liveness/coordination challenge: return our address + a signature over the master's nonce, so
    * the master can confirm we are a real, directly-reachable, participating peer (the baseline coordination
    * work that earns even without holding model bytes). */
-  private async *serveLiveness(req: Uint8Array): AsyncIterable<Uint8Array> {
-    let nonce = "";
-    try { nonce = String((JSON.parse(dec.decode(req)) as { nonce?: unknown }).nonce ?? "").slice(0, 96); } catch { /* empty nonce still signs */ }
+  private async *serveLiveness(req: Uint8Array, from: string): AsyncIterable<Uint8Array> {
+    let msg: { nonce?: unknown; push?: unknown; address?: unknown; pubKey?: unknown; ts?: unknown; sig?: unknown } = {};
+    try { msg = JSON.parse(dec.decode(req)) as typeof msg; } catch { /* empty */ }
+    // PUSH: a miner proactively asserts liveness over its OWN outbound connection (churn/NAT-resilient). Only a
+    // MASTER records it, binding the pushed address to THIS connection's peer id — one address per live
+    // connection, the same sybil bound as the reverse probe — so the miner stays vouched and paid without the
+    // master ever having to probe it back. Verified by the miner's own signature + a fresh timestamp.
+    if (msg.push === true && typeof msg.address === "string" && typeof msg.pubKey === "string" && typeof msg.sig === "string" && typeof msg.ts === "number") {
+      const now = Date.now();
+      const isMaster = this.state.isGenesisMaster(this.identity.address) || (this.state.accounts.get(this.identity.address)?.isMaster ?? false);
+      if (isMaster && from && Math.abs(now - msg.ts) <= PUSH_LIVENESS_MAX_AGE_MS &&
+          /^zir1[0-9a-z]{6,}$/.test(msg.address) && msg.address !== this.identity.address && !this.state.isGenesisMaster(msg.address) &&
+          addressFromPubKey(msg.pubKey) === msg.address && edVerify("zira-live-push:" + msg.ts, msg.sig, msg.pubKey)) {
+        this.pushVouch.set(from, { address: msg.address, ts: now });
+      }
+      yield enc.encode(JSON.stringify({ ok: true }));
+      return;
+    }
+    // CHALLENGE (reverse probe, backward compatible): sign the master's nonce so it can confirm we are live.
+    const nonce = String(msg.nonce ?? "").slice(0, 96);
     yield enc.encode(JSON.stringify({
       address: this.identity.address,
       pubKey: this.identity.publicKey,
@@ -1993,12 +2070,39 @@ export class ZiraNode {
     }));
   }
 
+  /** Push a fresh signed liveness assertion to each connected master over our own outbound connection. This is
+   *  the reliable, NAT-proof half of vouching: the master cannot always probe a churning home node back, but
+   *  the node can always reach out to the master it dialed. Self-throttled; best-effort per master. */
+  private lastPushLivenessBucket = -1;
+  private async contributePushLiveness(now: number): Promise<void> {
+    if (this.isFounder()) return;
+    if (this.state.isGenesisMaster(this.identity.address)) return;   // masters vouch on push; they do not push
+    if (!this.models.miningEnabled() && !this.models.storageState().enabled) return;
+    const bucket = Math.floor(now / PUSH_LIVENESS_INTERVAL_MS);
+    if (bucket === this.lastPushLivenessBucket) return;
+    this.lastPushLivenessBucket = bucket;
+    const seeds = this.net.seedPeers?.() ?? [];
+    if (!seeds.length) return;
+    const body = enc.encode(JSON.stringify({
+      push: true, address: this.identity.address, pubKey: this.identity.publicKey, ts: now,
+      sig: edSign("zira-live-push:" + now, this.identity.privateKey),
+    }));
+    for (const peerId of seeds) void this.net.request(peerId, LIVENESS_PROTOCOL, body, 8_000).catch(() => { /* best effort; retry next bucket */ });
+  }
+
   /** Probe a directly-connected peer's liveness. Returns its verified ZIR address, or null if it did not
    * answer a fresh signed challenge. Bounded by the request timeout so a stalled peer never blocks. */
   private async verifyPeerLive(peerId: string): Promise<string | null> {
+    // A single bounded, env-tunable probe. This is now the SECONDARY vouch path: a churning NAT/home node that
+    // the master cannot reliably reach back is carried instead by push liveness (contributePushLiveness ->
+    // serveLiveness -> pushVouch), so the reverse probe is kept deliberately light — one attempt, no retry
+    // storm — to avoid piling concurrent streams onto the settler (which itself worsens the connection churn
+    // it is trying to measure). Consensus-safe: this only widens which miners this master vouches for, which
+    // rides on its own signed observation/payout.
+    const timeout = Number(process.env.ZIRA_LIVENESS_PROBE_TIMEOUT_MS ?? 10_000);
     const nonce = `${Date.now()}:${this.liveNonce++}:${peerId.slice(0, 10)}`;
     try {
-      const frames = await this.net.request(peerId, LIVENESS_PROTOCOL, enc.encode(JSON.stringify({ nonce })), 8_000);
+      const frames = await this.net.request(peerId, LIVENESS_PROTOCOL, enc.encode(JSON.stringify({ nonce })), timeout);
       if (!frames[0]) return null;
       const r = JSON.parse(dec.decode(frames[0])) as { address?: string; pubKey?: string; sig?: string };
       if (!r.address || !r.pubKey || !r.sig) return null;
