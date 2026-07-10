@@ -9,7 +9,7 @@ import { createClient, getClientMode, isLocalNode, type ClientMode } from "../cl
 import { NodeApi, type StatusInfo, type ProviderStatus, type MiningStatus, type MiningPatch, type LocalLaunchMinerSummary } from "../lib/nodeApi";
 import { Wallet } from "../lib/keys";
 import { hasNodeFeature } from "../lib/version-compat";
-import { probeStats, qualityFor, type ConnectionQuality } from "../lib/connection";
+import { probeStats, qualityFor, fetchNetworkView, type ConnectionQuality } from "../lib/connection";
 
 export type NotificationKind =
   | "payment_received" | "task_assigned" | "task_delivered" | "task_completed"
@@ -61,6 +61,11 @@ interface ZiraState {
   hasWallet: boolean;
   unlocked: boolean;
   balanceUZIR: number;
+  // True when we are on a LOCAL node whose applied state trails the network: the network-consensus gateway
+  // has emitted more (its epoch is ahead) and reports a settled balance the local node has not caught up to.
+  // When set, balanceUZIR/history are shown from the authoritative network view and the UI shows a subtle
+  // "your node is catching up" note, so a lagging home node never reads as lost earnings. Display-only.
+  nodeBehind: boolean;
   // Node-custody wallet: on a local node (desktop app, or a browser pointed at a node on this machine)
   // the active wallet IS the node's own identity, i.e. the wallet it mines into. The key stays on the
   // node; the Console shows its address/balance and spends via the loopback-gated /wallet/send RPC. On
@@ -144,6 +149,15 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 let visibilityHooked = false;
 const ZTI_MILESTONES = [0.5, 0.7, 0.9];
 
+// Throttle + cache for the local-node balance reconciliation (refresh()). The poll runs every 6s but we
+// only cross-check the network-consensus gateway every NET_VIEW_TTL_MS, reusing the last view in between,
+// so a fleet of desktop nodes does not hammer the public gateway. The cache is keyed by address; a wallet
+// switch invalidates it.
+const NET_VIEW_TTL_MS = 20_000;
+let netViewAt = 0;
+let netViewAddr = "";
+let netView: { balanceUZIR: number; emittedUZIR: number } | null = null;
+
 export const useZira = create<ZiraState>((set, get) => ({
   client: null,
   mode: null,
@@ -153,6 +167,7 @@ export const useZira = create<ZiraState>((set, get) => ({
   nodeWallet: false,
   unlocked: false,
   balanceUZIR: 0,
+  nodeBehind: false,
   minerAddress: null,
   minerBalanceUZIR: 0,
   stats: null,
@@ -257,8 +272,31 @@ export const useZira = create<ZiraState>((set, get) => ({
         stewardActionsGated: isStewardWallet && !isFounder,
       };
       if (address) {
-        const next = await client.getBalanceUZIR(address);
+        const local = await client.getBalanceUZIR(address);
+        let next = local;
+        let nodeBehind = false;
+        // Authoritative reconciliation for LOCAL nodes: a churny home miner keeps finalizing but can miss a
+        // gossiped payout tx, so its own balanceOf(self) trails the mesh and the wallet looked empty even
+        // though every master credited it. Cross-check the network-consensus gateway (best-effort, read-only)
+        // and, when its epoch is genuinely ahead (strictly higher emittedUZIR, the monotonic pure-epoch
+        // counter), show its settled balance. On a tie the LOCAL value wins, so a just-sent local debit the
+        // gateway has not gossiped yet is never masked. Never blocks the poll: on any gateway error we keep
+        // the local value. The local node keeps self-healing in the background (divergence/catch-up watchdogs).
+        if (isLocalNode()) {
+          const now = Date.now();
+          if (netViewAddr !== address) { netView = null; netViewAddr = address; netViewAt = 0; }
+          if (now - netViewAt > NET_VIEW_TTL_MS) {
+            const fresh = await fetchNetworkView(address).catch(() => null);
+            if (fresh?.ok) { netView = { balanceUZIR: fresh.balanceUZIR, emittedUZIR: fresh.emittedUZIR }; netViewAt = now; }
+          }
+          const localEmitted = Number((stats as NetworkStats).emittedUZIR ?? 0);
+          if (netView && netView.emittedUZIR > localEmitted) {
+            next = netView.balanceUZIR;
+            nodeBehind = true;
+          }
+        }
         patch.balanceUZIR = next;
+        patch.nodeBehind = nodeBehind;
         // payment notification on a credit (skip the very first poll where prevBalance is 0/unset)
         if (prevBalance > 0 && next > prevBalance) {
           get().pushNotification({ kind: "payment_received", title: "Payment received", body: `+${((next - prevBalance) / 1_000_000).toFixed(2)} ZIR`, href: "/wallet" });
@@ -323,8 +361,10 @@ export const useZira = create<ZiraState>((set, get) => ({
         // Don't let a poll drop a positive balance to exactly 0: a local node still catching up reports
         // balanceOf(self)=0 until it applies the epoch that paid it, then jumps to the real value. Treat
         // 0-after-positive as a sync artifact and keep the last good value; the settled /balance read in
-        // refresh() remains authoritative for real decreases.
-        if (typeof st.balanceUZIR === "number" && !(st.balanceUZIR === 0 && (prev.balanceUZIR ?? 0) > 0)) patch.balanceUZIR = st.balanceUZIR;
+        // refresh() remains authoritative for real decreases. Also skip entirely when refresh() has flagged
+        // the node as behind the mesh: there the authoritative network-consensus balance already won, and
+        // this local self-read would clobber it back to the stale value.
+        if (!prev.nodeBehind && typeof st.balanceUZIR === "number" && !(st.balanceUZIR === 0 && (prev.balanceUZIR ?? 0) > 0)) patch.balanceUZIR = st.balanceUZIR;
       }
       if (st.address) {
         try {

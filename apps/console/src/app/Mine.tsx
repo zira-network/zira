@@ -15,6 +15,7 @@ import { canonical, DOMAIN_META, PROTOCOL, type Domain, type HardwareProfile, ty
 import { formatZir, timeAgo } from "../lib/format";
 import { cn } from "../lib/cn";
 import { useZira } from "../store/useZira";
+import { loadReconciledHistory } from "../lib/history";
 import { useUnlock } from "../store/useUnlock";
 import { Wallet } from "../lib/keys";
 import { isDesktop } from "../lib/platform";
@@ -443,6 +444,7 @@ const HISTORY_PERIODS = [
 
 function EarningsHistory({ address }: { address: string | null }) {
   const { client } = useZira();
+  const nodeBehind = useZira((s) => s.nodeBehind);
   const [history, setHistory] = useState<SignedTx[]>([]);
   const [period, setPeriod] = useState<(typeof HISTORY_PERIODS)[number]["key"]>("24H");
   const [expanded, setExpanded] = useState(false);
@@ -454,13 +456,15 @@ function EarningsHistory({ address }: { address: string | null }) {
     let live = true;
     if (client && address) {
       setLoading(true); setError(null);
-      client.getTxHistory(address, 500)
+      // Reconcile against the network gateway when the local node is behind, so a lagging home miner's
+      // earnings history is never under-reported here (the tab where a miner most wants to see it).
+      loadReconciledHistory(client, address, 500, nodeBehind)
         .then((h) => { if (live) { setHistory(h); setError(null); } })
         .catch((e) => { if (live) setError(e instanceof Error ? e.message : "Could not load earnings history."); })
         .finally(() => { if (live) setLoading(false); });
     }
     return () => { live = false; };
-  }, [client, address, reload]);
+  }, [client, address, reload, nodeBehind]);
 
   const active = HISTORY_PERIODS.find((p) => p.key === period)!;
   const earned = useMemo(() => {
@@ -536,7 +540,7 @@ function HowYouEarn() {
 export function Mine() {
   const toast = useToast();
   const { mode, isFounder, stats, balanceUZIR, hardware, nodeConfig, providerStatus, mining, localLaunchMiners, zti, address, locks, client,
-    minerAddress, minerBalanceUZIR, setMining, refreshStatus } = useZira();
+    minerAddress, minerBalanceUZIR, nodeBehind, setMining, refreshStatus } = useZira();
   // Earnings shown here are read from the ledger (the authoritative source the wallet and Earnings history
   // use), not from provider inference counters, a coordination node earns emission/coordination payouts
   // that never touch the inference counter, so those must come from the signed ledger to be truthful.
@@ -545,7 +549,7 @@ export function Mine() {
     if (!client || !address) { setEarned24hUZIR(0); return; }
     let live = true;
     const pull = () => {
-      client.getTxHistory(address, 200)
+      loadReconciledHistory(client, address, 200, nodeBehind)
         .then((h) => {
           if (!live) return;
           const now = Date.now();
@@ -562,7 +566,7 @@ export function Mine() {
     // not re-pull the full history several times a second.
     const t = setInterval(pull, 30_000);
     return () => { live = false; clearInterval(t); };
-  }, [client, address]);
+  }, [client, address, nodeBehind]);
   const [busy, setBusy] = useState(false);
   const [hardwareBusy, setHardwareBusy] = useState(false);
   const [advanced, setAdvanced] = useState(false);

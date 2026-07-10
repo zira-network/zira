@@ -391,6 +391,18 @@ export class ZiraNode {
 
   private dataDir: string;
   private decentralizationActivationEpoch?: number;
+  // SETTLER_PAUSE: an ops recovery lever. When ZIRA_SETTLER_PAUSE=1, this node issues NO settler payout,
+  // coordination, or nonce-filler txs — so the masters advance on pure-epoch emission ONLY. A diverged fleet
+  // (a stuck settler-nonce fork) can then be walked deterministically past the stuck epoch: with no settler tx
+  // there is no per-node divergence source, every master computes the identical emission-only root, finality
+  // crosses, and payouts are re-enabled (pause cleared) once the chain is live again. Off by default. Declared
+  // BEFORE the constructor so its field initializer runs before restoreSettlerProgress (a field declared after
+  // the ctor initializes AFTER the ctor body under this build's emit, clobbering the restored value).
+  private readonly settlerPaused = process.env.ZIRA_SETTLER_PAUSE === "1";
+  // Idempotent nonce-filler bookkeeping (see unstickSettlerNonce): the timestamp chosen ONCE per stuck committed
+  // nonce, persisted so a restart rebuilds the byte-identical filler instead of a fresh tx id at the same nonce.
+  // MUST be declared before the ctor (see settlerPaused note) so restoreSettlerProgress is not overwritten.
+  private stuckFiller: { nonce: number; ts: number } | null = null;
 
   constructor(
     genesis: GenesisDoc,
@@ -558,6 +570,9 @@ export class ZiraNode {
     if (saved.minerAnswerCredits && typeof saved.minerAnswerCredits === "object") {
       this.minerAnswerCredits = new Map(Object.entries(saved.minerAnswerCredits).filter(([, v]) => typeof v === "number") as [string, number][]);
     }
+    if (saved.stuckFiller && typeof saved.stuckFiller.nonce === "number" && typeof saved.stuckFiller.ts === "number") {
+      this.stuckFiller = { nonce: saved.stuckFiller.nonce, ts: saved.stuckFiller.ts };   // rebuild the identical filler after a restart
+    }
     log.info(`settler progress restored: participationBucket=${this.lastParticipationBucket} resonanceBucket=${this.lastAutonomousResonanceBucket} paidRewards=${this.paidResonatorRewards.size} settledQueries=${this.settledCoordinationQueries.size} answerCredits=${this.minerAnswerCredits.size}`);
   }
 
@@ -572,12 +587,13 @@ export class ZiraNode {
   }
 
   /** Current settler payout watermarks (diagnostics + tests). Reflects what this node has already settled. */
-  settlerProgress(): { lastParticipationBucket: number; lastAutonomousResonanceBucket: number; paidResonatorRewards: number; settledCoordinationQueries: number } {
+  settlerProgress(): { lastParticipationBucket: number; lastAutonomousResonanceBucket: number; paidResonatorRewards: number; settledCoordinationQueries: number; stuckFiller: { nonce: number; ts: number } | null } {
     return {
       lastParticipationBucket: this.lastParticipationBucket,
       lastAutonomousResonanceBucket: this.lastAutonomousResonanceBucket,
       paidResonatorRewards: this.paidResonatorRewards.size,
       settledCoordinationQueries: this.settledCoordinationQueries.size,
+      stuckFiller: this.stuckFiller,
     };
   }
 
@@ -590,6 +606,7 @@ export class ZiraNode {
         paidResonatorRewards: [...this.paidResonatorRewards],
         settledCoordinationQueries: [...this.settledCoordinationQueries],
         minerAnswerCredits: Object.fromEntries(this.minerAnswerCredits),
+        stuckFiller: this.stuckFiller ?? undefined,
       });
     } catch { /* best effort; in-memory guard still holds until next restart */ }
   }
@@ -1215,7 +1232,7 @@ export class ZiraNode {
     // late joiners. Cheap: the pool is small and drains every epoch.
     this.regossipEvery = (this.regossipEvery + 1) % 4;
     if (this.regossipEvery === 0) {
-      const pool = this.state.poolEvents(50);
+      const pool = this.state.poolEvents(400);
       for (const tx of pool.txs) this.publish(this.topics.events, { t: "tx", data: tx });
       for (const o of pool.observations) this.publish(this.topics.events, { t: "observation", data: o });
       // Backfill: also re-broadcast recently-APPLIED txs, not only pooled ones. Once a tx is applied it leaves
@@ -1224,7 +1241,13 @@ export class ZiraNode {
       // state root and stalling quorum finality. Re-gossiping the recent applied window lets a lagging master
       // fill the gap and converge. Idempotent: a node that already has a tx de-dupes it by id, and the wide
       // settle window (SETTLE_ROUNDS) gives these backfills time to land before their epoch finalizes anywhere.
-      for (const tx of this.state.recentHistory(null, 80)) this.publish(this.topics.events, { t: "tx", data: tx });
+      for (const tx of this.state.recentHistory(null, 300)) this.publish(this.topics.events, { t: "tx", data: tx });
+      // Re-gossip recent UNFINALIZED votes so a vote lost to a gossipsub mesh race still reaches quorum. Each
+      // epoch's vote is cast exactly once (voteCheckpoints), so without this a single lost vote permanently
+      // splits that epoch's votes and freezes finality — no master ever re-sends, so the split never heals.
+      // This was the 2026-07-11 box1 freeze: masters diverged/lost votes on an epoch and never re-converged.
+      // Signed + de-duped by isVoteKnown; consensus-neutral (only re-sends existing votes, never a new root).
+      for (const vote of this.checkpoints.recentUnfinalizedVotes(200)) this.publish(this.topics.consensus, { t: "checkpoint", data: vote });
       // Re-gossip the latest finalized checkpoint so followers converge finality even when the
       // one-shot vote at finalization time lost a gossipsub mesh race (common on a fresh single-peer
       // join). Without this a late joiner advances its currentEpoch by wall clock but its
@@ -1268,7 +1291,12 @@ export class ZiraNode {
       this.seedAnchorResonators();
     }
     // task reaper: expire undelivered tasks, auto-release silently-verified ones.
-    if (now - this.lastReapAt >= this.opts.taskReapMs) { this.lastReapAt = now; this.reapTasks(now); this.coordinateAutonomousResonance(now); this.settleFieldParticipation(now); this.unstickSettlerNonce(now); }
+    if (now - this.lastReapAt >= this.opts.taskReapMs) {
+      this.lastReapAt = now; this.reapTasks(now);
+      // Skip ALL settler payout/coordination/filler issuance while paused (ops recovery: pure-emission-only
+      // advancement walks a diverged fleet past a stuck fork). Reaping tasks above is safe (no balance txs).
+      if (!this.settlerPaused) { this.coordinateAutonomousResonance(now); this.settleFieldParticipation(now); this.unstickSettlerNonce(now); }
+    }
     // Field heartbeat: contributing (mining/storage) nodes attest participation so PoR Locks form and the
     // round emission flows to them (storage-weighted). Self-throttled to FIELD_HEARTBEAT_INTERVAL_MS.
     this.contributeFieldHeartbeat(now);
@@ -1547,20 +1575,37 @@ export class ZiraNode {
    * nonce advances, and the queued payouts drain in order. Idempotent and self-throttled.
    */
   private unstickSettlerNonce(now: number): void {
+    if (this.settlerPaused) return;                                                 // recovery pause: issue nothing
     if (!this.isNetworkSettler()) return;
     const committed = this.state.nonceOf(this.identity.address);
-    if (committed !== this.settlerNonceMark) { this.settlerNonceMark = committed; this.settlerNonceMarkAt = now; return; } // advanced: healthy
+    if (committed !== this.settlerNonceMark) {                                       // advanced: healthy
+      this.settlerNonceMark = committed; this.settlerNonceMarkAt = now;
+      // The nonce moved on, so any filler we chose for an EARLIER stuck nonce is spent; forget it (and persist)
+      // so a future wedge picks a fresh, recent timestamp rather than reusing a stale one.
+      if (this.stuckFiller && this.stuckFiller.nonce < committed) { this.stuckFiller = null; this.persistSettlerProgress(); }
+      return;
+    }
     if (this.state.provisionalNonce(this.identity.address) <= committed) return;   // nothing queued above committed: not wedged
     if (now - this.settlerNonceMarkAt < SETTLER_NONCE_STUCK_MS) return;             // give a normal payout time to settle first
     if (now - this.lastNonceUnstickAt < SETTLER_NONCE_STUCK_MS) return;             // at most one unstick attempt per window
     this.lastNonceUnstickAt = now;
+    // IDEMPOTENT filler. The ONLY non-deterministic field of the filler is its timestamp; with `timestamp: now`
+    // a restart (or a later re-issue) minted a NEW tx id at the SAME committed nonce, so different masters applied
+    // different fillers and forked the head root — the 2026-07-10 finality freeze. Fix: choose the timestamp ONCE
+    // per stuck committed nonce and PERSIST it, so every re-issue — across restarts and across nodes that later
+    // become the settler — rebuilds the byte-identical tx. One tx per nonce => it can never fork. The first pick
+    // is `now` so the filler's epoch is recent (dodges the fast-sync-floor drop for a freshly-realigned node).
+    if (!this.stuckFiller || this.stuckFiller.nonce !== committed) {
+      this.stuckFiller = { nonce: committed, ts: now };
+      this.persistSettlerProgress();
+    }
     const tx = signTx({
       network: this.genesis.network, from: this.identity.address, fromPubKey: this.identity.publicKey,
       to: this.identity.address, amountUZIR: 1, feeUZIR: PROTOCOL.BASE_FEE_UZIR, nonce: committed,
-      kind: "batch_transfer", parents: [], timestamp: now, memo: JSON.stringify({ o: [[this.genesis.founder, 1]] }),
+      kind: "batch_transfer", parents: [], timestamp: this.stuckFiller.ts, memo: JSON.stringify({ o: [[this.genesis.founder, 1]] }),
     }, this.identity.privateKey);
     const r = this.submitTx(tx);
-    log.warn(`settler nonce wedged at ${committed} while payouts queued above it; re-issued a committed-nonce payout to drain the pipeline (accepted=${r.accepted}${r.reason ? " " + r.reason : ""})`);
+    log.warn(`settler nonce wedged at ${committed} while payouts queued above it; re-issued an IDEMPOTENT committed-nonce filler (ts=${this.stuckFiller.ts}) to drain the pipeline (accepted=${r.accepted}${r.reason ? " " + r.reason : ""})`);
   }
 
   /**
@@ -2120,6 +2165,9 @@ export class ZiraNode {
   private finalizedProgressAt = 0;
   private resyncInFlight = false;
   private lastResyncAt = 0;
+  // Consecutive stall-resyncs that found NO advanced peer. Drives an exponential backoff so a whole cluster
+  // stuck at the same epoch does not resync-thrash in lockstep (the 2026-07-10 box1 CPU-saturation stall).
+  private resyncFailStreak = 0;
   // State-divergence watchdog bookkeeping (see maybeResyncOnDivergence). Our own recorded root per settle epoch,
   // a streak of finalized epochs whose consensus root disagreed with ours, and rate-limit stamps.
   private localRootByEpoch = new Map<number, string>();
@@ -2306,12 +2354,20 @@ export class ZiraNode {
   private maybeResyncOnStall(now: number): void {
     if (!this.opts.fastSync || process.env.ZIRA_FULL_SYNC === "1") return;
     const fin = this.checkpoints.lastFinalizedEpoch;
-    if (fin > this.lastFinalizedSeen) { this.lastFinalizedSeen = fin; this.finalizedProgressAt = now; return; }
+    if (fin > this.lastFinalizedSeen) { this.lastFinalizedSeen = fin; this.finalizedProgressAt = now; this.resyncFailStreak = 0; return; }
     if (this.finalizedProgressAt === 0) { this.finalizedProgressAt = now; return; } // arm on first observation
     if (now - this.finalizedProgressAt < this.resyncStallMs) return;
     if (this.state.lastProcessedEpoch - fin < this.resyncMinGap) return;
     if (this.net.peerCount() === 0) return;
-    if (this.resyncInFlight || now - this.lastResyncAt < this.resyncCooldownMs) return;
+    // De-thrash (2026-07-10 box1 CPU-saturation incident): when a whole cluster is stuck at the SAME epoch,
+    // every node fired a heavy full-snapshot resync every cooldown, all in lockstep — pegging CPU so no node
+    // could process the heartbeat gossip that would restore quorum (a self-reinforcing stall). Back off
+    // EXPONENTIALLY once resyncs stop finding an advanced peer (capped at 15 min), plus a deterministic
+    // per-node jitter so the masters never resync in unison. Consensus-neutral: this only changes WHEN a
+    // snapshot is pulled, never what is computed or voted.
+    const backoff = Math.min(this.resyncCooldownMs * 2 ** Math.min(this.resyncFailStreak, 5), 900_000);
+    const jitter = (this.identity.address.charCodeAt(5) * 911) % 45_000;
+    if (this.resyncInFlight || now - this.lastResyncAt < backoff + jitter) return;
     this.lastResyncAt = now;
     log.warn(`finality stalled: finalizedEpoch ${fin} unchanged for ${Math.round((now - this.finalizedProgressAt) / 1000)}s (processed ${this.state.lastProcessedEpoch}); attempting resync from peers`);
     void this.attemptResyncFromPeers();
@@ -2389,6 +2445,7 @@ export class ZiraNode {
   private async attemptResyncFromPeers(): Promise<void> {
     if (this.resyncInFlight) return;
     this.resyncInFlight = true;
+    let adopted = false;
     try {
       const got: Snap[] = [];
       for (const p of this.net.peers().slice(0, 5)) {
@@ -2412,9 +2469,13 @@ export class ZiraNode {
       this.checkpoints.lastFinalizedRoot = best.finalizedRoot;
       this.lastFinalizedSeen = best.finalizedEpoch;
       this.finalizedProgressAt = Date.now();
+      adopted = true;
       log.info(`resynced past finality stall: adopted verified snapshot at finalized epoch ${best.finalizedEpoch} (dropped ${dropped.txs} txs/${dropped.observations} obs already in snapshot); finality resuming`);
     } finally {
       this.resyncInFlight = false;
+      // A resync that adopted nothing means no peer was ahead (the cluster is stuck together) — grow the
+      // backoff so we stop hammering CPU; a real adoption resets it. See maybeResyncOnStall.
+      if (adopted) this.resyncFailStreak = 0; else this.resyncFailStreak++;
     }
   }
 

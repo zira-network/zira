@@ -21,6 +21,7 @@ import { pipe } from "it-pipe";
 import * as lp from "it-length-prefixed";
 import { generateKeyPair, privateKeyToProtobuf, privateKeyFromProtobuf } from "@libp2p/crypto/keys";
 import { multiaddr } from "@multiformats/multiaddr";
+import { peerIdFromString, peerIdFromPrivateKey } from "@libp2p/peer-id";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { ZiraNetwork } from "./Network.js";
@@ -80,8 +81,21 @@ export class Libp2pNetwork implements ZiraNetwork {
       `/ip4/0.0.0.0/tcp/${this.opts.wsPort}/ws`,
       "/p2p-circuit",   // accept relayed inbound, so peers behind NAT/CGNAT are reachable via a relay
     ];
-    const pubsub = gossipsub({ allowPublishToZeroTopicPeers: true, emitSelf: false, fallbackToFloodsub: true });
     const privateKey = await this.loadOrCreatePeerKey();
+    // Pin the round-critical seed/master peers into the gossip mesh as DIRECT PEERS: gossipsub keeps a
+    // maintained connection to them AND always keeps them in the topic mesh, never pruning them in favor of
+    // the many external peers. The 2026-07-10 finality freeze was exactly this failure mode — the box1
+    // masters stayed "connected" yet gossipsub pruned them out of each other's mesh under peer crowding, so
+    // votes/heartbeats stopped propagating between masters and quorum finality froze at a fixed epoch. Direct
+    // peers are derived from the configured seed/announce multiaddrs (the dialable masters), excluding self.
+    let selfId: string | undefined;
+    try { selfId = peerIdFromPrivateKey(privateKey).toString(); } catch { /* best effort; self-filter below just no-ops */ }
+    const directPeers = [...new Set([...this.opts.bootstrap, ...this.opts.announce])]
+      .map((a) => { try { return multiaddr(a); } catch { return null; } })
+      .filter((ma): ma is ReturnType<typeof multiaddr> => !!ma && !!ma.getPeerId() && ma.getPeerId() !== selfId)
+      .map((ma) => ({ id: peerIdFromString(ma.getPeerId()!), addrs: [ma] }));
+    if (directPeers.length) log.info(`gossipsub: pinning ${directPeers.length} direct peer(s) (round-critical seeds/masters, never pruned)`);
+    const pubsub = gossipsub({ allowPublishToZeroTopicPeers: true, emitSelf: false, fallbackToFloodsub: true, ...(directPeers.length ? { directPeers } : {}) });
 
     this.node = await createLibp2p({
       privateKey,

@@ -110,6 +110,22 @@ export class Checkpoints {
   /** The stored votes for a given (epoch, root). Used by fast-sync to prove a finalized checkpoint. */
   finalizingVotes(epoch: number, root: string): SignedCheckpointVote[] { return this.votes.get(epoch)?.get(root) ?? []; }
 
+  /** All stored votes for epochs NOT yet finalized, newest-epoch first, bounded. Used to re-gossip when
+   *  finality stalls: each epoch's vote is cast ONCE, so a vote lost to a gossipsub mesh race is never resent
+   *  and that epoch can never reach quorum — a single lost vote permanently splits it and freezes finality.
+   *  Re-broadcasting is idempotent (signed + de-duped by isVoteKnown on the receiver) and consensus-neutral:
+   *  it only re-sends votes that already exist, never invents a new root. */
+  recentUnfinalizedVotes(limit = 200): SignedCheckpointVote[] {
+    const out: SignedCheckpointVote[] = [];
+    const epochs = [...this.votes.keys()].filter((e) => !this.finalized.has(e)).sort((a, b) => b - a);
+    for (const e of epochs) {
+      const byRoot = this.votes.get(e);
+      if (!byRoot) continue;
+      for (const arr of byRoot.values()) for (const v of arr) { out.push(v); if (out.length >= limit) return out; }
+    }
+    return out;
+  }
+
   isVoteKnown(id: string): boolean { return this.seen.has(id); }
   recentFinalized(limit: number): FinalizedCheckpoint[] {
     return [...this.finalized.values()].sort((a, b) => b.epoch - a.epoch).slice(0, limit);

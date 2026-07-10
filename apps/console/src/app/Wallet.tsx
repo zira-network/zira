@@ -10,7 +10,7 @@ import { Card, Button, Input, Badge, Meter, Modal, Select, useToast, EmptyState,
 import { useZira } from "../store/useZira";
 import { useUnlock } from "../store/useUnlock";
 import { extractPrivateKeyInput, Wallet } from "../lib/keys";
-import { NodeClient, PUBLIC_GATEWAYS } from "../client/NodeClient";
+import { loadReconciledHistory } from "../lib/history";
 import { NodeApi, type ZtiSnapshot, type EventsStatus } from "../lib/nodeApi";
 import { makeSignedTx, zirToUzir } from "../lib/tx";
 import { formatZir, formatUZir, shortAddress, shortHash, timeAgo } from "../lib/format";
@@ -23,6 +23,7 @@ export function WalletPage() {
   const unlocked = useZira((s) => s.unlocked);
   const client = useZira((s) => s.client);
   const balanceUZIR = useZira((s) => s.balanceUZIR);
+  const nodeBehind = useZira((s) => s.nodeBehind);
   const setUnlocked = useZira((s) => s.setUnlocked);
   const request = useUnlock((s) => s.request);
   const toast = useToast();
@@ -36,18 +37,9 @@ export function WalletPage() {
     setHistoryLoading(true);
     setHistoryError("");
     try {
-      let txs = await client.getTxHistory(address, 80);
-      // A freshly-synced local node only holds the recent tx window, so an imported (older) wallet can
-      // look history-less here even though it earned for weeks. When the local answer is empty, read the
-      // public gateway too, it serves the network's shared view of this address's recent activity.
-      if (txs.length === 0) {
-        for (const gateway of PUBLIC_GATEWAYS) {
-          try {
-            txs = await new NodeClient(gateway, false).getTxHistory(address, 80);
-            if (txs.length > 0) break;
-          } catch { /* gateway briefly unreachable: try the next */ }
-        }
-      }
+      // Local node first, reconciled against the public gateways when empty or when the node is behind the
+      // mesh, so an imported/older wallet or a lagging home miner still shows its full earning history.
+      const txs = await loadReconciledHistory(client, address, 80, nodeBehind);
       setHistory(txs);
     } catch (e) {
       setHistoryError(e instanceof Error ? e.message : "Could not load wallet history.");
@@ -59,7 +51,7 @@ export function WalletPage() {
   useEffect(() => {
     void loadHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, address, balanceUZIR]);
+  }, [client, address, balanceUZIR, nodeBehind]);
 
   if (!hasWallet) {
     return (
@@ -176,6 +168,7 @@ function Sparkline({ data }: { data: number[] }) {
 function BalanceCard() {
   const balanceUZIR = useZira((s) => s.balanceUZIR);
   const network = useZira((s) => s.network);
+  const nodeBehind = useZira((s) => s.nodeBehind);
   const share = (balanceUZIR / PROTOCOL.MAX_SUPPLY_UZIR) * 100;
   return (
     <Card className="relative overflow-hidden">
@@ -183,6 +176,11 @@ function BalanceCard() {
       <div className="mono mt-1 text-4xl font-semibold gradient-text">{formatZir(balanceUZIR)} <span className="text-xl">ZIR</span></div>
       <div className="mono mt-1 text-xs text-faint">{formatUZir(balanceUZIR)} uZIR</div>
       <div className="mt-3 text-xs text-faint">{share.toFixed(9)}% of the total supply</div>
+      {nodeBehind && (
+        // Your settled network balance, shown from the shared network view while your own node finishes
+        // catching up. It reconciles on its own in the background; nothing is lost, nothing to do.
+        <div className="mt-2 text-[11px] text-[var(--teal)]">Settled on the network. Your node is catching up.</div>
+      )}
     </Card>
   );
 }
