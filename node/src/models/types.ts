@@ -28,6 +28,11 @@ export interface ModelMeta {
   // (reconcileStorage prioritizes assigned models ahead of gap-filling). Part of the signed meta, so the
   // assignment is authenticated by the launch authority. Older models default to undefined (not assigned).
   assigned?: boolean;
+  // Steward deprecation: when true, the launch authority has retired this model — nodes stop selecting it to
+  // serve (see bestLocalModelId), so an incompatible or superseded model (an arch the bundled engine cannot
+  // load, e.g. gemma-4-e4b) no longer crash-loops the inference subprocess. Signed into the meta and shipped
+  // as a higher-version re-announce that onAnnounce adopts. Older models default to undefined.
+  deprecated?: boolean;
   ts: number;
 }
 

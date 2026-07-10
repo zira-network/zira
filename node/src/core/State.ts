@@ -13,10 +13,10 @@
 import {
   PROTOCOL, ANCHOR_CLASSES, ANCHOR_CLASS_ZTI, ANCHOR_ACTIVATION_ENABLED, anchorSeatAllocationUZIR,
   hashHex, canonical, buildObservationBody, addressFromPubKey, verify as edVerify,
-  verifyTx, feeAndBurn, parseBatchOutputs,
+  verifyTx, feeAndBurn, parseBatchOutputs, parsePoolPayout,
   trustWeightedMedian, cv as cvOf, accuracyScore, emaAccuracy, consistencyScore, composeZti,
   perRoundReward,
-  applyGenesis, computeStateRoot,
+  applyGenesis, computeStateRoot, decentralizationActive,
   addUZIR, subUZIR,
   type SignedTx, type SignedObservation, type Lock, type GenesisDoc, type Address, type Domain,
   type AccountLeaf, type SupplyState, type Anchor, type AnchorTxPayload,
@@ -82,6 +82,17 @@ export class State {
   lockLog: Lock[] = [];                      // recent locks, capped
   history: LedgerEntry[] = [];               // recent committed ledger entries, capped
   anchors = new Map<string, Anchor>();        // consensus-visible ZRC-1 structural seats
+  // Decentralization cutover: the sealed validator registry (earned-work masters + anchor holders) that
+  // may finalize alongside the genesis quorum. Sorted, deduped, capped at MAX_VALIDATORS. EMPTY until
+  // DECENTRALIZATION_ACTIVATION_EPOCH, so it is dropped from the state root and behaves exactly as before.
+  // When non-empty it is folded into computeStateRoot, so every node must seal an identical set. The Set
+  // mirror is a lookup index (not persisted; rebuilt from the array on load).
+  private validators: Address[] = [];
+  private validatorSet = new Set<Address>();
+  // Decentralization cutover: monotonic idempotency watermark for pool_payout (community payouts funded from
+  // the emission pool). Advanced only by applied pool_payout txs; a bucket <= this is rejected, so two racing
+  // settlers can never double-pay a cycle. 0 while dormant (no pool_payout exists) => dropped from the root.
+  private lastPoolPayoutBucket = 0;
 
   private txPool = new Map<string, SignedTx>();
   private obsPool = new Map<string, SignedObservation>();
@@ -118,10 +129,16 @@ export class State {
   // the pool against a predecessor that is genuinely gone. Deterministic across nodes (epochs of tx timestamps).
   private static TX_GAP_TTL_EPOCHS = 120;
 
-  constructor(genesis: GenesisDoc) {
+  // Decentralization cutover activation epoch. Defaults to the protocol constant (0 = dormant in prod, so
+  // every node on the same release agrees). An override is accepted ONLY as a test/rehearsal seam — the live
+  // cutover ships the constant in a release, never a per-node override, so nodes can never disagree.
+  private readonly decentralizationActivationEpoch: number;
+
+  constructor(genesis: GenesisDoc, activationEpochOverride?: number) {
     this.genesis = genesis;
     this.founder = genesis.founder;
     this.settler = genesis.masters?.[0]?.address ?? genesis.founder;
+    this.decentralizationActivationEpoch = activationEpochOverride ?? PROTOCOL.DECENTRALIZATION_ACTIVATION_EPOCH;
     this.setAuthorizedFounders(genesis.founders ?? [genesis.founder]);
     const seeded = applyGenesis(genesis);
     for (const [addr, bal] of Object.entries(seeded.balances)) {
@@ -504,6 +521,14 @@ export class State {
       let sum = 0; for (const [, amt] of outs) sum += amt;
       if (sum !== tx.amountUZIR) return { ok: false, isNew: false, reason: "batch_transfer amount must equal the sum of its outputs" };
     }
+    if (tx.kind === "pool_payout") {
+      const meta = parsePoolPayout(tx.memo);
+      if (!meta) return { ok: false, isNew: false, reason: "pool_payout memo is malformed" };
+      let sum = 0; for (const [, amt] of meta.outputs) sum += amt;
+      if (sum !== tx.amountUZIR) return { ok: false, isNew: false, reason: "pool_payout amount must equal the sum of its outputs" };
+      // Authorization + activation + idempotency are re-checked at APPLY time (they depend on the epoch and
+      // evolving state); ingest only validates the static shape so a malformed tx never enters the pool.
+    }
     // Do NOT reject a tx whose epoch is already processed. A tx that arrives late (gossip delay, or
     // after the empty-epoch fast-forward raced lastProcessedEpoch ahead) must still be pooled; it is
     // applied at the next processed epoch (processEpoch applies every pooled tx whose epoch is <= the one
@@ -644,6 +669,11 @@ export class State {
     // 2. field convergence over the trailing observation window ending at this epoch
     this.runField(epoch);
 
+    // 2b. re-seal the validator registry on its cadence (decentralization cutover). Runs on every node
+    // deterministically from the just-applied state, so all nodes commit an identical set. Inert (no-op)
+    // until DECENTRALIZATION_ACTIVATION_EPOCH, keeping the registry empty and the root unchanged.
+    this.sealValidators(epoch);
+
     // 3. age out observations older than the settled field window (must outlive the SETTLE_ROUNDS lag, or
     // the trailing window in runField would lose evidence before it is counted)
     const minEpoch = epoch - SETTLE_ROUNDS - WINDOW_ROUNDS + 1;
@@ -731,6 +761,41 @@ export class State {
       if (!sender.pubkey) sender.pubkey = tx.fromPubKey;
       for (const [to, amt] of outs) { const r = this.acct(to); r.balance = addUZIR(r.balance, amt, "batch credit"); }
       this.supply.burned = addUZIR(this.supply.burned, burned, "fee burn");
+      this.record({ ...tx, committedEpoch: epoch });
+      return;
+    }
+
+    if (tx.kind === "pool_payout") {
+      // Decentralization cutover: a community payout funded from the fixed emission POOL (this.settler's
+      // account), not the sender's balance, so ANY authorized settler can keep miners paid while the primary
+      // settler (box1) is offline. Fork-safe by construction:
+      //   (1) INERT until activation — rejected (nonce consumed, no money) before the activation epoch;
+      //   (2) authorization is the ROOT-COMMITTED set {genesis masters ∪ committed validators}, so every node
+      //       agrees who may spend the pool;
+      //   (3) idempotent per bucket via the root-committed watermark — a bucket already paid is a no-op, so two
+      //       racing settlers never double-pay, and settler selection can stay soft without fork risk.
+      // BOTH the outputs and the fee are funded by the POOL (this.settler), not the sender, so a fresh failover
+      // validator with ZERO balance can still keep miners paid without any pre-funding.
+      const consumeNoMoney = () => { sender.nonce += 1; if (!sender.pubkey) sender.pubkey = tx.fromPubKey; this.record({ ...tx, committedEpoch: epoch }); };
+      if (!decentralizationActive(epoch, this.decentralizationActivationEpoch)) { consumeNoMoney(); return; }         // dormant: never pays
+      const meta = parsePoolPayout(tx.memo);
+      if (!meta) { consumeNoMoney(); return; }                                  // malformed memo
+      if (tx.to !== this.settler) { consumeNoMoney(); return; }                 // `to` must name the emission pool
+      if (!this.isAuthorizedSettler(tx.from)) { consumeNoMoney(); return; }     // not a master/validator
+      if (meta.bucket <= this.lastPoolPayoutBucket) { consumeNoMoney(); return; } // already paid: idempotent
+      let sum = 0; for (const [, amt] of meta.outputs) sum += amt;
+      if (sum !== tx.amountUZIR) { consumeNoMoney(); return; }                  // amount must equal outputs sum
+      const pool = this.acct(this.settler);
+      // Underfunded pool: DROP without consuming the nonce so it retries once the pool accrues more emission
+      // (same retry semantics as a batch_transfer overspend).
+      if (pool.balance < sum + tx.feeUZIR) return;
+      const { burned } = feeAndBurn(tx.feeUZIR);
+      pool.balance = subUZIR(pool.balance, sum + tx.feeUZIR, "pool payout debit + fee");
+      sender.nonce += 1;
+      if (!sender.pubkey) sender.pubkey = tx.fromPubKey;
+      for (const [to, amt] of meta.outputs) { const r = this.acct(to); r.balance = addUZIR(r.balance, amt, "pool payout credit"); }
+      this.supply.burned = addUZIR(this.supply.burned, burned, "fee burn");
+      this.lastPoolPayoutBucket = meta.bucket;                                  // advance the root-committed watermark
       this.record({ ...tx, committedEpoch: epoch });
       return;
     }
@@ -970,7 +1035,9 @@ export class State {
     return [...this.accounts.values()].map((a) => ({ address: a.address, balance: a.balance, nonce: a.nonce }));
   }
   stateRoot(): string {
-    return computeStateRoot(this.accountLeaves(), this.supply, this.activeFounderAddresses(), this.anchorSeats());
+    // `this.validators` is empty and `lastPoolPayoutBucket` is 0 (=> both omitted, root-neutral) until the
+    // decentralization activation epoch, so the root is byte-identical to before the cutover shipped.
+    return computeStateRoot(this.accountLeaves(), this.supply, this.activeFounderAddresses(), this.anchorSeats(), this.validators, this.lastPoolPayoutBucket);
   }
 
   /**
@@ -985,11 +1052,19 @@ export class State {
    */
   totalMasterTrust(): number {
     const gated = this.genesisMasters.size > 0;
+    const active = decentralizationActive(this.lastProcessedEpoch, this.decentralizationActivationEpoch);
+    const wmap = active ? this.validatorWeightMap() : null;
     let t = 0;
     for (const a of this.accounts.values()) {
-      if (!a.isMaster) continue;
-      if (gated && !this.genesisMasters.has(a.address)) continue;
-      t += a.zti;
+      if (gated && !this.genesisMasters.has(a.address)) {
+        // Earned/anchor accounts: excluded UNLESS the decentralization cutover is active AND they are in the
+        // sealed, root-committed validator registry. A committed validator's weight is its anchor CLASS trust
+        // (A 0.95 .. F 0.45) or the master baseline for earned-only, a pure function of root-committed state,
+        // so the denominator is identical on every node. While dormant (active=false) this branch continues.
+        if (active && this.validatorSet.has(a.address)) t += wmap!.get(a.address) ?? PROTOCOL.MASTER_NODE_ZTI;
+        continue;
+      }
+      if (a.isMaster) t += a.zti;   // genesis masters (gated) or all masters (devnet/test fallback)
     }
     return t;
   }
@@ -1007,14 +1082,121 @@ export class State {
     // count toward finality, so the numerator and denominator stay consistent and a single master drop
     // cannot wedge the mesh. Devnet/test falls back to all masters (steward-only bootstrap).
     const gated = this.genesisMasters.size > 0;
+    const active = decentralizationActive(this.lastProcessedEpoch, this.decentralizationActivationEpoch);
+    const wmap = active ? this.validatorWeightMap() : null;
     const m = new Map<string, number>();
     for (const a of this.accounts.values()) {
-      if (!a.isMaster || !a.pubkey) continue;
-      if (gated && !this.genesisMasters.has(a.address)) continue;
-      m.set(a.pubkey, a.zti);
+      if (!a.pubkey) continue;
+      if (gated && !this.genesisMasters.has(a.address)) {
+        // Committed validators vote at their anchor CLASS trust (or master baseline), keyed by their signing
+        // pubkey, mirroring totalMasterTrust so numerator and denominator stay consistent. Dormant => continue.
+        if (active && this.validatorSet.has(a.address)) m.set(a.pubkey, wmap!.get(a.address) ?? PROTOCOL.MASTER_NODE_ZTI);
+        continue;
+      }
+      if (a.isMaster) m.set(a.pubkey, a.zti);
     }
     return m;
   }
+
+  /**
+   * Finality voting weight of each committed validator (decentralization cutover), keyed by address.
+   * An anchor holder votes at its BEST-owned anchor's CLASS TRUST (A 0.95, B 0.85, C 0.75, D 0.65, E 0.55,
+   * F 0.45 — the six anchor classes carry different weight), which is already committed to the state root in
+   * the anchor leaf (`a.zti`), so higher classes finalize with more weight. An earned-only validator
+   * (isMaster, no anchor) votes at the master baseline (MASTER_NODE_ZTI = 0.70). We use class TRUST, not the
+   * 6..1 routing weight, so no validator ever outweighs a genesis master (1.0) and finality can't be seized
+   * by a few top-class seats. Pure function of root-committed state (anchor ownership + class zti), so every
+   * node computes identical weights — no per-node ZTI enters the denominator.
+   */
+  private validatorWeightMap(): Map<Address, number> {
+    const m = new Map<Address, number>();
+    for (const a of this.anchors.values()) {
+      if (!a.owner || !this.validatorSet.has(a.owner)) continue;
+      m.set(a.owner, Math.max(m.get(a.owner) ?? 0, a.zti));
+    }
+    for (const addr of this.validatorSet) if (!m.has(addr)) m.set(addr, PROTOCOL.MASTER_NODE_ZTI);
+    return m;
+  }
+
+  /**
+   * Seal the validator registry (decentralization cutover). On each VALIDATOR_SEAL_INTERVAL boundary
+   * at/after activation, commit the set of NON-genesis addresses that qualify to finalize, computed
+   * purely from the just-applied (converged) state so every node seals an identical set:
+   *   - earned-work path: `isMaster` (ZTI threshold + tenure + independent supporters, already gated in
+   *     runField) exactly "like a master node."
+   *   - anchor path: owns at least one anchor seat (root-committed, scarce) — but ONLY while actually
+   *     contributing, so an anchor is a right to validate that must be BACKED BY ONGOING WORK, never a
+   *     passive seat that finalizes without serving.
+   * BOTH paths additionally require, using ONLY deterministic applied state (never per-node ingest-time
+   * state): (a) recent verifiable work — a genesis master vouched within WORK_VALIDITY_EPOCHS that the node
+   * serves/stores (lastWorkEpoch, Lock-derived); and (b) `activeEpochs > 0`, i.e. it took part in applied
+   * field convergence. (b) is critical for determinism: an account's signing `pubkey` is set both at ingest
+   * (per-node gossip timing) AND in runField (applied). Requiring activeEpochs>0 — set in the SAME runField
+   * pass that sets the pubkey — guarantees the pubkey came from applied state, so every node at the same
+   * epoch resolves the identical (address, pubkey) set. Without it, a node that merely INGESTED a heartbeat
+   * (pubkey present) would seal a member another node hasn't, forking the root. Genesis masters are excluded
+   * (they already anchor the base quorum). Deduped, sorted, capped at MAX_VALIDATORS. INERT while dormant.
+   */
+  private sealValidators(epoch: number): void {
+    if (!decentralizationActive(epoch, this.decentralizationActivationEpoch)) return;   // dormant: registry stays empty
+    // Re-seal on EVERY active processed epoch, NOT on a `epoch % INTERVAL` boundary. A modulo cadence is
+    // unsafe with the empty-epoch fast-forward: a node that fast-forwards past a boundary epoch would never
+    // seal there while an incremental node would, so their registries — and thus roots — would diverge (a
+    // fork). Sealing every processed epoch makes the registry a pure function of the applied state at
+    // `lastProcessedEpoch`, identical on every node at the same epoch.
+    const anchorOwners = new Set<Address>();
+    for (const a of this.anchors.values()) if (a.owner) anchorOwners.add(a.owner);
+    const eligible: Address[] = [];
+    for (const a of this.accounts.values()) {
+      if (this.isGenesisMaster(a.address)) continue;                     // already in the base quorum
+      // Deterministic applied-state gates only. activeEpochs>0 guarantees the pubkey is applied-state-derived
+      // (set in the same runField pass), closing the ingest-time pubkey fork; !pubkey is then a safe belt-and-
+      // braces check. recentWork ties membership to ACTUAL ongoing contribution (a master-vouched serving node).
+      if (a.activeEpochs <= 0 || !a.pubkey) continue;
+      const recentWork = a.lastWorkEpoch >= 0 && epoch - a.lastWorkEpoch <= PROTOCOL.WORK_VALIDITY_EPOCHS;
+      if (!recentWork) continue;
+      if (a.isMaster || anchorOwners.has(a.address)) eligible.push(a.address);   // earned-master OR contributing anchor holder
+    }
+    eligible.sort();
+    this.validators = eligible.slice(0, PROTOCOL.MAX_VALIDATORS);
+    this.validatorSet = new Set(this.validators);
+  }
+
+  /** The sealed validator registry (decentralization cutover); empty while dormant. Read-only view. */
+  validatorRegistry(): Address[] { return [...this.validators]; }
+
+  /** May this address issue a pool_payout? The ROOT-COMMITTED settler set: genesis masters (always) plus
+   *  sealed validators. Deterministic on every node, so pool-payout authorization can never fork. */
+  isAuthorizedSettler(address: Address): boolean {
+    return this.isGenesisMaster(address) || this.validatorSet.has(address);
+  }
+  /** The pool-payout idempotency watermark (decentralization cutover); 0 while dormant. */
+  poolPayoutBucket(): number { return this.lastPoolPayoutBucket; }
+
+  /**
+   * A read-only view of the decentralization cutover state, for RPC/monitoring (crucially, the live SHADOW
+   * proof before activation: watch that the sealed registry + weights are identical across nodes). Everything
+   * here is derived from root-committed state, so two honest nodes at the same epoch return the identical view.
+   */
+  decentralizationView(): { active: boolean; activationEpoch: number; currentEpoch: number; poolPayoutBucket: number; genesisMasterTrust: number; totalMasterTrust: number; validators: { address: Address; weight: number }[] } {
+    const active = this.decentralizationActiveNow();
+    const wmap = active ? this.validatorWeightMap() : new Map<Address, number>();
+    let genesisTrust = 0;
+    for (const a of this.accounts.values()) if (this.genesisMasters.has(a.address) && a.isMaster) genesisTrust += a.zti;
+    return {
+      active,
+      activationEpoch: this.decentralizationActivationEpoch,
+      currentEpoch: this.lastProcessedEpoch,
+      poolPayoutBucket: this.lastPoolPayoutBucket,
+      genesisMasterTrust: genesisTrust,
+      totalMasterTrust: this.totalMasterTrust(),
+      validators: this.validators.map((a) => ({ address: a, weight: wmap.get(a) ?? PROTOCOL.MASTER_NODE_ZTI })),
+    };
+  }
+  /** Whether the decentralization cutover is active at the current processed epoch (dormant => false). */
+  decentralizationActiveNow(): boolean { return decentralizationActive(this.lastProcessedEpoch, this.decentralizationActivationEpoch); }
+  /** The emission pool account = the settler (masters[0]); pool_payout is funded from here. */
+  poolAddress(): Address { return this.settler; }
 
   // ---- views for the RPC ----
 
@@ -1028,6 +1210,13 @@ export class State {
         if (tx.from === address) bal -= tx.amountUZIR + tx.feeUZIR;
         const outs = parseBatchOutputs(tx.memo);
         if (outs) for (const [to, amt] of outs) if (to === address) bal += amt;
+        continue;
+      }
+      if (tx.kind === "pool_payout") {
+        // Pool-funded: the emission pool (this.settler) pays BOTH the outputs and the fee; the sender pays nothing.
+        if (this.settler === address) bal -= tx.amountUZIR + tx.feeUZIR;
+        const meta = parsePoolPayout(tx.memo);
+        if (meta) for (const [to, amt] of meta.outputs) if (to === address) bal += amt;
         continue;
       }
       if (tx.from === address) bal -= tx.amountUZIR + tx.feeUZIR;
@@ -1115,6 +1304,8 @@ export class State {
       supply: this.supply,
       locks: [...this.locks.values()],
       anchors: this.anchorSeats(),
+      validators: this.validators,   // sealed validator registry (empty while dormant); part of the root when active
+      lastPoolPayoutBucket: this.lastPoolPayoutBucket,   // pool-payout idempotency watermark (0 while dormant)
     };
   }
   loadSnapshot(snap: any): void {
@@ -1139,6 +1330,11 @@ export class State {
       this.anchors.clear();
       for (const a of snap.anchors) this.anchors.set(a.id, structuredCloneLeaf(a));
     }
+    // Restore the sealed validator registry (part of the state root when active), so a fast-synced node
+    // adopts the same electorate and computes the same root. Absent on pre-registry snapshots => empty.
+    this.validators = Array.isArray(snap.validators) ? [...snap.validators] : [];
+    this.validatorSet = new Set(this.validators);
+    this.lastPoolPayoutBucket = typeof snap.lastPoolPayoutBucket === "number" ? snap.lastPoolPayoutBucket : 0;
     // Re-assert the genesis master quorum after replacing accounts, so a restored node always knows the
     // bootstrap finality set even if an older snapshot predated it. Root-neutral; idempotent.
     this.seedGenesisMasters();

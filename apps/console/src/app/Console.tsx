@@ -949,11 +949,16 @@ export function Console() {
           {answerMode === "field" && (
             <div className="flex shrink-0 items-center gap-2 text-xs text-muted">
               {fieldModels.length > 0 && <Badge tone="indigo" className="text-[10px]"><span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--indigo)]" />{fieldModels.length} model{fieldModels.length === 1 ? "" : "s"} on field</Badge>}
-              <Select value={coordinationProfile} onChange={(e) => setCoordinationProfile(e.target.value as CoordinationProfile)} className="w-auto py-1.5 text-xs" title="How hard the network works on your question: quick, balanced, or deep evidence.">
-                <option value="quick">Quick</option>
-                <option value="balanced">Balanced</option>
-                <option value="deep">Deep evidence</option>
-              </Select>
+              {/* Progressive disclosure: the quick/balanced/deep control is an advanced tuning knob. Simple
+                  mode hides it and defaults to Balanced, so a first-run composer shows only the essential
+                  mode + cost choices. Turn off Simple mode (Settings) to reveal it. */}
+              {!simpleMode && (
+                <Select value={coordinationProfile} onChange={(e) => setCoordinationProfile(e.target.value as CoordinationProfile)} className="w-auto py-1.5 text-xs" title="How hard the network works on your question: quick, balanced, or deep evidence.">
+                  <option value="quick">Quick</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="deep">Deep evidence</option>
+                </Select>
+              )}
             </div>
           )}
         </div>

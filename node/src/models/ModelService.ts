@@ -136,6 +136,10 @@ export class ModelService {
     if (!e) {
       e = { meta: a.meta, founderPubKey: a.founderPubKey, manifestSig: a.manifestSig, peerIds: new Set(), hosts: new Set(), local: false };
       this.registry.set(a.meta.id, e);
+    } else if ((a.meta.version ?? 0) > (e.meta.version ?? 0)) {
+      // Adopt a newer authorized revision of the same model id (e.g. a steward deprecation or metadata
+      // update). Signature already verified above, so this is an authenticated meta change.
+      e.meta = a.meta; e.founderPubKey = a.founderPubKey; e.manifestSig = a.manifestSig;
     }
     const fresh = !e.peerIds.has(a.peerId);
     e.peerIds.add(a.peerId);
@@ -438,8 +442,23 @@ export class ModelService {
    * locally. Storage replicates only models that fit the cap, so this is inherently resource-aware — the
    * node serves the largest/best model it could actually fit, and nothing it can't. */
   private bestLocalModelId(): string | null {
-    for (const m of this.modelsByRecency()) if (this.store.hasValidGguf(m.id)) return m.id;
+    for (const m of this.modelsByRecency()) if (!m.deprecated && this.store.hasValidGguf(m.id)) return m.id;
     return null;
+  }
+
+  /** Launch authority: retire (or reinstate) a model network-wide. Re-announces the SAME model id with a
+   * higher catalog version and deprecated=true, so every node's onAnnounce adopts the change and stops
+   * selecting it to serve. Fixes an incompatible model (e.g. gemma-4-e4b) crash-looping the engine without
+   * any app update: existing nodes already run this selection + adoption path. Signed by the launch key. */
+  async deprecateModel(id: string, deprecated = true): Promise<ModelMeta> {
+    if (!this.isFounder()) throw new Error("only active launch authority can deprecate a model");
+    const e = this.registry.get(id);
+    if (!e) throw new Error("unknown model");
+    const meta: ModelMeta = { ...e.meta, deprecated, assigned: deprecated ? false : e.meta.assigned, version: (e.meta.version ?? 1) + 1, ts: Date.now() };
+    e.meta = meta;
+    this.authorizeAndAnnounce(meta);
+    log.info(`launch authority ${deprecated ? "deprecated" : "reinstated"} model ${meta.name} (${id.slice(0, 12)})`);
+    return meta;
   }
 
   /** The routing domains of the model this node is currently serving — advertised to the field so queries

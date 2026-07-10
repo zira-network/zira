@@ -154,7 +154,14 @@ export type TxKind =
   // cycle's field-participation payout in ONE tx (one nonce) instead of one tx per miner, so a dropped
   // packet can't open a nonce gap that cascades and forks honest nodes. Deterministic: every recipient and
   // amount is in the signed body, applied in listed order.
-  | "batch_transfer";
+  | "batch_transfer"
+  // Decentralization cutover: a pool-funded, bucket-idempotent community payout. Same recipient memo as
+  // batch_transfer plus a bucket id: {"b":<bucket>,"o":[["zir1...",amount],...]}. The OUTPUTS are debited
+  // from the fixed emission POOL (not the sender), so ANY authorized settler — a genesis master OR a
+  // committed validator — can keep miners paid when the primary settler (box1) is down. Rejected before the
+  // decentralization activation epoch, only accepted from the root-committed {masters ∪ validators} set, and
+  // idempotent per bucket via a root-committed watermark, so two racing settlers can never double-pay.
+  | "pool_payout";
 export interface TxBody {
   network: NetworkId; from: Address; fromPubKey: PublicKey; to: Address;
   amountUZIR: uZIR; feeUZIR: uZIR; nonce: number; kind: TxKind;

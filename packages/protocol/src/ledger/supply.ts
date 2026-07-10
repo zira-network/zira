@@ -4,7 +4,7 @@
 // balance and the issuance and burn totals from the signed event log, the function
 // an exchange would run. See Part 3.5.
 import { PROTOCOL } from "../constants";
-import { feeAndBurn, parseBatchOutputs } from "./tx";
+import { feeAndBurn, parseBatchOutputs, parsePoolPayout } from "./tx";
 import type { Address, SignedTx, uZIR } from "../types";
 
 const EARNED_CAP_UZIR = Math.round(PROTOCOL.MAX_SUPPLY_UZIR * PROTOCOL.EARNED_SHARE);
@@ -100,6 +100,16 @@ export function auditSupply(events: SignedTx[], founderAddress: Address): AuditR
       debit(tx.from, tx.amountUZIR + tx.feeUZIR);
       const outs = parseBatchOutputs(tx.memo);
       if (outs) for (const [to, amt] of outs) credit(to, amt);
+      burned += b;
+      continue;
+    }
+    if (tx.kind === "pool_payout") {
+      // Pool-funded community payout: the emission POOL (tx.to names it) funds BOTH the outputs and the fee;
+      // the sender pays nothing. Matches how State applies it, so the audit stays exact.
+      const { burned: b } = feeAndBurn(tx.feeUZIR);
+      debit(tx.to, tx.amountUZIR + tx.feeUZIR);
+      const meta = parsePoolPayout(tx.memo);
+      if (meta) for (const [to, amt] of meta.outputs) credit(to, amt);
       burned += b;
       continue;
     }

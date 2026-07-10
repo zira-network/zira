@@ -383,7 +383,7 @@ function mergeBootstrapCandidates(candidates: BootstrapSeedCandidate[]): Bootstr
 //
 // Public GET reads (safe, non-operator state the field already gossips publicly):
 const PUBLIC_GET_ROUTES = new Set<string>([
-  "/stats", "/net", "/status", "/mining", "/models", "/models/route", "/models/by-type",
+  "/stats", "/net", "/validators", "/status", "/mining", "/models", "/models/route", "/models/by-type",
   "/supply", "/pricing", "/locks", "/query/quota",
   // explorer / history reads
   "/history", "/events", "/explorer/history",
@@ -440,6 +440,9 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
     case "GET /stats": return json(res, node.stats());
     case "GET /treasury": return json(res, node.treasury());
     case "GET /net": return json(res, node.netInfo());
+    // Decentralization cutover state (read-only, for monitoring + the live shadow determinism proof). `me`
+    // reports whether THIS node may currently issue pool payouts (a genesis master or a committed validator).
+    case "GET /validators": return json(res, { ...node.state.decentralizationView(), me: { address: node.identityAddress(), authorizedSettler: node.state.isAuthorizedSettler(node.identityAddress()) } });
     case "POST /peers/add": { const b = await body(req); return json(res, await node.addPeer(String(b.multiaddr ?? ""))); }
     case "GET /founder/storage-peers": return json(res, { peers: node.storagePeers(), isFounder: node.isFounder() });
     case "POST /founder/storage-peers": { const b = await body(req); return json(res, node.setStoragePeers(Array.isArray(b.peers) ? b.peers.map(String) : [])); }
@@ -664,6 +667,10 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
       const meta = b.path
         ? await node.models.provide(String(b.path), String(b.name ?? "model"), { arch: b.arch, quant: b.quant, url: b.url, type: b.type, domains: b.domains, tags: b.tags, version: b.version, assigned: b.assigned })
         : await node.models.provideByUrl(String(b.url), String(b.name ?? "model"), { arch: b.arch, quant: b.quant, type: b.type, domains: b.domains, tags: b.tags, version: b.version, assigned: b.assigned });
+      return json(res, meta);
+    } catch (e) { return json(res, { error: (e as Error).message }, 400); } }
+    case "POST /models/deprecate": { const b = await body(req); if (!node.isFounder()) return json(res, { error: "only active launch authority can deprecate a model" }, 403); try {
+      const meta = await node.models.deprecateModel(String(b.id), b.deprecated === false ? false : true);
       return json(res, meta);
     } catch (e) { return json(res, { error: (e as Error).message }, 400); } }
     case "POST /models/prepare": { const b = await body(req); try {

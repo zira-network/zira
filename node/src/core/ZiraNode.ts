@@ -50,6 +50,10 @@ export interface ZiraNodeOptions {
   // Founder-mediated anchor seat assignment: a founder-held anchor-reserve wallet that claims an
   // unclaimed seat by its secret code, transfers the seat to the requester, and releases its ZIR.
   anchorReserveKey?: string;  // private key of the anchor-reserve wallet, founder-held
+  // Decentralization cutover activation epoch. Overrides the protocol constant (0 = dormant). Tests pass a low
+  // value to exercise the active path; ops may set ZIRA_DECENTRALIZATION_ACTIVATION_EPOCH to a coordinated
+  // future epoch across ALL masters to schedule the live cutover without a rebuild (every node MUST agree).
+  activationEpochOverride?: number;
 }
 
 // The events wallet must hold at least this much ZIR for the "+" to be offered; below it, events hide.
@@ -386,6 +390,7 @@ export class ZiraNode {
   private anchorVestInFlight = new Map<string, number>();
 
   private dataDir: string;
+  private decentralizationActivationEpoch?: number;
 
   constructor(
     genesis: GenesisDoc,
@@ -410,8 +415,18 @@ export class ZiraNode {
       eventsKey: options.eventsKey ?? "",
       eventsClaimZir: options.eventsClaimZir ?? 0,
       anchorReserveKey: options.anchorReserveKey ?? "",
+      activationEpochOverride: options.activationEpochOverride ?? 0,   // unused in opts; the live value is the field below
     };
-    this.state = new State(genesis);
+    // Decentralization cutover activation epoch: option override, else env (coordinated ops lever), else
+    // UNDEFINED so State falls back to the compiled protocol constant. NOTE: `Number(undefined)` is NaN, but
+    // `Number(process.env.X ?? "")` would be Number("")===0 when unset — which would silently pin activation
+    // to 0 and make the compiled constant dead on this path. So read the raw env and only treat it as a real
+    // value when the var is actually SET to a non-negative integer; otherwise leave it undefined.
+    const envRaw = process.env.ZIRA_DECENTRALIZATION_ACTIVATION_EPOCH;
+    const envAct = envRaw !== undefined && envRaw !== "" ? Number(envRaw) : NaN;
+    this.decentralizationActivationEpoch = options.activationEpochOverride ?? (Number.isInteger(envAct) && envAct >= 0 ? envAct : undefined);
+    if (this.decentralizationActivationEpoch !== undefined) log.info(`decentralization cutover activation epoch = ${this.decentralizationActivationEpoch} (source: ${options.activationEpochOverride !== undefined ? "option" : "env"}); MUST be identical on every node`);
+    this.state = new State(genesis, this.decentralizationActivationEpoch);
     this.checkpoints = new Checkpoints(genesis.network);
     this.store = new Store(dataDir);
     this.topics = buildTopics(this.gid);
@@ -1221,6 +1236,25 @@ export class ZiraNode {
         const votes = this.checkpoints.finalizingVotes(finEpoch, this.checkpoints.lastFinalizedRoot);
         for (const vote of votes) this.publish(this.topics.consensus, { t: "checkpoint", data: vote });
       }
+      // Re-gossip pending field queries. publishQuery broadcasts a query only ONCE; if that single
+      // gossipsub publish loses a mesh race, no serving miner ever hears it and the Console silently
+      // gets no answer (intermittent "not answering" even when providers are online). Re-broadcasting
+      // open queries within their TTL gives every live provider a reliable chance to pick them up.
+      // Soft-state, consensus-neutral, idempotent (peers de-dupe by query id; providers skip answered).
+      for (const q of this.soft.openQueries([], Date.now()).slice(0, 30)) this.publish(this.topics.app, { t: "query", data: q });
+    }
+    // FINALITY DETERMINISM FIX (2026-07-10 hard-wedge at 356724426): every tick, re-broadcast the txs in the
+    // UNFINALIZED window (committedEpoch > lastFinalizedEpoch). A tx that reaches some masters later than the
+    // settle window makes them vote that epoch a DIFFERENT root; the finality vote then splits with no re-vote
+    // (voteCheckpoints votes each epoch once), so the split is permanent. Re-gossiping every unfinalized tx
+    // every ~5s guarantees no master is ever missing one before its epoch can finalize. Bounded + idempotent
+    // (peers de-dupe by id). Soft-state, no state-root change, fork-safe. In normal operation the unfinalized
+    // window is a handful of txs so this is nearly free; it only grows while finality is lagging.
+    {
+      const finE = this.checkpoints.lastFinalizedEpoch;
+      for (const tx of this.state.recentHistory(null, 500)) {
+        if ((tx.committedEpoch ?? 0) > finE) this.publish(this.topics.events, { t: "tx", data: tx });
+      }
     }
     // any mining node: keep the built-in engine running the authorized field model (auto mode). Re-announce
     // and reconcile every ~5s so a freshly-serving miner is discovered (and storage-credited) quickly.
@@ -1412,7 +1446,13 @@ export class ZiraNode {
       const masters0 = (this.genesis.masters ?? [])[0]?.address ?? this.genesis.founder;
       log.info(`field participation gate: budget=${FIELD_PARTICIPATION_BUDGET_UZIR} settler=${masters0.slice(0, 20)} me=${this.identity.address.slice(0, 20)} isSettler=${this.isNetworkSettler()}`);
     }
-    if (FIELD_PARTICIPATION_BUDGET_UZIR <= 0 || !this.isNetworkSettler()) return;
+    if (FIELD_PARTICIPATION_BUDGET_UZIR <= 0) return;
+    // Decentralization cutover: when active, the payout is funded from the POOL via pool_payout and ANY
+    // authorized settler (genesis master OR sealed validator) may issue it, so miners keep earning when box1
+    // is down. While dormant, the classic path applies: only the active genesis-master settler pays, from its
+    // own balance, via batch_transfer.
+    const cutover = this.state.decentralizationActiveNow();
+    if (cutover ? !this.shouldIssuePoolPayout() : !this.isNetworkSettler()) return;
     const bucket = Math.floor(now / AUTONOMOUS_RESONANCE_CYCLE_MS);
     // Watermark (<=), not equality: once a bucket is paid, NEVER pay it (or any earlier bucket) again — even
     // across a restart, where lastParticipationBucket is restored from disk. Buckets are monotonic wall-clock
@@ -1442,13 +1482,16 @@ export class ZiraNode {
     // nonce gap that dropped every later settler tx on that node, so honest nodes diverged and finality
     // stalled. A single tx has a single nonce, so there is no gap to cascade.
     const needed = pool + PROTOCOL.BASE_FEE_UZIR;
-    // Use the PROVISIONAL balance (nets txs already pooled this tick: resonator rewards + coordination payouts
-    // run before this in the same reap). Checking committed balanceOf let the settler pool more than it could
-    // afford; at apply time this batch would then drop for overspend WITHOUT consuming its nonce, yet the
-    // bucket watermark had already advanced, so that cycle's miners were never paid and never retried. Gating
-    // on provisionalBalance defers (does not submit, does not advance the watermark) so it retries next tick.
-    if (this.state.provisionalBalance(this.identity.address) < needed) {
-      if (this.lastParticipationDeferLog !== bucket) { this.lastParticipationDeferLog = bucket; log.warn(`field participation deferred: settler provisional balance ${this.state.provisionalBalance(this.identity.address)} < needed ${needed} (base emission still accruing)`); }
+    // The FUNDER is the emission pool when the cutover is active (pool_payout debits the pool, not the issuer),
+    // else the settler's own balance (batch_transfer). Use the PROVISIONAL balance (nets txs already pooled
+    // this tick: resonator rewards + coordination payouts run before this in the same reap). Checking committed
+    // balanceOf let the funder pool more than it could afford; at apply time the tx would then drop for
+    // overspend WITHOUT consuming its nonce, yet the bucket watermark had already advanced, so that cycle's
+    // miners were never paid and never retried. Gating on the funder's provisionalBalance defers (does not
+    // submit, does not advance the watermark) so it retries next tick.
+    const funder = cutover ? this.state.poolAddress() : this.identity.address;
+    if (this.state.provisionalBalance(funder) < needed) {
+      if (this.lastParticipationDeferLog !== bucket) { this.lastParticipationDeferLog = bucket; log.warn(`field participation deferred: funder provisional balance ${this.state.provisionalBalance(funder)} < needed ${needed} (base emission still accruing)`); }
       return; // not enough base emission accrued yet; retry on a later tick this cycle
     }
     // WEIGHTED split (v2.0.2): each payee's share is proportional to the verifiable work the settler observed
@@ -1460,12 +1503,21 @@ export class ZiraNode {
     const outputs = weightedOutputs(payees, weights, pool);
     // Recency-decay the answer credits once per paid cycle so recent work dominates and stale credits fade.
     for (const [a, c] of this.minerAnswerCredits) { const nc = c * FIELD_ANSWER_DECAY; if (nc < 0.05) this.minerAnswerCredits.delete(a); else this.minerAnswerCredits.set(a, nc); }
-    const tx = signTx({
-      network: this.genesis.network, from: this.identity.address, fromPubKey: this.identity.publicKey,
-      to: this.identity.address, amountUZIR: pool, feeUZIR: PROTOCOL.BASE_FEE_UZIR,
-      nonce: this.state.provisionalNonce(this.identity.address), kind: "batch_transfer",
-      parents: [], timestamp: now, memo: JSON.stringify({ o: outputs }),
-    }, this.identity.privateKey);
+    // Active: pool_payout (funded by the pool, `to` names the pool, memo carries the idempotency bucket) so any
+    // authorized settler can pay and double-pay is impossible. Dormant: the classic self-funded batch_transfer.
+    const tx = cutover
+      ? signTx({
+          network: this.genesis.network, from: this.identity.address, fromPubKey: this.identity.publicKey,
+          to: this.state.poolAddress(), amountUZIR: pool, feeUZIR: PROTOCOL.BASE_FEE_UZIR,
+          nonce: this.state.provisionalNonce(this.identity.address), kind: "pool_payout",
+          parents: [], timestamp: now, memo: JSON.stringify({ b: bucket, o: outputs }),
+        }, this.identity.privateKey)
+      : signTx({
+          network: this.genesis.network, from: this.identity.address, fromPubKey: this.identity.publicKey,
+          to: this.identity.address, amountUZIR: pool, feeUZIR: PROTOCOL.BASE_FEE_UZIR,
+          nonce: this.state.provisionalNonce(this.identity.address), kind: "batch_transfer",
+          parents: [], timestamp: now, memo: JSON.stringify({ o: outputs }),
+        }, this.identity.privateKey);
     const res = this.submitTx(tx);
     if (res.accepted) {
       this.lastParticipationBucket = bucket;
@@ -1779,6 +1831,22 @@ export class ZiraNode {
       if (live.has(masters[i]!.address) || (i === 0 && live.size === 0)) return i;
     }
     return 0;
+  }
+
+  /**
+   * Decentralization cutover: may THIS node issue the pool-funded community payout right now? Only authorized
+   * settlers (root-committed {genesis masters ∪ sealed validators}) qualify. A genesis master issues per the
+   * existing ordered failover (the lowest live master). A sealed validator issues ONLY when no genesis master
+   * is live at all — i.e. box1 is fully down — so the community keeps miners paid. Several validators may
+   * attempt it at once; the root-committed pool_payout bucket watermark makes every attempt after the first a
+   * no-op, so this soft, liveness-based selection can never double-pay (that guarantee lives in consensus, not
+   * here). When the masters come back, they resume as the ordered settler and validators stand down.
+   */
+  private shouldIssuePoolPayout(): boolean {
+    if (!this.state.isAuthorizedSettler(this.identity.address)) return false;
+    if (this.state.isGenesisMaster(this.identity.address)) return this.isNetworkSettler();
+    const anyMasterLive = this.state.liveGenesisMasters(Date.now(), ZiraNode.SETTLER_FAILOVER_MS).size > 0;
+    return !anyMasterLive;   // a validator settles only during a full genesis-master outage
   }
 
   /**
@@ -2636,7 +2704,7 @@ export class ZiraNode {
     return this.store.readEvents().filter((e) => e.t === "tx").map((e) => e.data as SignedTx);
   }
   durableSupplyAudit(): { emitted: number; burned: number; reserve: number; issued: number; circulating: number; withinCap: boolean } {
-    const replay = new State(this.genesis);
+    const replay = new State(this.genesis, this.decentralizationActivationEpoch);
     for (const env of this.store.readEvents()) {
       if (env.t === "tx") replay.ingestTx(env.data);
       else if (env.t === "observation") replay.ingestObservation(env.data);

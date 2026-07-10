@@ -51,7 +51,7 @@ export function verifyTx(tx: SignedTx): TxCheck {
   // channel and every payment burns into the supply accounting. transfer and agent_spend both credit `to`;
   // all legitimate agent_spend callers (coordination payouts, resonator hires, query coordination) already
   // pay BASE_FEE, so this only closes the free-payment hole (e.g. a forged zero-fee "coordination payout").
-  if ((tx.kind === "transfer" || tx.kind === "agent_spend" || tx.kind === "batch_transfer") && tx.feeUZIR < PROTOCOL.BASE_FEE_UZIR) {
+  if ((tx.kind === "transfer" || tx.kind === "agent_spend" || tx.kind === "batch_transfer" || tx.kind === "pool_payout") && tx.feeUZIR < PROTOCOL.BASE_FEE_UZIR) {
     return { ok: false, reason: "fee below the base fee" };
   }
   return { ok: true };
@@ -75,6 +75,20 @@ export function parseBatchOutputs(memo: string | undefined): [string, number][] 
     out.push([to, amt]);
   }
   return out;
+}
+
+// Parse a pool_payout memo: {"b":<bucket>,"o":[["zir1...",amount],...]}. Same output rules as
+// parseBatchOutputs plus a non-negative integer bucket id (the idempotency key). Pure and total, so every
+// node derives the identical (bucket, outputs) from the signed memo.
+export function parsePoolPayout(memo: string | undefined): { bucket: number; outputs: [string, number][] } | null {
+  let p: unknown;
+  try { p = JSON.parse(memo ?? ""); } catch { return null; }
+  const obj = p as { b?: unknown; o?: unknown } | null;
+  const bucket = obj?.b;
+  if (typeof bucket !== "number" || !Number.isInteger(bucket) || bucket < 0) return null;
+  const outputs = parseBatchOutputs(JSON.stringify({ o: obj?.o }));
+  if (!outputs) return null;
+  return { bucket, outputs };
 }
 
 /** Split a fee into the burned portion and the kept portion. With FEE_BURN = 1.0 the whole fee is

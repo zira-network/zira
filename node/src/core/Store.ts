@@ -156,6 +156,7 @@ export class Store {
       // can grow past Node's ~512MB max STRING length, at which point readFileSync(path,"utf8") throws
       // ERR_STRING_TOO_LONG. Same pattern as readEvents; here the throw was swallowed but silently lost ALL
       // sparkline history once the file got large.
+      const sizeBefore = statSync(this.ztiPath).size;
       const buf = readFileSync(this.ztiPath); // Buffer, no encoding -> ~2GB limit, no single-string cap
       let start = 0;
       for (let i = 0; i <= buf.length; i++) {
@@ -173,7 +174,33 @@ export class Store {
           start = i + 1;
         }
       }
+      // Compact on boot: the file is append-only and never rewritten, so it grows without bound even
+      // though only the last 1000 rows PER ADDRESS are ever kept in memory. Left unchecked it reaches
+      // hundreds of MB and each boot's full read stalls the event loop (a read gateway once wedged this
+      // way). Once it crosses a threshold, rewrite it atomically from the already-capped in-memory rows
+      // so its on-disk size stays bounded. Pure soft state (Console sparklines), never in the state root.
+      if (sizeBefore > 20 * 1024 * 1024) this.rewriteZti();
     } catch { /* best effort */ }
+  }
+
+  // Atomically rewrite zti-history.jsonl from the retained in-memory rows (temp file + rename, same
+  // durable pattern as snapshot writes). Bounds the on-disk file to <= 1000 rows per known address.
+  private rewriteZti(): void {
+    try {
+      const tmp = this.ztiPath + ".tmp";
+      const fd = openSync(tmp, "w");
+      try {
+        let kept = 0;
+        for (const arr of this.ztiByAddress.values()) {
+          for (const row of arr) { writeSync(fd, JSON.stringify(row) + "\n"); kept++; }
+        }
+        fdatasyncSync(fd);
+        log.info(`compacted zti-history: kept ${kept} rows across ${this.ztiByAddress.size} addresses`);
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(tmp, this.ztiPath);
+    } catch { /* best effort: keep serving from memory even if the rewrite fails */ }
   }
 
   appendZtiSnapshot(address: string, domain: Domain, zti: number, epoch: number): void {

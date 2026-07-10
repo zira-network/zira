@@ -58,6 +58,19 @@ export const PROTOCOL = {
   // that they verified it holds + serves the model (a random-chunk probe). 1 is enough because genesis
   // masters are the trust root; the proof rides on consensus observations, so the credit is deterministic.
   MIN_STORAGE_VOUCHERS: 1,
+  // ---- Decentralization cutover (validator registry). Ships INERT so the network behaves
+  // byte-identically until a future release sets a concrete activation epoch. ----
+  // The epoch at/after which the sealed earned+anchor validator registry counts toward finality and
+  // the settler may rotate to any live validator. 0 = disabled (dormant): the registry stays empty, is
+  // dropped from the state root (canonical drops empty/undefined fields), and finality behaves exactly
+  // as before. Read via decentralizationActive(epoch). Shipping inert lets the electorate be
+  // shadow-validated live for determinism before any consensus rule actually changes.
+  DECENTRALIZATION_ACTIVATION_EPOCH: 0,
+  // Cadence (epochs) at which validator-registry membership is re-sealed from converged state, so every
+  // node commits an identical set on the same boundaries. ~1 hour at 5s epochs.
+  VALIDATOR_SEAL_INTERVAL: 720,
+  // Hard cap on the sealed validator electorate (bounds the finality denominator + root leaf count).
+  MAX_VALIDATORS: 128,
   BASE_FEE_UZIR: 1_000,
   // F12: the entire transaction fee is removed from circulation and booked as burned. The sender always
   // pays the full fee (need = amount + fee), and the non-burned remainder was never credited to any

@@ -70,7 +70,7 @@ export class NodeClient implements ZiraClient {
   async getBalanceUZIR(a: Address) { return (await this.get<{ uZIR: number }>(`/balance?address=${encodeURIComponent(a)}`)).uZIR; }
   async getNonce(a: Address) { return (await this.get<{ nonce: number }>(`/nonce?address=${encodeURIComponent(a)}`)).nonce; }
   submitTx(tx: SignedTx) { return this.post<{ accepted: boolean; reason?: string }>("/tx", { tx }); }
-  getTxHistory(a: Address, limit = 50) { return this.get<SignedTx[]>(`/history?address=${encodeURIComponent(a)}&limit=${limit}`); }
+  getTxHistory(a: Address, limit = 250) { return this.get<SignedTx[]>(`/history?address=${encodeURIComponent(a)}&limit=${limit}`); }
   getTx(id: string) { return this.get<SignedTx | null>(`/tx?id=${encodeURIComponent(id)}`).catch(() => null); }
   async getBonds(_a: Address): Promise<Bond[]> { return []; }
   async openStream(s: Omit<Stream, "id" | "startedAt" | "active">): Promise<Stream> { return { ...s, id: "stream-" + Date.now(), startedAt: Date.now(), active: true }; }

@@ -27,7 +27,7 @@ export interface SupplyState {
  * supply totals. Two honest nodes with the same applied history compute the same root. This is
  * what checkpoints sign, so finality is over state, not over a chain of blocks.
  */
-export function computeStateRoot(accounts: AccountLeaf[], supply: SupplyState, founders: Address[] = [], anchors: Anchor[] = []): Hex {
+export function computeStateRoot(accounts: AccountLeaf[], supply: SupplyState, founders: Address[] = [], anchors: Anchor[] = [], validators: Address[] = [], poolPayoutBucket = 0): Hex {
   const leaves = accounts
     .filter((a) => a.balance !== 0 || a.nonce !== 0)
     .map((a) => ({ a: a.address, b: a.balance, n: a.nonce }))
@@ -39,7 +39,26 @@ export function computeStateRoot(accounts: AccountLeaf[], supply: SupplyState, f
       p: a.listedPriceUZIR ?? 0, s: a.status, z: a.zti, co: a.contributionsOpen ? 1 : 0,
     }))
     .sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
-  return hashHex(canonical({ accounts: leaves, anchors: anchorLeaves, founders: founderLeaves, supply: { e: supply.emitted, b: supply.burned, r: supply.reserve } }));
+  // Validator registry (decentralization cutover). Absent (undefined) when empty, exactly like an
+  // observation's vouchedMiners: canonical() drops undefined keys, so an empty registry hashes
+  // BYTE-IDENTICALLY to the pre-registry root. Only a sealed, non-empty electorate (post-activation)
+  // adds this leaf, and then every node commits the same deduped, sorted set -> same root.
+  const validatorLeaves = validators.length > 0 ? [...new Set(validators)].sort() : undefined;
+  // Pool-payout idempotency watermark (decentralization cutover). 0 (dormant, no pool_payout ever applied)
+  // => undefined => dropped by canonical => byte-identical to the pre-cutover root. Committed so a
+  // fast-synced node knows which buckets are already paid and cannot re-accept an old one.
+  const poolBucketLeaf = poolPayoutBucket > 0 ? poolPayoutBucket : undefined;
+  return hashHex(canonical({ accounts: leaves, anchors: anchorLeaves, founders: founderLeaves, supply: { e: supply.emitted, b: supply.burned, r: supply.reserve }, validators: validatorLeaves, poolBucket: poolBucketLeaf }));
+}
+
+/**
+ * Decentralization cutover gate. The sealed earned+anchor validator registry counts toward finality
+ * (and the settler may rotate to any live validator) only at/after the activation epoch. 0 = disabled
+ * (dormant): ships inert so the state root and finality are byte-identical to before, until a future
+ * release sets a concrete epoch. Pure function of epoch, so every node flips at the same boundary.
+ */
+export function decentralizationActive(epoch: number, activationEpoch: number = PROTOCOL.DECENTRALIZATION_ACTIVATION_EPOCH): boolean {
+  return activationEpoch > 0 && epoch >= activationEpoch;
 }
 
 export interface CheckpointBody {

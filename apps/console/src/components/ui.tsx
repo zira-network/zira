@@ -1,7 +1,7 @@
 // apps/web/src/components/ui.tsx
 // Themed UI primitives. Colors come from CSS variables, never hardcoded hex.
 import {
-  createContext, useContext, useState, useCallback, useEffect,
+  createContext, useContext, useState, useCallback, useEffect, useRef,
   type ReactNode, type ButtonHTMLAttributes, type InputHTMLAttributes,
   type TextareaHTMLAttributes, type SelectHTMLAttributes,
 } from "react";
@@ -92,10 +92,27 @@ export function Meter({ value, label, className }: { value: number; label?: stri
 
 // ---- Modal ----
 export function Modal({ open, onClose, title, children, wide }: { open: boolean; onClose: () => void; title?: string; children: ReactNode; wide?: boolean }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // Close on Escape, and move focus INTO the dialog on open / restore it to the trigger on close (standard
+  // dialog behaviour, so keyboard + screen-reader users land in the dialog and return where they were). The
+  // effect is declared before the early return so hooks order is stable; it only binds while open.
+  useEffect(() => {
+    if (!open) return;
+    const prevFocus = document.activeElement as HTMLElement | null;
+    const raf = requestAnimationFrame(() => dialogRef.current?.focus());
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      cancelAnimationFrame(raf);
+      prevFocus?.focus?.();
+    };
+  }, [open, onClose]);
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px] fade-in-up" onClick={onClose}>
-      <div className={cn("max-h-[90vh] w-full overflow-auto rounded-2xl border border-hairline bg-surface p-6 shadow-[var(--shadow-float)]", wide ? "max-w-2xl" : "max-w-md")} onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px] fade-in-up" onClick={onClose}
+      role="dialog" aria-modal="true" aria-label={title}>
+      <div ref={dialogRef} tabIndex={-1} className={cn("max-h-[90vh] w-full overflow-auto rounded-2xl border border-hairline bg-surface p-6 shadow-[var(--shadow-float)] focus:outline-none", wide ? "max-w-2xl" : "max-w-md")} onClick={(e) => e.stopPropagation()}>
         {title && (
           <div className="mb-5 flex items-center justify-between">
             <h3 className="text-lg font-semibold">{title}</h3>
@@ -111,9 +128,9 @@ export function Modal({ open, onClose, title, children, wide }: { open: boolean;
 // ---- Tabs ----
 export function Tabs({ tabs, active, onChange }: { tabs: { id: string; label: string }[]; active: string; onChange: (id: string) => void }) {
   return (
-    <div className="flex gap-1 border-b border-hairline">
+    <div role="tablist" className="flex gap-1 border-b border-hairline">
       {tabs.map((t) => (
-        <button key={t.id} onClick={() => onChange(t.id)}
+        <button key={t.id} onClick={() => onChange(t.id)} role="tab" aria-selected={active === t.id}
           className={cn("px-3.5 py-2.5 text-sm font-medium -mb-px border-b-2 transition-colors",
             active === t.id ? "border-[var(--accent)] text-text" : "border-transparent text-muted hover:text-text")}>
           {t.label}
