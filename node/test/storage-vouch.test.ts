@@ -48,6 +48,29 @@ test("a master vouch sets the miner's lastWorkEpoch but moves no balance", () =>
   assert.ok(s.balanceOf(m1.address) > 0, "the genesis masters earned the base emission");
 });
 
+test("a malformed observation timestamp or confidence is rejected, never pooled (anti-bloat)", () => {
+  const s = new State(masterGenesis);
+  const e = epochOf(GTS) + 1;
+  const ts = e * EPOCH_MS + 10;
+  const signObs = (body: ReturnType<typeof buildObservationBody>): SignedObservation => {
+    const c = canonical(body); return { ...body, id: hashHex(c), sig: edSign(c, m1.privateKey) };
+  };
+  // Validly SIGNED but with a non-numeric timestamp: id + signature pass, yet epochOf() would be NaN so it
+  // could never be "too old" and never age out — permanent pool + event-log bloat if admitted.
+  const badTs = signObs(buildObservationBody({
+    type: "value", observer: m1.publicKey, timestamp: "x" as unknown as number, subject: "ZIRA_FIELD_HEARTBEAT",
+    domain: "data", confidence: 0.9, sourceHashes: ["field-heartbeat"], value: 1, storageGiB: 0,
+  }));
+  assert.equal(s.ingestObservation(badTs).ok, false, "non-finite timestamp is rejected, not pooled");
+  const badConf = signObs(buildObservationBody({
+    type: "value", observer: m1.publicKey, timestamp: ts, subject: "ZIRA_FIELD_HEARTBEAT",
+    domain: "data", confidence: "abc" as unknown as number, sourceHashes: ["field-heartbeat"], value: 1, storageGiB: 0,
+  }));
+  assert.equal(s.ingestObservation(badConf).ok, false, "non-numeric confidence is rejected, not pooled");
+  // A well-formed heartbeat is still accepted (the guard is not over-broad).
+  assert.equal(s.ingestObservation(heartbeat(m1, ts, 0, [miner.address])).ok, true, "a valid observation still passes");
+});
+
 test("two replicas ingesting the same observations in different orders reach the IDENTICAL state root", () => {
   const e = epochOf(GTS) + 1;
   const ts = e * EPOCH_MS + 10;

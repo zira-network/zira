@@ -557,7 +557,12 @@ export class State {
     const c = canonical(buildObservationBody(o));
     if (hashHex(c) !== o.id) return { ok: false, isNew: false, reason: "observation id mismatch" };
     if (!edVerify(c, o.sig, o.observer)) return { ok: false, isNew: false, reason: "observation signature invalid" };
-    if (o.confidence < 0 || o.confidence > 1) return { ok: false, isNew: false, reason: "confidence out of range" };
+    // Mirror ingestTx: a non-finite (or non-numeric, e.g. the JSON string "abc") timestamp makes epochOf() NaN,
+    // and NaN fails every `<=` age check, so the obs would never be "too old" and never age out of the pool —
+    // it would sit there forever, get persisted to the event log, and re-gossip to every peer (unbounded bloat).
+    // Likewise a non-numeric confidence turns the field-weight math into NaN. Reject both before pooling.
+    if (!Number.isFinite(o.timestamp)) return { ok: false, isNew: false, reason: "observation timestamp is not a finite number" };
+    if (typeof o.confidence !== "number" || !Number.isFinite(o.confidence) || o.confidence < 0 || o.confidence > 1) return { ok: false, isNew: false, reason: "confidence out of range" };
     if (epochOf(o.timestamp) <= this.lastProcessedEpoch - SETTLE_ROUNDS - WINDOW_ROUNDS) {
       return { ok: false, isNew: false, reason: "observation too old" };
     }

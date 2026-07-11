@@ -290,7 +290,13 @@ export const useZira = create<ZiraState>((set, get) => ({
             if (fresh?.ok) { netView = { balanceUZIR: fresh.balanceUZIR, emittedUZIR: fresh.emittedUZIR }; netViewAt = now; }
           }
           const localEmitted = Number((stats as NetworkStats).emittedUZIR ?? 0);
-          if (netView && netView.emittedUZIR > localEmitted) {
+          // Only adopt the gateway's figure when it is BOTH globally ahead (higher emittedUZIR) AND reports a
+          // strictly HIGHER balance for THIS address. Global emission alone is not per-address freshness: a
+          // read gateway is almost always globally ahead yet may not have applied this address's latest payout
+          // (or may not know the address at all, returning 0). Requiring a higher balance means we only ever
+          // top a lagging local node UP toward the network view, never flip it DOWN to a stale/zero value, and
+          // a just-sent local debit the gateway has not gossiped yet still wins (local is the lower figure).
+          if (netView && netView.emittedUZIR > localEmitted && netView.balanceUZIR > next) {
             next = netView.balanceUZIR;
             nodeBehind = true;
           }
