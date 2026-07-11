@@ -289,14 +289,15 @@ export const useZira = create<ZiraState>((set, get) => ({
             const fresh = await fetchNetworkView(address).catch(() => null);
             if (fresh?.ok) { netView = { balanceUZIR: fresh.balanceUZIR, emittedUZIR: fresh.emittedUZIR }; netViewAt = now; }
           }
-          const localEmitted = Number((stats as NetworkStats).emittedUZIR ?? 0);
-          // Only adopt the gateway's figure when it is BOTH globally ahead (higher emittedUZIR) AND reports a
-          // strictly HIGHER balance for THIS address. Global emission alone is not per-address freshness: a
-          // read gateway is almost always globally ahead yet may not have applied this address's latest payout
-          // (or may not know the address at all, returning 0). Requiring a higher balance means we only ever
-          // top a lagging local node UP toward the network view, never flip it DOWN to a stale/zero value, and
-          // a just-sent local debit the gateway has not gossiped yet still wins (local is the lower figure).
-          if (netView && netView.emittedUZIR > localEmitted && netView.balanceUZIR > next) {
+          // Show whichever authoritative source reports the HIGHER balance for this address, i.e. max(local,
+          // network). A node's own balance can only be LOW (it missed a gossiped payout so its applied state
+          // trails the mesh) — it never invents credit it didn't apply — and the read gateway is likewise only
+          // ever behind, never spuriously ahead. So the larger figure is the one that has seen more of the
+          // address's real credits. Do NOT gate on global emittedUZIR: a home node's emission counter is often
+          // current even while its per-address balance has drifted below the network, which is exactly the case
+          // that left the wallet under-reporting. (Trade-off: right after a local send the gateway may still
+          // show the pre-debit, higher figure for one poll; it reconciles down as soon as the debit gossips.)
+          if (netView && netView.balanceUZIR > next) {
             next = netView.balanceUZIR;
             nodeBehind = true;
           }
