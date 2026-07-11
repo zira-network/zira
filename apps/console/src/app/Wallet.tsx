@@ -405,7 +405,9 @@ function TxHistory({ history, address, loading, error, onRefresh }: { history: S
     if (filter === "all") return true;
     if (filter === "incoming") return tx.to === address || tx.kind === "reward" || tx.kind === "reserve_grant";
     if (filter === "outgoing") return tx.from === address && tx.to !== address;
-    if (filter === "rewards") return tx.kind === "reward" || tx.kind === "reserve_grant";
+    // Mining income arrives as pooled batch/pool payouts (surfaced per-recipient with to === address), so the
+    // Rewards filter must include them or a miner filtering to "rewards" would see none of their earnings.
+    if (filter === "rewards") return tx.kind === "reward" || tx.kind === "reserve_grant" || tx.kind === "pool_payout" || tx.kind === "batch_transfer";
     if (filter === "tasks") return tx.kind === "agent_spend";
     return true;
   }), [address, history, filter]);

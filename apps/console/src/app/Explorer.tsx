@@ -10,6 +10,7 @@ import {
 } from "../components/ui";
 import { useZira } from "../store/useZira";
 import { formatNum, formatZir, shortAddress, shortHash, timeAgo } from "../lib/format";
+import { loadReconciledHistory } from "../lib/history";
 import { NodeApi, type ExtendedStats, type SupplyInfo } from "../lib/nodeApi";
 
 // The field converges on multi-LLM coordination subjects, not hardware or commodity prices. These are
@@ -362,7 +363,13 @@ function AddressLookup() {
     setHistPage(0);
     setHistKind("all");
     try {
-      const [balance, history] = await Promise.all([client.getBalanceUZIR(target), client.getTxHistory(target, 200)]);
+      // Reconcile against the shared network view (like the wallet does): pooled mining payouts and an older
+      // address's history live in the gateway's fuller view, so a lookup against a lagging local node would
+      // otherwise look short or empty even though the address earned for weeks.
+      const [balance, history] = await Promise.all([
+        client.getBalanceUZIR(target),
+        loadReconciledHistory(client, target, 200, false),
+      ]);
       setResolved(target);
       setResult({ balance, history });
     } catch (e) { setError(e instanceof Error ? e.message : "Could not look up that address."); } finally { setBusy(false); }
