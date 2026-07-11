@@ -1116,7 +1116,10 @@ export class ZiraNode {
     let earnedTodayUZIR = 0;
     for (const e of this.state.recentHistory(this.identity.address, 1000)) {
       const launchMiningSettlement = e.kind === "transfer" && /launch mining settlement/i.test(e.memo ?? "");
-      if (e.to === this.identity.address && (e.kind === "reward" || e.kind === "agent_spend" || launchMiningSettlement) && e.timestamp >= since) earnedTodayUZIR += e.amountUZIR;
+      // recentHistory surfaces each pooled payout as a per-recipient row (to === us, amount === our slice), so
+      // field-participation and coordination income counts toward "earned today" like direct rewards do.
+      const isEarning = e.kind === "reward" || e.kind === "agent_spend" || e.kind === "pool_payout" || e.kind === "batch_transfer" || launchMiningSettlement;
+      if (e.to === this.identity.address && isEarning && e.timestamp >= since) earnedTodayUZIR += e.amountUZIR;
     }
     return {
       nodeConfig: { observeEnabled: this.opts.observeEnabled },

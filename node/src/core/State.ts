@@ -1231,8 +1231,23 @@ export class State {
   }
 
   recentHistory(address: Address | null, limit: number): LedgerEntry[] {
-    const src = address ? this.history.filter((e) => e.from === address || e.to === address) : this.history;
-    return src.slice(0, limit);
+    if (!address) return this.history.slice(0, limit);
+    const out: LedgerEntry[] = [];
+    for (const e of this.history) {
+      if (e.from === address || e.to === address) {
+        out.push(e);
+      } else if (e.kind === "pool_payout" || e.kind === "batch_transfer") {
+        // Pooled payouts (field participation, coordination) name the pool as `to` and carry every recipient's
+        // slice in the signed memo, so a paid miner is neither `from` nor `to` and its earnings would be invisible
+        // in the wallet and explorer. Surface the address's own slice as a per-recipient row (its share as the
+        // amount, the pool as the payer). Display-only: the ledger and the state root are unchanged.
+        const outs = e.kind === "pool_payout" ? parsePoolPayout(e.memo)?.outputs : parseBatchOutputs(e.memo);
+        const slice = outs?.find(([a]) => a === address);
+        if (slice) out.push({ ...e, to: address, amountUZIR: slice[1] });
+      }
+      if (out.length >= limit) break;
+    }
+    return out;
   }
   recentLocks(limit: number): Lock[] { return this.lockLog.slice(0, limit); }
   valueOf(subject: string): Lock | null { return this.locks.get(subject) ?? null; }

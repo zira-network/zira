@@ -90,6 +90,23 @@ test("pool_payout is idempotent per bucket (a racing second payout for the same 
   assert.equal(s.balanceOf(miners[1]!.address), before + 120_000, "the next bucket pays");
 });
 
+test("a paid miner sees the pool_payout in recentHistory as its own slice (wallet/explorer visibility)", () => {
+  const outputs: [string, number][] = [[miners[0]!.address, 400_000], [miners[1]!.address, 250_001]];
+  const { s, e } = activeFundedState();
+  const ts = e * EPOCH_MS + 5;
+  assert.equal(s.ingestTx(poolPayoutTx(m1, s.nonceOf(m1.address), 100, outputs, ts)).ok, true);
+  s.advance(at(e + 2));
+  // The miner is neither `from` nor top-level `to` (the pool is), yet its earnings must be visible.
+  const rows = s.recentHistory(miners[0]!.address, 50);
+  const mine = rows.find((r) => r.kind === "pool_payout" && r.to === miners[0]!.address);
+  assert.ok(mine, "the pool_payout surfaces for the paid miner");
+  assert.equal(mine!.amountUZIR, 400_000, "it shows the miner's own slice, not the pooled total");
+  // A non-recipient does not see it, and the pool's own view is unchanged (still the full outgoing tx).
+  const other = keypairFromPrivate("79".repeat(32)).address;
+  assert.equal(s.recentHistory(other, 50).some((r) => r.kind === "pool_payout"), false, "a non-recipient sees nothing");
+  assert.equal(s.recentHistory(m1.address, 50).some((r) => r.kind === "pool_payout" && r.from === m1.address), true, "the pool still sees its outgoing payout");
+});
+
 test("only an authorized settler (master/validator) may spend the pool", () => {
   const { s, e } = activeFundedState();
   const ts = e * EPOCH_MS + 5;

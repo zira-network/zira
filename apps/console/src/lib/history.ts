@@ -11,16 +11,18 @@ import type { SignedTx, ZiraClient } from "@zira/protocol";
 import { NodeClient, PUBLIC_GATEWAYS } from "../client/NodeClient";
 
 export async function loadReconciledHistory(client: ZiraClient, address: string, limit: number, nodeBehind: boolean): Promise<SignedTx[]> {
-  let txs = await client.getTxHistory(address, limit);
-  if (txs.length === 0 || nodeBehind) {
-    for (const gateway of PUBLIC_GATEWAYS) {
-      try {
-        const gw = await new NodeClient(gateway, false).getTxHistory(address, limit);
-        // Prefer whichever view returns more rows so a good local answer is never replaced by a briefly
-        // empty gateway one, and a lagging node's partial window is topped up by the fuller network view.
-        if (gw.length > txs.length) { txs = gw; break; }
-      } catch { /* gateway briefly unreachable: try the next */ }
-    }
+  void nodeBehind; // kept for call-site compatibility; we now always consult the network view below
+  let txs = await client.getTxHistory(address, limit).catch(() => [] as SignedTx[]);
+  // ALWAYS also consult the public gateways, not only when the local answer is empty or the node is flagged
+  // behind. Mining income arrives as pooled batch payouts, and a home node's small in-memory window can miss
+  // them even when it is otherwise in sync, so a synced-looking node could still show a short or empty
+  // earnings list. Prefer whichever source returns more rows so a good local answer is never replaced by a
+  // briefly empty gateway one. Read-only: it never signs or spends, it only decides what to display.
+  for (const gateway of PUBLIC_GATEWAYS) {
+    try {
+      const gw = await new NodeClient(gateway, false).getTxHistory(address, limit);
+      if (gw.length > txs.length) { txs = gw; break; }
+    } catch { /* gateway briefly unreachable: try the next */ }
   }
   return txs;
 }
