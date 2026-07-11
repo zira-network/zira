@@ -1223,6 +1223,10 @@ export class ZiraNode {
   // ---- the clock ----
 
   private regossipEvery = 0;
+  private unfinalizedRegossipEvery = 0;
+  // Hard ceiling on how many unfinalized txs are re-broadcast per pass, so a deep finality freeze (huge
+  // unfinalized window) can never turn the re-gossip into a CPU-saturating flood on a co-located master box.
+  private static readonly REGOSSIP_UNFINALIZED_MAX = 150;
 
   private tick(): void {
     const now = Date.now();
@@ -1235,7 +1239,7 @@ export class ZiraNode {
     // late joiners. Cheap: the pool is small and drains every epoch.
     this.regossipEvery = (this.regossipEvery + 1) % 4;
     if (this.regossipEvery === 0) {
-      const pool = this.state.poolEvents(400);
+      const pool = this.state.poolEvents(200);
       for (const tx of pool.txs) this.publish(this.topics.events, { t: "tx", data: tx });
       for (const o of pool.observations) this.publish(this.topics.events, { t: "observation", data: o });
       // Backfill: also re-broadcast recently-APPLIED txs, not only pooled ones. Once a tx is applied it leaves
@@ -1244,7 +1248,7 @@ export class ZiraNode {
       // state root and stalling quorum finality. Re-gossiping the recent applied window lets a lagging master
       // fill the gap and converge. Idempotent: a node that already has a tx de-dupes it by id, and the wide
       // settle window (SETTLE_ROUNDS) gives these backfills time to land before their epoch finalizes anywhere.
-      for (const tx of this.state.recentHistory(null, 300)) this.publish(this.topics.events, { t: "tx", data: tx });
+      for (const tx of this.state.recentHistory(null, 150)) this.publish(this.topics.events, { t: "tx", data: tx });
       // Re-gossip recent UNFINALIZED votes so a vote lost to a gossipsub mesh race still reaches quorum. Each
       // epoch's vote is cast exactly once (voteCheckpoints), so without this a single lost vote permanently
       // splits that epoch's votes and freezes finality — no master ever re-sends, so the split never heals.
@@ -1269,17 +1273,26 @@ export class ZiraNode {
       // Soft-state, consensus-neutral, idempotent (peers de-dupe by query id; providers skip answered).
       for (const q of this.soft.openQueries([], Date.now()).slice(0, 30)) this.publish(this.topics.app, { t: "query", data: q });
     }
-    // FINALITY DETERMINISM FIX (2026-07-10 hard-wedge at 356724426): every tick, re-broadcast the txs in the
-    // UNFINALIZED window (committedEpoch > lastFinalizedEpoch). A tx that reaches some masters later than the
-    // settle window makes them vote that epoch a DIFFERENT root; the finality vote then splits with no re-vote
-    // (voteCheckpoints votes each epoch once), so the split is permanent. Re-gossiping every unfinalized tx
-    // every ~5s guarantees no master is ever missing one before its epoch can finalize. Bounded + idempotent
-    // (peers de-dupe by id). Soft-state, no state-root change, fork-safe. In normal operation the unfinalized
-    // window is a handful of txs so this is nearly free; it only grows while finality is lagging.
-    {
+    // FINALITY DETERMINISM FIX (2026-07-10 hard-wedge at 356724426): re-broadcast the txs in the UNFINALIZED
+    // window (committedEpoch > lastFinalizedEpoch). A tx that reaches some masters later than the settle window
+    // makes them vote that epoch a DIFFERENT root; the finality vote then splits with no re-vote
+    // (voteCheckpoints votes each epoch once), so the split is permanent. Re-gossiping unfinalized txs lets a
+    // lagging master fill the gap. Idempotent (peers de-dupe by id), soft-state, fork-safe.
+    // CPU GUARD (2026-07-11 box1 crush): when finality is FROZEN, the unfinalized window balloons and
+    // re-broadcasting all of it every single tick pegs the co-located masters' event loops, which is the very
+    // thing that stops them processing the votes that would unfreeze finality — a self-reinforcing crush. So
+    // this now runs every 3rd tick and is BOUNDED to REGOSSIP_UNFINALIZED_MAX txs (newest first). Convergence is
+    // slightly slower under a deep freeze but the loop can never saturate the CPU, so the masters stay
+    // responsive enough to finalize their way out of it.
+    this.unfinalizedRegossipEvery = (this.unfinalizedRegossipEvery + 1) % 3;
+    if (this.unfinalizedRegossipEvery === 0) {
       const finE = this.checkpoints.lastFinalizedEpoch;
-      for (const tx of this.state.recentHistory(null, 500)) {
-        if ((tx.committedEpoch ?? 0) > finE) this.publish(this.topics.events, { t: "tx", data: tx });
+      let sent = 0;
+      for (const tx of this.state.recentHistory(null, 800)) {
+        if ((tx.committedEpoch ?? 0) > finE) {
+          this.publish(this.topics.events, { t: "tx", data: tx });
+          if (++sent >= ZiraNode.REGOSSIP_UNFINALIZED_MAX) break;
+        }
       }
     }
     // any mining node: keep the built-in engine running the authorized field model (auto mode). Re-announce
