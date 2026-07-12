@@ -99,9 +99,13 @@ function NetworkAndSupply({ showHealth }: { showHealth: boolean }) {
   const slow = useSlowHint(loading);
 
   const load = () => {
-    Promise.all([NodeApi.stats(), NodeApi.supply()])
+    // The Explorer shows the canonical NETWORK view from the shared consensus gateway (identical to the
+    // website Explorer), so it matches the web and never shows a desktop node's partial/still-syncing state.
+    // Fall back to the local node only if the gateway is unreachable, so an offline desktop node still renders.
+    Promise.all([NodeApi.networkStats(), NodeApi.networkSupply()])
+      .catch(() => Promise.all([NodeApi.stats(), NodeApi.supply()]))
       .then(([nextStats, nextSupply]) => { setStats(nextStats); setSupply(nextSupply); setError(""); setUpdatedAt(Date.now()); })
-      .catch((e) => setError(e instanceof Error ? e.message : "Could not reach the node RPC."))
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not reach the network."))
       .finally(() => setLoading(false));
   };
   usePoll(load, 8000, []);

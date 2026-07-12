@@ -862,6 +862,35 @@ export function Mine() {
           onPick={setHardwareMode}
         />
 
+        {/* Hardware-engaged summary: makes it concrete that mining puts the whole machine to work, and puts
+            "Engage maximum" one click away instead of buried in advanced settings. Shown only while mining. */}
+        {mining?.enabled && (
+          <div className="mt-3 rounded-xl border border-[color-mix(in_srgb,var(--indigo)_24%,var(--border))] bg-[color-mix(in_srgb,var(--indigo)_6%,transparent)] p-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm font-medium text-text"><Cpu size={15} className="text-[var(--indigo)]" /> Hardware engaged</div>
+              <Badge tone="indigo" className="text-[10px] uppercase tracking-wide">{hardware?.capabilityTier ?? "detecting"}</Badge>
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+              <Stat label="Machine" value={<span className="text-sm">{hardwareTitle(hardware)}</span>} />
+              <Stat label="CPU threads" value={`${mining?.threads ?? 0} / ${hardware?.cpuCores ?? "?"}`} tone="indigo" hint="cores at work" />
+              <Stat label="GPU layers" value={mining?.gpuLayers ?? 0} tone="indigo" hint={hardware?.gpuName ? "on GPU" : "CPU only"} />
+            </div>
+            {hardware?.cpuCores ? (
+              <div className="mt-2">
+                <div className="mb-1 flex justify-between text-[11px] text-faint">
+                  <span>capacity engaged</span>
+                  <span className="mono">{Math.round(100 * Math.min(1, (mining?.threads ?? 0) / Math.max(1, hardware.cpuCores)))}%</span>
+                </div>
+                <Meter value={Math.min(1, (mining?.threads ?? 0) / Math.max(1, hardware.cpuCores))} />
+              </div>
+            ) : null}
+            <div className="mt-2.5 flex flex-wrap items-center gap-2">
+              <Button variant="secondary" onClick={() => void saveMaximumHardwareUse()} disabled={busy}>Engage maximum</Button>
+              <span className="text-[11px] text-faint">Put every available core and GPU layer to work for stronger throughput and rewards.</span>
+            </div>
+          </div>
+        )}
+
       </Card>
 
       {/* Live, demand-driven economics. */}

@@ -287,8 +287,31 @@ async function fullReset(deep = process.env.ZIRA_DEEP_RESET === "1") {
   console.log(deep ? "ZIRA_RESET: cleared local ledger, model cache, and app storage, starting fresh" : "ZIRA_RESET: cleared local ledger and app storage, kept model cache, starting fresh");
 }
 
-// Settings -> "Reset ZIRA": stop the node, wipe EVERYTHING (ledger + wallet/app storage + model cache),
-// then relaunch the app clean. Driven from the renderer via the contextBridge.
+// Re-sync ledger: the SAFE remedy for any sync/divergence/"stuck" issue. Wipes ONLY the local ledger view
+// (events, snapshot, zti-history, the settler watermark) so the node fast-syncs a fresh, correct state on
+// relaunch. KEEPS identity.json + peer-key.bin (same wallet + node identity) and does NOT clear app/wallet
+// storage or the model cache. Funds live on chain; this only rebuilds the local ledger view. This is what a
+// user should reach for first, and what an in-app "your local balance disagrees with the network" prompt runs.
+async function resyncLedger() {
+  try {
+    const dataDir = path.join(app.getPath("userData"), "zira-data", NETWORK);
+    const ledgerNames = ["events.jsonl", "snapshot.json", "zti-history.jsonl", "settler-progress.json"];
+    for (const name of ledgerNames) fs.rmSync(path.join(dataDir, name), { recursive: true, force: true });
+  } catch { /* */ }
+}
+
+// Settings -> "Re-sync ledger" (safe): keeps identity + wallet, only rebuilds the ledger.
+ipcMain.handle("zira:resync", async () => {
+  try { stopNode(); } catch { /* */ }
+  await resyncLedger();
+  app.relaunch();
+  app.exit(0);
+  return true;
+});
+
+// Settings -> "Delete wallet & reset" (DESTRUCTIVE): stop the node, wipe EVERYTHING (ledger + wallet/app
+// storage + model cache), then relaunch clean. The renderer MUST gate this behind an explicit seed-backup
+// confirmation, because this deletes the node wallet key (identity.json) and the Console wallet (app storage).
 ipcMain.handle("zira:reset", async () => {
   try { stopNode(); } catch { /* */ }
   await fullReset(true);

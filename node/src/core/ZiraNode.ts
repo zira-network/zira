@@ -82,7 +82,7 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "2.2.0";
+const NODE_RELEASE_VERSION = "2.2.1";
 // Per-cycle coordination batch. Every funded+listed resonator is eligible; autonomousResonanceBatch picks
 // this many per 5-minute cycle by a DETERMINISTIC ZTI-WEIGHTED draw, so higher-trust resonators (anchors,
 // seeded 0.95/0.85/… by class) are driven most often and earn the most, while every other funded resonator
@@ -175,6 +175,10 @@ const PUSH_LIVENESS_MAX_AGE_MS = envMs("ZIRA_PUSH_LIVENESS_MAX_AGE_MS", 90_000);
 const PUSH_LIVENESS_MAX_TARGETS = Number(process.env.ZIRA_PUSH_LIVENESS_MAX_TARGETS ?? 32);
 // A follower keeps this many recent per-epoch local roots to self-check against finalized consensus roots.
 const LOCAL_ROOT_HISTORY = 512;
+// How many recent per-root FINALIZED-consistent snapshots to retain for serving fast-sync. Only needs to
+// exceed the finality lag (lastProcessedEpoch - lastFinalizedEpoch, normally a handful of epochs); 64 gives
+// ~5 minutes of headroom. Each is a deep copy of the state snapshot (~a few hundred KB), so this is bounded.
+const FINALIZED_SNAP_HISTORY = 64;
 // Consecutive DISTINCT finalized epochs whose consensus root disagrees with our own recorded root before we
 // conclude our applied state has diverged and re-adopt a verified master snapshot. >1 so a single off-by-one
 // settle-timing sample never triggers a needless resync; the roots are deterministic, so real divergence persists.
@@ -282,10 +286,15 @@ export function verifyFastSyncSnapshot(best: Snap, genesis: GenesisDoc): boolean
   if (!best.snapshot || best.finalizedEpoch < 0 || !best.finalizedRoot || best.finalizedRoot === "00") return false;
   if (!Array.isArray(best.votes) || best.votes.length === 0) return false;
 
-  // The snapshot content must hash to the finalized root; binds the state to the checkpoint.
+  // The snapshot content must hash to the finalized root; binds the state to the checkpoint. Pass the SAME
+  // six fields State.stateRoot() hashes (incl. validators + lastPoolPayoutBucket); both are empty/0 and
+  // root-neutral while decentralization is dormant, but omitting them would silently mismatch once the
+  // sealed validator registry or pool-payout watermark becomes non-empty.
   const root = computeStateRoot(
     best.snapshot.accounts as AccountLeaf[], best.snapshot.supply,
     best.snapshot.founders ?? [], best.snapshot.anchors ?? [],
+    (best.snapshot as { validators?: string[] }).validators ?? [],
+    (best.snapshot as { lastPoolPayoutBucket?: number }).lastPoolPayoutBucket ?? 0,
   );
   if (root !== best.finalizedRoot) return false;
 
@@ -2088,6 +2097,18 @@ export class ZiraNode {
       const cutoff = epoch - LOCAL_ROOT_HISTORY;
       for (const e of this.localRootByEpoch.keys()) if (e <= cutoff) this.localRootByEpoch.delete(e);
     }
+    // Cache the FINALIZED-consistent snapshot keyed by this epoch's root, taken at the exact moment the
+    // applied state hashes to `root`. serveSnapshot() serves the copy whose root == lastFinalizedRoot so a
+    // joiner's verifyFastSyncSnapshot (which recomputes computeStateRoot over the served accounts) matches the
+    // checkpoint. Without this, serveSnapshot sent the drifting HEAD state paired with the LAGGED finalized
+    // root, so computeStateRoot(head) != finalizedRoot and every fast-sync attempt was rejected (ROOT
+    // MISMATCH) — fresh nodes then fell back to genesis replay and ran with wrong local balances. Deep-copied
+    // (JSON round-trip) so later balance mutations to the live account objects never corrupt a cached root.
+    this.finalizedSnapByRoot.set(root, JSON.parse(JSON.stringify(this.state.snapshot())));
+    if (this.finalizedSnapByRoot.size > FINALIZED_SNAP_HISTORY) {
+      const oldest = this.finalizedSnapByRoot.keys().next().value as string | undefined;
+      if (oldest !== undefined) this.finalizedSnapByRoot.delete(oldest);
+    }
     const me = this.state.accounts.get(this.identity.address);
     if (!me || !me.isMaster) return;
     const vote = this.checkpoints.createVote(epoch, root, this.state.supply, this.identity, me.zti, now);
@@ -2198,6 +2219,10 @@ export class ZiraNode {
   // State-divergence watchdog bookkeeping (see maybeResyncOnDivergence). Our own recorded root per settle epoch,
   // a streak of finalized epochs whose consensus root disagreed with ours, and rate-limit stamps.
   private localRootByEpoch = new Map<number, string>();
+  // root -> deep-copied state snapshot taken when the applied state hashed to that root. serveSnapshot()
+  // serves the entry for lastFinalizedRoot so the served state matches the finalized checkpoint it is paired
+  // with (see voteCheckpoints). Bounded by FINALIZED_SNAP_HISTORY.
+  private finalizedSnapByRoot = new Map<string, object>();
   private divergentFinalizedStreak = 0;
   private lastDivergenceCheckedEpoch = -1;
   private lastDivergenceResyncAt = 0;
@@ -2292,11 +2317,17 @@ export class ZiraNode {
 
   /** Serve our finalized state snapshot to a joining peer, with the finalized checkpoint it sits on. */
   private async *serveSnapshot(): AsyncIterable<Uint8Array> {
+    const finRoot = this.checkpoints.lastFinalizedRoot;
+    // Serve the snapshot whose root == the finalized root, NOT the drifting head. If the finalized snapshot
+    // is not cached (e.g. finality lag briefly exceeded FINALIZED_SNAP_HISTORY, or right after boot), fall
+    // back to the head snapshot — the joiner's verifier simply rejects it and retries the next peer, exactly
+    // as before, so this is never worse than the old behaviour and normally strictly correct.
+    const finalizedSnap = this.finalizedSnapByRoot.get(finRoot) ?? this.state.snapshot();
     yield enc.encode(JSON.stringify({
-      snapshot: this.state.snapshot(),
+      snapshot: finalizedSnap,
       finalizedEpoch: this.checkpoints.lastFinalizedEpoch,
-      finalizedRoot: this.checkpoints.lastFinalizedRoot,
-      votes: this.checkpoints.finalizingVotes(this.checkpoints.lastFinalizedEpoch, this.checkpoints.lastFinalizedRoot),
+      finalizedRoot: finRoot,
+      votes: this.checkpoints.finalizingVotes(this.checkpoints.lastFinalizedEpoch, finRoot),
     }));
   }
 

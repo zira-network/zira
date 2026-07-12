@@ -15,6 +15,13 @@ import {
 } from "@zira/protocol";
 import { verifyFastSyncSnapshot } from "../src/core/ZiraNode.js";
 
+// These adversarial cases assert the CLASSIC multi-master quorum arithmetic (founder alone = 1/4 = 0.25 <
+// 0.67, three of four = 0.75 >= 0.67). That path is only exercised when single-finalizer is dormant; with it
+// active the electorate collapses to the lead finalizer whose lone vote is 100%, which the dedicated
+// single-finalizer tests cover. Pin it dormant here so the quorum thresholds under test are the real ones.
+// Node's test runner isolates each file in its own process, so this does not leak to other suites.
+process.env.ZIRA_SINGLE_FINALIZER_ACTIVATION_EPOCH = "999999999999";
+
 const GTS = 1_700_000_000_000;
 const founder = keypairFromPrivate("0a".repeat(32));
 const genesis: GenesisDoc = standardGenesis("devnet", founder.address, GTS);

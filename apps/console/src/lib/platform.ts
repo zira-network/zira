@@ -1,16 +1,27 @@
 // apps/console/src/lib/platform.ts
 // Whether the Console is running inside the ZIRA desktop app. Mining (running a model on your CPU
 // or GPU) is desktop only, so these features are hidden on the web and on mobile.
-interface ZiraBridge { isDesktop: boolean; platform: string; version: string; resetAndRelaunch?: () => Promise<boolean> }
+interface ZiraBridge { isDesktop: boolean; platform: string; version: string; resetAndRelaunch?: () => Promise<boolean>; resyncLedger?: () => Promise<boolean> }
 
 export function isDesktop(): boolean {
-  return typeof window !== "undefined" && !!(window as unknown as { zira?: ZiraBridge }).zira?.isDesktop;
+  if (typeof window === "undefined") return false;
+  // Dev-only opt-in so the desktop-gated pages (Mine) can be previewed in the browser dev server against a
+  // local node. Never set in production; the real desktop app injects window.zira.isDesktop via preload.
+  try { if (import.meta.env.DEV && localStorage.getItem("zira.devDesktop") === "1") return true; } catch { /* */ }
+  return !!(window as unknown as { zira?: ZiraBridge }).zira?.isDesktop;
 }
 
 // Desktop only: ask the app to wipe EVERYTHING (ledger + wallet + model cache + app storage) and relaunch
 // clean. Returns null when not running in the desktop app (web/mobile fall back to a browser-side wipe).
 export function desktopResetAndRelaunch(): Promise<boolean> | null {
   const fn = (window as unknown as { zira?: ZiraBridge }).zira?.resetAndRelaunch;
+  return typeof fn === "function" ? fn() : null;
+}
+
+// Desktop only: the SAFE remedy. Rebuild ONLY the local ledger (events/snapshot/zti-history) and relaunch,
+// keeping the node identity + wallet + app storage intact. Returns null when not in the desktop app.
+export function desktopResyncLedger(): Promise<boolean> | null {
+  const fn = (window as unknown as { zira?: ZiraBridge }).zira?.resyncLedger;
   return typeof fn === "function" ? fn() : null;
 }
 

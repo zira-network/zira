@@ -17,6 +17,12 @@ import { Libp2pNetwork } from "../src/p2p/Libp2pNetwork.js";
 import { topics as buildTopics } from "../src/p2p/topics.js";
 import { ZiraNode } from "../src/core/ZiraNode.js";
 
+// This reproduces + fixes the classic 4-master split-heal (per-tick re-gossip converges all four masters).
+// Single-finalizer defaults ON (leader-only finalizes), which makes the 4-master convergence premise moot and
+// leaves the test waiting on a quorum that never forms (it timed out at ~5 min). Pin single-finalizer dormant
+// so the multi-master finality path under test actually runs. Node isolates each file's process.
+process.env.ZIRA_SINGLE_FINALIZER_ACTIVATION_EPOCH = "999999999999";
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const founder = keypairFromPrivate("0a".repeat(32));
 const masters = [

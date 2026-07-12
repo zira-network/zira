@@ -182,6 +182,13 @@ export interface AnchorPositionTransferResult { ok: boolean; reason?: string; se
 export const NodeApi = {
   stats: () => rpcGet<ExtendedStats>("/stats"),
 
+  // Canonical NETWORK view for the Explorer: always the shared consensus gateway (the same source the
+  // website Explorer reads), so a desktop user's Explorer shows the WHOLE network rather than their own
+  // local node's partial/still-syncing view — which is why the in-app and web explorers used to disagree.
+  // On web/mobile anchorBase() already IS the gateway, so this is identical to stats()/supply() there.
+  networkStats: () => rpcGetFrom<ExtendedStats>(anchorBase(), "/stats"),
+  networkSupply: () => rpcGetFrom<SupplyInfo>(anchorBase(), "/supply"),
+
   // labeled project wallets (reserve, events, network, resonator pool, steward ops) + live balances
   treasury: () => rpcGet<Treasury>("/treasury"),
 

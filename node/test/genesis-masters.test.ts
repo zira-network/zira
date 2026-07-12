@@ -16,6 +16,13 @@ import { State, EPOCH_MS, epochOf, GRACE_MS, SETTLE_ROUNDS } from "../src/core/S
 import { Checkpoints } from "../src/core/Checkpoints.js";
 import { genesisFor } from "../src/genesis-docs.js";
 
+// This suite proves the CLASSIC multi-master (3-of-4) quorum path, which is the electorate when
+// single-finalizer is dormant (the pre-activation state, and the machinery the decentralization cutover
+// re-broadens). Single-finalizer defaults ON (activation epoch 1) so live clients follow the lone leader;
+// pin it dormant here so the quorum arithmetic under test is real. Node isolates each test file's process,
+// so this does not leak. Must be set before any State is constructed.
+process.env.ZIRA_SINGLE_FINALIZER_ACTIVATION_EPOCH = "999999999999";
+
 const GTS = 1_700_000_000_000;
 
 test("A2: mainnet genesis seeds a 4-master quorum; the founder is not a master; seeding is root-neutral", () => {

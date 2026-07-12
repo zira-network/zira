@@ -7,7 +7,10 @@ contextBridge.exposeInMainWorld("zira", {
   isDesktop: true,
   platform: process.platform,
   version: process.versions.electron,
-  // Settings -> "Reset ZIRA": wipe everything (ledger + wallet + model cache) and relaunch clean.
+  // Settings -> "Re-sync ledger" (SAFE): rebuild only the local ledger; keeps identity + wallet.
+  resyncLedger: () => ipcRenderer.invoke("zira:resync"),
+  // Settings -> "Delete wallet & reset" (DESTRUCTIVE): wipe everything incl. wallet + model cache. The UI
+  // must gate this behind an explicit seed-backup confirmation.
   resetAndRelaunch: () => ipcRenderer.invoke("zira:reset"),
   // Relaunch without wiping (used after importing a wallet, so the node reloads its new identity).
   relaunchApp: () => ipcRenderer.invoke("zira:relaunch"),

@@ -10,6 +10,14 @@ import assert from "node:assert/strict";
 import { keypairFromPrivate, standardGenesis, signTx, type GenesisDoc } from "@zira/protocol";
 import { State, EPOCH_MS, epochOf, GRACE_MS, SETTLE_ROUNDS } from "../src/core/State.js";
 
+// This suite exercises the decentralization validator electorate (anchor/earned nodes sealed into the
+// registry and admitted to finality). singleFinalizerActiveNow() takes precedence over the registry in
+// masterZtiMap/totalMasterTrust, and single-finalizer defaults ON, so it would collapse the electorate to
+// the lone leader and mask the registry under test. Pin it dormant so the broadened electorate is exercised.
+// DESIGN NOTE: when the cutover actually flips the electorate live, single-finalizer must be stepped down in
+// the same activation so the community electorate is not overridden. Node isolates each file's process.
+process.env.ZIRA_SINGLE_FINALIZER_ACTIVATION_EPOCH = "999999999999";
+
 const founder = keypairFromPrivate("0a".repeat(32));
 const GTS = 1_700_000_000_000;
 const m1 = keypairFromPrivate("11".repeat(32));

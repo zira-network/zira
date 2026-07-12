@@ -16,7 +16,7 @@ import { formatZir, timeAgo } from "../lib/format";
 import { NodeApi, type NetInfo } from "../lib/nodeApi";
 import { shortcutDocs } from "../lib/shortcuts";
 import { formatNodeVersion } from "../lib/version-compat";
-import { desktopResetAndRelaunch, isDesktop } from "../lib/platform";
+import { desktopResetAndRelaunch, desktopResyncLedger, isDesktop } from "../lib/platform";
 
 let providerInstance: ProviderMode | null = null;
 
@@ -82,11 +82,30 @@ function ResetZiraCard() {
     setTimeout(() => location.reload(), 2000);
   }
 
+  const [resyncing, setResyncing] = useState(false);
+  async function resyncLedger() {
+    // The SAFE fix for "stuck syncing" or a local balance that disagrees with the network: rebuild only the
+    // ledger, keep the wallet + identity. On desktop this relaunches the node; on web/mobile it just reloads.
+    setResyncing(true);
+    const relaunch = desktopResyncLedger();
+    if (relaunch) { toast.push("Re-syncing the ledger. Your wallet is kept. Restarting…"); try { await relaunch; } catch { /* app is exiting */ } return; }
+    // Web/mobile are thin gateway clients with no local ledger to rebuild; a reload re-fetches from the gateway.
+    toast.push("Refreshing from the network…");
+    setTimeout(() => location.reload(), 1200);
+  }
+
   return (
-    <Card className="border-[color-mix(in_srgb,var(--danger)_30%,transparent)]">
-      <h3 className="mb-1 flex items-center gap-2 text-sm font-semibold text-[var(--danger)]"><RotateCcw size={15} /> Reset ZIRA</h3>
-      <p className="mb-2 text-xs text-muted">One click wipes everything and rebuilds from genesis: your wallet, settings, and chats on this device, and your node's whole ledger{isDesktop() ? ", plus the downloaded model cache. The app restarts itself clean (the model re-downloads on next use)." : " (all past transactions)."} Back up your private key first if you want to keep it.</p>
-      <Button variant="danger" onClick={() => setWipeOpen(true)}>Reset ZIRA and start fresh</Button>
+    <Card className="border-hairline">
+      {isDesktop() && (
+        <div className="mb-4 border-b border-hairline pb-4">
+          <h3 className="mb-1 flex items-center gap-2 text-sm font-semibold text-text"><RotateCcw size={15} /> Re-sync ledger</h3>
+          <p className="mb-2 text-xs text-muted">Stuck on “Syncing”, or your balance looks wrong compared to the network? This rebuilds only your local ledger and fetches a fresh, verified copy from the network. <span className="text-text">Your wallet and settings are kept</span> — this is the safe fix, try it first.</p>
+          <Button variant="secondary" onClick={resyncLedger} disabled={resyncing}>{resyncing ? "Re-syncing…" : "Re-sync ledger (keeps wallet)"}</Button>
+        </div>
+      )}
+      <h3 className="mb-1 flex items-center gap-2 text-sm font-semibold text-[var(--danger)]"><RotateCcw size={15} /> Delete wallet & reset</h3>
+      <p className="mb-2 text-xs text-muted">This wipes everything and rebuilds from genesis: your wallet, settings, and chats on this device, and your node's whole ledger{isDesktop() ? ", plus the downloaded model cache. The app restarts itself clean (the model re-downloads on next use)." : " (all past transactions)."} <span className="text-[var(--danger)]">Back up your private key first</span> — this deletes it. If you only have a sync problem, use “Re-sync ledger” above instead.</p>
+      <Button variant="danger" onClick={() => setWipeOpen(true)}>Delete wallet and reset</Button>
       <Modal open={wipeOpen} onClose={closeWipe} title="Reset ZIRA and start fresh">
         <div className="space-y-4">
           <p className="text-sm text-muted">This is irreversible. It destroys your wallet, settings, and chats on this device{isDesktop() ? ", clears the downloaded model," : ","} and resets your node's entire ledger back to genesis.</p>
