@@ -72,7 +72,7 @@ export const PROTOCOL = {
   // fragility; a lone finalizer cannot diverge or freeze and needs no cross-node agreement (see the
   // single-finalizer-snapshot test). Electorate is soft/off-root, so this is root-neutral; the epoch gate only
   // makes every node flip together. 0 = disabled (dormant) => classic 4-master quorum, unchanged.
-  SINGLE_FINALIZER_ACTIVATION_EPOCH: 0,
+  SINGLE_FINALIZER_ACTIVATION_EPOCH: 1,
   // Pure-epoch field-participation payout. The classic path pays miners via a gossiped settler batch_transfer;
   // if a master misses that packet its balances fork and finality freezes (the recurring 2026-07 head-fork).
   // At/after this epoch the payout is instead distributed as a PURE-EPOCH function in processEpoch: every node

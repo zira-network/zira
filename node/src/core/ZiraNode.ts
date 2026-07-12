@@ -303,11 +303,24 @@ export function verifyFastSyncSnapshot(best: Snap, genesis: GenesisDoc): boolean
   // when the network has a genesis master set, ONLY those fixed masters are the electorate, so a checkpoint
   // finalized by 3 of 4 genesis masters (0.75) still verifies and a non-voting earned/anchor master cannot
   // inflate the denominator and make an honest 3-of-4 snapshot un-adoptable.
+  // Single-finalizer: when it is active for this checkpoint's epoch, the electorate is EXACTLY the lead
+  // finalizer, whose own vote is 100% of trust. Fast-sync verification must mirror live finality here, or a
+  // fresh node computes the denominator as all four masters and rejects the leader's (single-vote, 25%)
+  // checkpoint as under-quorum, so it can never adopt a snapshot and is stuck "syncing" forever. This is the
+  // follower-side counterpart of State.masterZtiMap/totalMasterTrust.
+  const sfaRaw = Number(process.env.ZIRA_SINGLE_FINALIZER_ACTIVATION_EPOCH);
+  const sfa = Number.isFinite(sfaRaw) && sfaRaw > 0 ? Math.floor(sfaRaw) : PROTOCOL.SINGLE_FINALIZER_ACTIVATION_EPOCH;
+  const singleFinalizer = sfa > 0 && best.finalizedEpoch >= sfa;
+  const orderedMasters = genesis.masters?.length ? genesis.masters.map((m) => m.address) : [genesis.founder];
+  const liRaw = Number(process.env.ZIRA_FINALITY_LEADER_INDEX);
+  const leaderAddr = orderedMasters[Number.isFinite(liRaw) && liRaw >= 0 ? Math.min(Math.floor(liRaw), orderedMasters.length - 1) : 0];
+
   const masterByPub = new Map<string, SnapAccount>();
   let totalMaster = 0;
   for (const a of best.snapshot.accounts) {
     if (!a.isMaster || !a.pubkey) continue;
     if (gatedMasters && !genesisMasterAddrs.has(a.address)) continue;
+    if (singleFinalizer && a.address !== leaderAddr) continue;   // only the lead finalizer is the electorate
     masterByPub.set(a.pubkey, a);
     totalMaster += a.zti;
   }

@@ -36,8 +36,8 @@ function build(activationEnv?: string, leaderIdxEnv?: string): State {
   return s;
 }
 
-test("dormant: classic 4-master electorate (unchanged)", () => {
-  const s = build(undefined);
+test("pre-activation: classic 4-master electorate (a far-future activation epoch keeps it dormant)", () => {
+  const s = build("999999999999");
   assert.equal(s.singleFinalizerActiveNow(), false);
   assert.equal(s.masterZtiMap().size, 4, "all 4 genesis masters are electors");
   assert.equal(s.totalMasterTrust(), 4, "total trust = 4 masters at zti 1.0");
