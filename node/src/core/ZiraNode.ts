@@ -82,7 +82,7 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "2.1.0";
+const NODE_RELEASE_VERSION = "2.2.0";
 // Per-cycle coordination batch. Every funded+listed resonator is eligible; autonomousResonanceBatch picks
 // this many per 5-minute cycle by a DETERMINISTIC ZTI-WEIGHTED draw, so higher-trust resonators (anchors,
 // seeded 0.95/0.85/… by class) are driven most often and earn the most, while every other funded resonator
@@ -1008,8 +1008,26 @@ export class ZiraNode {
     return signRecord(draft, this.identity.privateKey);
   }
 
+  /** The node's operational role. CONSENSUS nodes (genesis masters + the read gateway) stay deliberately LEAN:
+   *  they never run heavy inference/compute, so the box's event loop cannot be saturated into a finality stall
+   *  (the recurring incident). WORKER nodes (miners) use full hardware. `ZIRA_NODE_ROLE=consensus|worker`
+   *  overrides; auto-detect makes founders/masters/gateway consensus and everyone else a worker. */
+  nodeRole(): "consensus" | "worker" {
+    const env = (process.env.ZIRA_NODE_ROLE || "").toLowerCase();
+    if (env === "consensus" || env === "worker") return env;
+    if (process.env.ZIRA_GATEWAY === "1" || this.isFounder() || this.state.isGenesisMaster(this.identity.address)) return "consensus";
+    return "worker";
+  }
+
   /** Start or restart the Tier 2 inference provider with the given config. */
   startProvider(config: ProviderConfig): void {
+    // Anti-saturation: a consensus node (master/gateway) never serves heavy inference, so it stays lean and
+    // the box can't be pinned into a finality stall. Heavy compute belongs on worker (miner) nodes.
+    if (this.nodeRole() === "consensus") {
+      log.info(`consensus-role node ${this.identity.address.slice(0, 10)} stays lean: inference serving disabled (heavy compute runs on worker nodes)`);
+      this.opts.providerConfig = { ...config, enabled: false };
+      return;
+    }
     this.inferenceProvider?.stop();
     this.opts.providerConfig = config;
     this.inferenceProvider = new InferenceProvider(config, this, this.identity);
@@ -1491,6 +1509,10 @@ export class ZiraNode {
       log.info(`field participation gate: budget=${FIELD_PARTICIPATION_BUDGET_UZIR} settler=${masters0.slice(0, 20)} me=${this.identity.address.slice(0, 20)} isSettler=${this.isNetworkSettler()}`);
     }
     if (FIELD_PARTICIPATION_BUDGET_UZIR <= 0) return;
+    // Superseded by the pure-epoch distribution (State.distributeFieldParticipation) once it activates: that path
+    // credits miners deterministically in processEpoch with NO gossiped tx, so this classic gossiped batch_transfer
+    // must stand down or the bucket would be paid twice.
+    if (this.state.fieldPayoutPureActiveNow()) return;
     // Decentralization cutover: when active, the payout is funded from the POOL via pool_payout and ANY
     // authorized settler (genesis master OR sealed validator) may issue it, so miners keep earning when box1
     // is down. While dormant, the classic path applies: only the active genesis-master settler pays, from its
@@ -1590,38 +1612,14 @@ export class ZiraNode {
    * applies byte-identically on every node (no consensus rule change, fork-safe) — so it fills the hole, the
    * nonce advances, and the queued payouts drain in order. Idempotent and self-throttled.
    */
-  private unstickSettlerNonce(now: number): void {
-    if (this.settlerPaused) return;                                                 // recovery pause: issue nothing
-    if (!this.isNetworkSettler()) return;
-    const committed = this.state.nonceOf(this.identity.address);
-    if (committed !== this.settlerNonceMark) {                                       // advanced: healthy
-      this.settlerNonceMark = committed; this.settlerNonceMarkAt = now;
-      // The nonce moved on, so any filler we chose for an EARLIER stuck nonce is spent; forget it (and persist)
-      // so a future wedge picks a fresh, recent timestamp rather than reusing a stale one.
-      if (this.stuckFiller && this.stuckFiller.nonce < committed) { this.stuckFiller = null; this.persistSettlerProgress(); }
-      return;
-    }
-    if (this.state.provisionalNonce(this.identity.address) <= committed) return;   // nothing queued above committed: not wedged
-    if (now - this.settlerNonceMarkAt < SETTLER_NONCE_STUCK_MS) return;             // give a normal payout time to settle first
-    if (now - this.lastNonceUnstickAt < SETTLER_NONCE_STUCK_MS) return;             // at most one unstick attempt per window
-    this.lastNonceUnstickAt = now;
-    // IDEMPOTENT filler. The ONLY non-deterministic field of the filler is its timestamp; with `timestamp: now`
-    // a restart (or a later re-issue) minted a NEW tx id at the SAME committed nonce, so different masters applied
-    // different fillers and forked the head root — the 2026-07-10 finality freeze. Fix: choose the timestamp ONCE
-    // per stuck committed nonce and PERSIST it, so every re-issue — across restarts and across nodes that later
-    // become the settler — rebuilds the byte-identical tx. One tx per nonce => it can never fork. The first pick
-    // is `now` so the filler's epoch is recent (dodges the fast-sync-floor drop for a freshly-realigned node).
-    if (!this.stuckFiller || this.stuckFiller.nonce !== committed) {
-      this.stuckFiller = { nonce: committed, ts: now };
-      this.persistSettlerProgress();
-    }
-    const tx = signTx({
-      network: this.genesis.network, from: this.identity.address, fromPubKey: this.identity.publicKey,
-      to: this.identity.address, amountUZIR: 1, feeUZIR: PROTOCOL.BASE_FEE_UZIR, nonce: committed,
-      kind: "batch_transfer", parents: [], timestamp: this.stuckFiller.ts, memo: JSON.stringify({ o: [[this.genesis.founder, 1]] }),
-    }, this.identity.privateKey);
-    const r = this.submitTx(tx);
-    log.warn(`settler nonce wedged at ${committed} while payouts queued above it; re-issued an IDEMPOTENT committed-nonce filler (ts=${this.stuckFiller.ts}) to drain the pipeline (accepted=${r.accepted}${r.reason ? " " + r.reason : ""})`);
+  private unstickSettlerNonce(_now: number): void {
+    // SUPERSEDED and DISABLED — inert shim. This reactive filler was the 2026-07-10 fork source: it minted a
+    // signed tx at the empty committed nonce whose timestamp varied per issuing node and per restart, so
+    // masters applied different fillers at the same nonce and forked the head root, a divergence no realign
+    // could reconcile. A pure-epoch gap-close in State.processEpoch now advances a settle-lagged stuck nonce
+    // deterministically with NO gossiped tx, so there is nothing to diverge on. The method (and its persisted
+    // stuckFiller bookkeeping) is retained only so restored settler-progress and the tick caller stay valid;
+    // it must never issue a tx again.
   }
 
   /**
@@ -2740,7 +2738,8 @@ export class ZiraNode {
       isFounder: this.isFounder(),
       founderAddress: this.genesis.founder,
       founderAddresses: this.founderAddresses(),
-    } as NetworkStats & { version: string; peers: number; finalizedEpoch: number; stateRoot: string; pool: { txs: number; observations: number }; models: number; mastersCount: number; isFounder: boolean; founderAddress: string; founderAddresses: string[] };
+      role: this.nodeRole(),
+    } as NetworkStats & { version: string; peers: number; finalizedEpoch: number; stateRoot: string; pool: { txs: number; observations: number }; models: number; mastersCount: number; isFounder: boolean; founderAddress: string; founderAddresses: string[]; role: "consensus" | "worker" };
   }
 
   private persistSnapshot(): void {

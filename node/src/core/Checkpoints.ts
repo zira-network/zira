@@ -58,9 +58,15 @@ export class Checkpoints {
   private applyVote(vote: SignedCheckpointVote, totalMasterTrust: number, masterMap: ReadonlyMap<string, number>): FinalizedCheckpoint | null {
     if (this.seen.has(vote.id)) return null;
     if (vote.network !== this.network) return null;
-    if (!verifyCheckpointVote(vote)) return null;
-    // SECURITY: reject votes from non-masters immediately (don't even store them).
+    // SECURITY + PERFORMANCE: reject votes from non-electorate voters with the CHEAP map lookup BEFORE the
+    // expensive ed25519 signature check. A stalled network has the entire community (100+ nodes, none of them
+    // in the electorate) re-gossiping checkpoint votes across a huge unfinalized window; verifying every one of
+    // those signatures only to discard it as a non-master pegged the master's single event-loop thread — and a
+    // saturated loop cannot process the genuine master votes that carry finality, so the freeze became
+    // self-sustaining. Gating first makes an ineligible vote O(1) to drop. Not added to `seen` (that set is for
+    // real, stored votes), so a re-gossiped community vote is re-dropped cheaply rather than filling the cache.
     if (!masterMap.has(vote.voter)) return null;
+    if (!verifyCheckpointVote(vote)) return null;
     this.seen.add(vote.id);
 
     let byRoot = this.votes.get(vote.epoch);

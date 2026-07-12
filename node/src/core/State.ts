@@ -123,22 +123,50 @@ export class State {
   fastSyncFloorEpoch = -1;
 
   private static HISTORY_CAP = 8000;
+  // Emission `reward` entries (one per emission batch, ~one per epoch, all credited to the settler) are internal
+  // supply records, not user activity. Kept in the main history they FLOODED it — ~85% of entries — so a miner's
+  // real payouts (batch_transfer/pool_payout slices) were compacted out within hours and the explorer showed only
+  // ~0.4h of a miner's earnings. They live in their own bounded list instead, so the main history retains weeks of
+  // real payouts. Display-only: neither list is in the state root (record() never touches consensus).
+  private rewardHistory: LedgerEntry[] = [];
+  private static REWARD_HISTORY_CAP = 3000;
   private static LOCK_CAP = 2000;
-  // How long a nonce-gapped tx waits in the pool for its missing predecessor before it is dropped (~10 min of
-  // epochs). Generous, because the applied-tx re-gossip usually fills the gap within seconds; this only bounds
-  // the pool against a predecessor that is genuinely gone. Deterministic across nodes (epochs of tx timestamps).
+  // How long a nonce-gapped tx waits for its missing predecessor before the gap is deterministically CLOSED
+  // (~10 min of epochs). Generous, because the applied-tx re-gossip usually fills the gap within seconds; this
+  // only bounds against a predecessor that is genuinely gone. It is a CONSENSUS parameter — every node must use
+  // the identical value or they close a gap at different epochs and fork — so production always uses this
+  // compile-time default (120). The per-instance override below is a TEST-ONLY seam (a shorter TTL so a unit
+  // test need not advance 120 epochs); it is read from env at construction, exactly like the activation-epoch
+  // seam, and is never set on the live masters.
   private static TX_GAP_TTL_EPOCHS = 120;
+  private readonly txGapTtlEpochs: number;
 
   // Decentralization cutover activation epoch. Defaults to the protocol constant (0 = dormant in prod, so
   // every node on the same release agrees). An override is accepted ONLY as a test/rehearsal seam — the live
   // cutover ships the constant in a release, never a per-node override, so nodes can never disagree.
   private readonly decentralizationActivationEpoch: number;
+  // Pure-epoch field-participation payout activation. Dormant (0) by default => root-neutral. Env override is a
+  // TEST-ONLY seam (never set on live nodes, or they would disagree on when the payout mechanism changes).
+  private readonly fieldPayoutActivationEpoch: number;
+  // Single-finalizer (leader) finality. Dormant (0) => classic quorum. Env overrides are TEST/OPS seams:
+  // the activation epoch ships in a release (never per-node, or nodes disagree on WHEN); the leader index is
+  // the managed-failover lever — set identically on all surviving nodes to promote another genesis master.
+  private readonly singleFinalizerActivationEpoch: number;
+  private readonly finalityLeaderIndex: number;
 
   constructor(genesis: GenesisDoc, activationEpochOverride?: number) {
     this.genesis = genesis;
     this.founder = genesis.founder;
     this.settler = genesis.masters?.[0]?.address ?? genesis.founder;
     this.decentralizationActivationEpoch = activationEpochOverride ?? PROTOCOL.DECENTRALIZATION_ACTIVATION_EPOCH;
+    const ttlOverride = Number(process.env.ZIRA_TX_GAP_TTL_EPOCHS);
+    this.txGapTtlEpochs = Number.isFinite(ttlOverride) && ttlOverride > 0 ? Math.floor(ttlOverride) : State.TX_GAP_TTL_EPOCHS;
+    const fpo = Number(process.env.ZIRA_FIELD_PAYOUT_ACTIVATION_EPOCH);
+    this.fieldPayoutActivationEpoch = Number.isFinite(fpo) && fpo > 0 ? Math.floor(fpo) : PROTOCOL.FIELD_PAYOUT_PURE_ACTIVATION_EPOCH;
+    const sfa = Number(process.env.ZIRA_SINGLE_FINALIZER_ACTIVATION_EPOCH);
+    this.singleFinalizerActivationEpoch = Number.isFinite(sfa) && sfa > 0 ? Math.floor(sfa) : PROTOCOL.SINGLE_FINALIZER_ACTIVATION_EPOCH;
+    const fli = Number(process.env.ZIRA_FINALITY_LEADER_INDEX);
+    this.finalityLeaderIndex = Number.isFinite(fli) && fli >= 0 ? Math.floor(fli) : 0;
     this.setAuthorizedFounders(genesis.founders ?? [genesis.founder]);
     const seeded = applyGenesis(genesis);
     for (const [addr, bal] of Object.entries(seeded.balances)) {
@@ -563,7 +591,14 @@ export class State {
     // Likewise a non-numeric confidence turns the field-weight math into NaN. Reject both before pooling.
     if (!Number.isFinite(o.timestamp)) return { ok: false, isNew: false, reason: "observation timestamp is not a finite number" };
     if (typeof o.confidence !== "number" || !Number.isFinite(o.confidence) || o.confidence < 0 || o.confidence > 1) return { ok: false, isNew: false, reason: "confidence out of range" };
-    if (epochOf(o.timestamp) <= this.lastProcessedEpoch - SETTLE_ROUNDS - WINDOW_ROUNDS) {
+    // Field-heartbeat observations feed the pure-epoch payout's long-lag window, so accept them for the longer
+    // FIELD_PAYOUT_OBS_LAG_EPOCHS — that is the real cross-node convergence budget (~2.5 min for the 4 masters'
+    // heartbeats to gossip everywhere before they drive balances). runField still filters to its own short window
+    // for ZTI, so this only affects how long a heartbeat can arrive late, never the ZTI/Lock computation.
+    const ageCut = o.subject === PROTOCOL.FIELD_HEARTBEAT_SUBJECT
+      ? this.lastProcessedEpoch - PROTOCOL.FIELD_PAYOUT_OBS_LAG_EPOCHS - WINDOW_ROUNDS
+      : this.lastProcessedEpoch - SETTLE_ROUNDS - WINDOW_ROUNDS;
+    if (epochOf(o.timestamp) <= ageCut) {
       return { ok: false, isNew: false, reason: "observation too old" };
     }
     // Fast-sync floor (see ingestTx): a backfilled observation already counted by the adopted snapshot must
@@ -645,9 +680,25 @@ export class State {
     for (const tx of txs) {
       const senderNonce = this.nonceOf(tx.from);
       if (tx.nonce < senderNonce) { this.txPool.delete(tx.id); continue; }        // superseded / already applied
-      if (tx.nonce > senderNonce) {                                                // gap: wait for the predecessor
-        if (epochOf(tx.timestamp) < epoch - State.TX_GAP_TTL_EPOCHS) this.txPool.delete(tx.id); // predecessor never came
-        continue;
+      if (tx.nonce > senderNonce) {                                                // gap: the predecessor has not applied
+        // While the gap is young, WAIT — the predecessor may still arrive over gossip (the applied-tx
+        // re-gossip backfills it), then this tx applies in order on a later epoch.
+        if (epochOf(tx.timestamp) >= epoch - this.txGapTtlEpochs) continue;
+        // Aged past the TTL: the predecessor will never come, so the sender's committed nonce is an empty
+        // hole that strands THIS tx and every later one from the sender forever — the settler-payout freeze
+        // where miners stop earning. Two earlier cures were both wrong: DROPPING this tx lost the payout and
+        // left the hole (the committed nonce never advanced, so every future payout re-gapped); FILLING the
+        // hole with a gossiped "filler" tx (ZiraNode.unstickSettlerNonce) minted a tx id whose timestamp
+        // varied per issuing node and per restart, so different masters applied different fillers at the same
+        // nonce and FORKED the head root — the 2026-07-10 finality freeze that no realign could reconcile.
+        // Correct cure: CLOSE the gap in pure state — advance the sender's nonce to this (its lowest pooled)
+        // nonce so the tx applies, with NO gossiped tx to diverge on. `tx` is the sender's lowest-nonce pooled
+        // tx (the drain is sorted by from, then nonce), and the trigger is a pure function of (nonce,
+        // timestamp, epoch) gated on the settle-lagged TTL, so every node — and every event-log replay —
+        // closes the identical hole at the identical epoch and converges to one state root. Falls through to
+        // the apply block below (nonce now matches). If the tx is unaffordable, the skip at the bottom of the
+        // loop advances past it exactly as for a committed-nonce overspend.
+        this.acct(tx.from).nonce = tx.nonce;
       }
       // nonce matches the sender's committed nonce: try to apply. applyTx advances the sender's nonce on every
       // path EXCEPT an unaffordable spend (overspend), which it drops WITHOUT consuming the nonce so a
@@ -664,7 +715,7 @@ export class State {
       const nonceBefore = this.acct(tx.from).nonce;
       this.applyTx(tx, epoch);
       if (this.acct(tx.from).nonce > nonceBefore) { this.txPool.delete(tx.id); continue; }   // applied or nonce-consumed
-      if (epochOf(tx.timestamp) < epoch - State.TX_GAP_TTL_EPOCHS) {                          // unaffordable too long: skip
+      if (epochOf(tx.timestamp) < epoch - this.txGapTtlEpochs) {                              // unaffordable too long: skip
         this.acct(tx.from).nonce += 1;
         this.txPool.delete(tx.id);
       }
@@ -679,10 +730,82 @@ export class State {
     // until DECENTRALIZATION_ACTIVATION_EPOCH, keeping the registry empty and the root unchanged.
     this.sealValidators(epoch);
 
-    // 3. age out observations older than the settled field window (must outlive the SETTLE_ROUNDS lag, or
-    // the trailing window in runField would lose evidence before it is counted)
+    // 2c. pure-epoch field-participation payout (dormant until FIELD_PAYOUT_PURE_ACTIVATION_EPOCH). Distributes
+    // the mining pool to the converged, settle-lagged vouched-miner set with NO gossiped tx, so payout balances
+    // can never fork on packet loss. Runs BEFORE observation aging so the settled window is still present.
+    this.distributeFieldParticipation(epoch);
+
+    // 3. age out observations older than the settled field window (must outlive the SETTLE_ROUNDS lag, or the
+    // trailing window in runField would lose evidence before it is counted). Field-heartbeat observations are
+    // kept the longer FIELD_PAYOUT_OBS_LAG_EPOCHS so the pure-epoch payout's long-lag window stays populated; the
+    // extra retention is a handful of small obs (root-neutral, not in the state root).
     const minEpoch = epoch - SETTLE_ROUNDS - WINDOW_ROUNDS + 1;
-    for (const [id, o] of this.obsPool) if (epochOf(o.timestamp) < minEpoch) this.obsPool.delete(id);
+    const minEpochHeartbeat = epoch - PROTOCOL.FIELD_PAYOUT_OBS_LAG_EPOCHS - WINDOW_ROUNDS + 1;
+    for (const [id, o] of this.obsPool) {
+      const cut = o.subject === PROTOCOL.FIELD_HEARTBEAT_SUBJECT ? minEpochHeartbeat : minEpoch;
+      if (epochOf(o.timestamp) < cut) this.obsPool.delete(id);
+    }
+  }
+
+  /** Is the pure-epoch field payout live? ZiraNode uses this to DISABLE the classic gossiped settler payout so
+   *  the two never double-pay. */
+  fieldPayoutPureActiveNow(): boolean {
+    return this.fieldPayoutActivationEpoch > 0 && this.lastProcessedEpoch >= this.fieldPayoutActivationEpoch;
+  }
+
+  /** Converged, settle-lagged set of vouched miners eligible for the pure-epoch field payout. Reads the SAME
+   *  settled observation window runField uses (SETTLE_ROUNDS back), so every node derives the identical set — no
+   *  per-node peer view, no wall-clock. Sorted + bounded for a deterministic distribution. */
+  private sealedFieldPayees(epoch: number): string[] {
+    const head = epoch - PROTOCOL.FIELD_PAYOUT_OBS_LAG_EPOCHS;   // long lag => heartbeats have fully converged
+    const minEpoch = head - WINDOW_ROUNDS + 1;
+    const latestPerMaster = new Map<string, SignedObservation>();
+    for (const o of this.obsPool.values()) {
+      if (o.subject !== PROTOCOL.FIELD_HEARTBEAT_SUBJECT) continue;
+      const e = epochOf(o.timestamp);
+      if (e < minEpoch || e > head) continue;
+      if (!this.isGenesisMaster(addressFromPubKey(o.observer))) continue;
+      const prev = latestPerMaster.get(o.observer);
+      if (!prev || o.timestamp > prev.timestamp) latestPerMaster.set(o.observer, o);
+    }
+    const out = new Set<string>();
+    for (const o of latestPerMaster.values()) for (const m of o.vouchedMiners ?? []) out.add(m);
+    return [...out]
+      .filter((a) => /^zir1[0-9a-z]{6,}$/.test(a) && a !== this.settler && !this.isGenesisMaster(a))
+      .sort()
+      .slice(0, PROTOCOL.FIELD_PAYOUT_MAX_PAYEES);
+  }
+
+  /** Pure-epoch field-participation payout: at each bucket boundary distribute the fixed pool from the emission
+   *  pool (this.settler) to the converged sealedFieldPayees, equal-split via largest-remainder for exact sums.
+   *  NO gossiped tx: every node computes the identical credit, so payout balances can never fork on propagation
+   *  (the recurring head-fork). Dormant (root-neutral) until FIELD_PAYOUT_PURE_ACTIVATION_EPOCH. Idempotent per
+   *  bucket via the root-committed lastPoolPayoutBucket watermark. An underfunded pool defers (retries later). */
+  private distributeFieldParticipation(epoch: number): void {
+    if (!(this.fieldPayoutActivationEpoch > 0 && epoch >= this.fieldPayoutActivationEpoch)) return; // dormant
+    const bucket = Math.floor(epoch / PROTOCOL.FIELD_PAYOUT_BUCKET_EPOCHS);
+    if (bucket <= this.lastPoolPayoutBucket) return;                    // already paid this bucket: idempotent
+    const payees = this.sealedFieldPayees(epoch);
+    if (payees.length === 0) return;                                    // no converged payees yet: retry next epoch
+    const pool = PROTOCOL.FIELD_PAYOUT_POOL_UZIR;
+    const funder = this.acct(this.settler);
+    if (funder.balance < pool) return;                                  // pool not yet accrued: defer, do not advance
+    const base = Math.floor(pool / payees.length);
+    let remainder = pool - base * payees.length;                       // largest-remainder: earliest-sorted take +1
+    funder.balance = subUZIR(funder.balance, pool, "field payout pool debit");
+    const outputs: [string, number][] = [];
+    for (const a of payees) {
+      const amt = base + (remainder > 0 ? 1 : 0);
+      if (remainder > 0) remainder--;
+      if (amt > 0) { this.acct(a).balance = addUZIR(this.acct(a).balance, amt, "field payout credit"); outputs.push([a, amt]); }
+    }
+    this.lastPoolPayoutBucket = bucket;                                 // advance the root-committed watermark
+    // Off-root display record: one pooled entry, so wallets/explorer decompose per-miner slices exactly as today.
+    this.record({
+      network: this.genesis.network, from: "", fromPubKey: "", to: this.settler, amountUZIR: pool, feeUZIR: 0,
+      nonce: 0, kind: "pool_payout", parents: [], timestamp: epoch * EPOCH_MS,
+      memo: JSON.stringify({ b: bucket, o: outputs }), id: hashHex(canonical({ fpp: bucket })), sig: "", committedEpoch: epoch,
+    });
   }
 
   private applyTx(tx: SignedTx, epoch: number): void {
@@ -1030,6 +1153,12 @@ export class State {
   }
 
   private record(entry: LedgerEntry): void {
+    // Emission rewards go to their own bounded list so they never flood out real payouts (see rewardHistory).
+    if (entry.kind === "reward") {
+      this.rewardHistory.unshift(entry);
+      if (this.rewardHistory.length > State.REWARD_HISTORY_CAP) this.rewardHistory.pop();
+      return;
+    }
     this.history.unshift(entry);
     if (this.history.length > State.HISTORY_CAP) this.history.pop();
   }
@@ -1055,7 +1184,27 @@ export class State {
    * gated separately and re-enabled once its determinism is proven. Devnet/test (no genesis masters) keeps
    * the all-masters fallback, where the steward is the sole seeded bootstrap master.
    */
+  /** True when single-finalizer (leader) finality is active at the current processed epoch. */
+  singleFinalizerActiveNow(): boolean {
+    return this.singleFinalizerActivationEpoch > 0 && this.lastProcessedEpoch >= this.singleFinalizerActivationEpoch;
+  }
+  /** The active finality leader: the finalityLeaderIndex-th genesis master in GENESIS-DOC order (identical on
+   *  every node, since applyGenesis inserts masters in doc order and Set preserves insertion order). Index 0 is
+   *  genesis.masters[0] = the settler, so finality and emission share one primary. finalityLeaderIndex is the
+   *  managed-failover lever — set identically on all surviving nodes to promote another genesis master when the
+   *  current leader's host is down. */
+  finalityLeaderAddress(): Address {
+    const ordered = [...this.genesisMasters];
+    if (ordered.length === 0) return this.settler;
+    return ordered[Math.min(this.finalityLeaderIndex, ordered.length - 1)]!;
+  }
+
   totalMasterTrust(): number {
+    // Single-finalizer: only the active leader's trust counts (its own vote is then 100% of the total).
+    if (this.singleFinalizerActiveNow()) {
+      const a = this.accounts.get(this.finalityLeaderAddress());
+      return a?.isMaster ? a.zti : PROTOCOL.MASTER_NODE_ZTI;
+    }
     const gated = this.genesisMasters.size > 0;
     const active = decentralizationActive(this.lastProcessedEpoch, this.decentralizationActivationEpoch);
     const wmap = active ? this.validatorWeightMap() : null;
@@ -1083,6 +1232,13 @@ export class State {
    * self-declared `voterZti`, so a forged high voterZti from a non-master cannot manufacture finality.
    */
   masterZtiMap(): Map<string, number> {
+    // Single-finalizer: the electorate is exactly the active leader, keyed by its signing pubkey.
+    if (this.singleFinalizerActiveNow()) {
+      const m = new Map<string, number>();
+      const a = this.accounts.get(this.finalityLeaderAddress());
+      if (a?.pubkey) m.set(a.pubkey, a.isMaster ? a.zti : PROTOCOL.MASTER_NODE_ZTI);
+      return m;
+    }
     // Mirrors totalMasterTrust: on a network with a genesis master set, only those fixed masters' votes
     // count toward finality, so the numerator and denominator stay consistent and a single master drop
     // cannot wedge the mesh. Devnet/test falls back to all masters (steward-only bootstrap).
@@ -1236,7 +1392,12 @@ export class State {
   }
 
   recentHistory(address: Address | null, limit: number): LedgerEntry[] {
-    if (!address) return this.history.slice(0, limit);
+    if (!address) {
+      // Global explorer feed: merge real activity with the recent emission rewards (both newest-first) so the
+      // feed still shows emission, but the per-address path below stays flood-free.
+      if (this.rewardHistory.length === 0) return this.history.slice(0, limit);
+      return [...this.history, ...this.rewardHistory].sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
+    }
     const out: LedgerEntry[] = [];
     for (const e of this.history) {
       if (e.from === address || e.to === address) {
@@ -1262,13 +1423,14 @@ export class State {
   anchorListings(): Anchor[] { return this.anchorSeats().filter((a) => a.status === "listed" && a.listedPriceUZIR); }
 
   auditEmittedBurned(): { emitted: number; burned: number } {
-    let emitted = 0, burned = 0;
+    // emitted is the authoritative running total (supply.emitted, a pure function of the epoch) — no longer summed
+    // from reward ledger entries, which now live off the main history in rewardHistory.
+    let burned = 0;
     for (const e of this.history) {
-      if (e.kind === "reward") emitted += e.amountUZIR;
-      else if (e.kind === "bond_burn") burned += e.amountUZIR + feeAndBurn(e.feeUZIR).burned;
+      if (e.kind === "bond_burn") burned += e.amountUZIR + feeAndBurn(e.feeUZIR).burned;
       else burned += feeAndBurn(e.feeUZIR).burned;
     }
-    return { emitted, burned };
+    return { emitted: this.supply.emitted, burned };
   }
 
   poolSize(): { txs: number; observations: number } {

@@ -97,9 +97,28 @@ export class Libp2pNetwork implements ZiraNetwork {
     if (directPeers.length) log.info(`gossipsub: pinning ${directPeers.length} direct peer(s) (round-critical seeds/masters, never pruned)`);
     const pubsub = gossipsub({ allowPublishToZeroTopicPeers: true, emitSelf: false, fallbackToFloodsub: true, ...(directPeers.length ? { directPeers } : {}) });
 
+    // SEEDS-ONLY recovery isolation. When ZIRA_SEEDS_ONLY=1 the node connects ONLY to its configured
+    // seed/master peers and refuses every other dial or inbound connection. This is the operational cure for
+    // a network-wide finality stall: a large stuck mesh (100+ nodes) relays a self-sustaining gossip storm —
+    // re-gossiped votes/observations/txs across the whole unfinalized window — through even a few connections,
+    // and the constant signature-verify + apply churn keeps the co-located masters pegged and re-injects
+    // community state, so the masters can never agree on a forward root long enough to finalize past the frozen
+    // epoch. Cutting the masters down to just each other lets them converge in isolation and push finality
+    // forward; once they lead, the flag is cleared and the community re-syncs to the new finalized epoch.
+    const seedsOnly = process.env.ZIRA_SEEDS_ONLY === "1";
+    const seedIdSet = this.seedPeerIds();
+    if (seedsOnly) log.info(`SEEDS-ONLY isolation active: accepting only ${seedIdSet.size} seed/master peer(s), refusing all community connections (recovery mode)`);
+    const connectionGater = seedsOnly
+      ? {
+          denyDialPeer: async (peerId: { toString(): string }) => !seedIdSet.has(peerId.toString()),
+          denyInboundEncryptedConnection: async (peerId: { toString(): string }) => !seedIdSet.has(peerId.toString()),
+        }
+      : undefined;
+
     this.node = await createLibp2p({
       privateKey,
       addresses: { listen, announce: this.opts.announce.length ? this.opts.announce : undefined },
+      ...(connectionGater ? { connectionGater } : {}),
       // F7: bound inbound connection pressure so a public node cannot be exhausted by a flood of
       // dials. maxConnections is generous for a healthy mesh; excess connections are pruned by libp2p.
       connectionManager: {
@@ -338,9 +357,29 @@ export class Libp2pNetwork implements ZiraNetwork {
     }
   }
 
+  // Per-peer sync cooldown. A churning peer (connect -> sync -> drop -> reconnect) must not be able to
+  // re-trigger a full backfill pull faster than this, or dozens of NAT peers cycling per minute pull a
+  // sync-stream each and saturate the event loop — the node then gets too busy to process the vote gossip
+  // that carries finality (the 2026-07 co-located-master finality freeze: masters pegged a core on the
+  // community reconnect flood and could never re-reach quorum). Consensus-neutral: only gates WHEN a
+  // backfill is pulled, never what is applied.
+  private lastSyncFromPeerAt = new Map<string, number>();
+  private static readonly SYNC_FROM_PEER_COOLDOWN_MS = 120_000;
+
   private async syncFromPeer(peerIdStr: string): Promise<void> {
     if (!this.node) return;
+    // Only auto-pull a backfill sync from SEED/master peers. A random community node that briefly connects
+    // has LESS state than we do, so pulling its sync stream is pointless work; and with many NAT peers
+    // reconnecting per minute those pulls saturate the loop and freeze finality. Community nodes still
+    // converge by pulling FROM us (we are their seed). When no seeds are configured (never on mainnet) we
+    // keep the old behavior so a seedless devnet still bootstraps.
+    const seeds = this.seedPeerIds();
+    if (seeds.size > 0 && !seeds.has(peerIdStr)) return;
     if (this.syncedPeers.has(peerIdStr)) return;
+    const now = Date.now();
+    const last = this.lastSyncFromPeerAt.get(peerIdStr) ?? 0;
+    if (now - last < Libp2pNetwork.SYNC_FROM_PEER_COOLDOWN_MS) return;   // recently synced this peer; skip churn re-sync
+    this.lastSyncFromPeerAt.set(peerIdStr, now);
     this.syncedPeers.add(peerIdStr);
     try {
       const conns = this.node.getConnections();

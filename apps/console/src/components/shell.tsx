@@ -296,7 +296,10 @@ function NetworkBadge({ stats, mode, quality, base }: { stats: NodeStats | null;
   const peers = stats.peers ?? stats.activeNodes ?? 0;
   const finalized = stats.finalizedEpoch ?? 0;
   const current = stats.currentEpoch ?? finalized;
-  const syncing = current - finalized > 5;
+  // A healthy follower/gateway adopts the finality leader's checkpoints a small window behind the head, so a
+  // gap of a few dozen epochs is NORMAL and connected — not "syncing". Only a node genuinely far behind (a
+  // fresh join still catching up, hundreds of epochs back) should read as syncing. ~90 epochs ≈ 7.5 min.
+  const syncing = current - finalized > 90;
   const degraded = peers < 3;
   // If stats are present but the latest probe says offline, the gateway just dropped: show reconnecting.
   if (quality === "offline") {

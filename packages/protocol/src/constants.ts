@@ -66,6 +66,29 @@ export const PROTOCOL = {
   // as before. Read via decentralizationActive(epoch). Shipping inert lets the electorate be
   // shadow-validated live for determinism before any consensus rule actually changes.
   DECENTRALIZATION_ACTIVATION_EPOCH: 0,
+  // Single-finalizer (leader-based) finality. At/after this epoch, finality counts ONLY the active finality
+  // leader's vote (a lone genesis master whose own vote is 100% >= FINALITY_THRESHOLD), instead of a 3-of-4
+  // quorum. On two single-operator hosts, quorum buys no Byzantine tolerance but all the divergence-freeze
+  // fragility; a lone finalizer cannot diverge or freeze and needs no cross-node agreement (see the
+  // single-finalizer-snapshot test). Electorate is soft/off-root, so this is root-neutral; the epoch gate only
+  // makes every node flip together. 0 = disabled (dormant) => classic 4-master quorum, unchanged.
+  SINGLE_FINALIZER_ACTIVATION_EPOCH: 0,
+  // Pure-epoch field-participation payout. The classic path pays miners via a gossiped settler batch_transfer;
+  // if a master misses that packet its balances fork and finality freezes (the recurring 2026-07 head-fork).
+  // At/after this epoch the payout is instead distributed as a PURE-EPOCH function in processEpoch: every node
+  // credits the identical settle-lagged, converged vouched-miner set from the emission pool, with NO gossiped
+  // tx to miss, so balances can never fork on payout propagation. 0 = dormant (root-neutral, behaves exactly as
+  // before). Fixed consensus params below so every node computes the identical distribution.
+  FIELD_PAYOUT_PURE_ACTIVATION_EPOCH: 356757000,
+  FIELD_PAYOUT_POOL_UZIR: 5_000_000_000,     // 5000 ZIR per bucket (matches the classic budget)
+  FIELD_PAYOUT_BUCKET_EPOCHS: 60,            // ~5 min at 5s epochs (matches AUTONOMOUS_RESONANCE_CYCLE_MS)
+  FIELD_PAYOUT_MAX_PAYEES: 64,
+  // The pure-epoch payout reads the vouched-miner set from field-heartbeat observations this many epochs BACK —
+  // a long lag (not the 8-epoch ZTI settle) so the 4 masters' heartbeats have minutes to fully propagate before
+  // they drive balances. A miner vouched by any master is included, so a single slow heartbeat only affects
+  // miners that ONLY that master vouched — and by 24 epochs (~2 min) even that has converged. Field-heartbeat
+  // observations are retained this long so the window is populated.
+  FIELD_PAYOUT_OBS_LAG_EPOCHS: 24,
   // Cadence (epochs) at which validator-registry membership is re-sealed from converged state, so every
   // node commits an identical set on the same boundaries. ~1 hour at 5s epochs.
   VALIDATOR_SEAL_INTERVAL: 720,
