@@ -124,7 +124,7 @@ export interface LocalLaunchMinerSummary {
 }
 
 // ---- live, decentralized pricing ----
-export interface Pricing { queryUZIR: number; taskBaseUZIR: number; openQueries: number; providersOnline: number }
+export interface Pricing { queryUZIR: number; taskBaseUZIR: number; resonatorCreationUZIR?: number; resonatorCreationOpen?: boolean; openQueries: number; providersOnline: number }
 
 // ---- free tier (limited free field questions per rolling window, enforced by the node) ----
 export interface FreeTierQuota { limit: number; used: number; remaining: number; resetMs: number; windowMs: number; contributor?: boolean; unlimited?: boolean; freeTierEnded?: boolean }

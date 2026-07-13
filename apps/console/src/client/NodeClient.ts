@@ -2,7 +2,7 @@
 // The Console talks to a ZIRA Core node over its local RPC (HTTP) and WebSocket. The node is a
 // peer in the network, so the GUI is synced by peers. Pointing at your own node is trustless.
 import {
-  PROTOCOL, TASK_DELIVER_TIMEOUT_MS, addressFromPubKey,
+  PROTOCOL, TASK_DELIVER_TIMEOUT_MS, addressFromPubKey, queryComplexityChars, queryTierMultiplier,
   type ZiraClient, type Address, type PublicKey, type SignedTx, type SignedObservation, type Lock,
   type FieldNode, type Stream, type Bond, type Resonator, type SpendLimits, type Anchor,
   type NetworkStats, type AnswerReceipt, type Listing, type Task, type PendingQuery, type uZIR, type Domain,
@@ -188,7 +188,10 @@ export class NodeClient implements ZiraClient {
       try {
         const stats = await this.getStats();
         const founderAddr = stats.founderAddress;
-        const total = PROTOCOL.QUERY_PRICE_UZIR;
+        // Work-tier price: a heavier question needs a bigger model, so it costs more and the coordinating
+        // miners split more. The tier is a pure function of the question text (dormant 1x until armed).
+        const chars = queryComplexityChars(args.question, args.history);
+        const total = Math.round(PROTOCOL.QUERY_PRICE_UZIR * queryTierMultiplier(chars));
         const feeUZIR = founderAddr ? Math.round(total * PROTOCOL.RESONATOR_FEE_SHARE) : 0;
         const poolUZIR = total - feeUZIR;
         let nonce = await this.getNonce(args.asker);
@@ -209,7 +212,7 @@ export class NodeClient implements ZiraClient {
     const receipt: AnswerReceipt = {
       contributors: coordinatedPool.map((a) => ({ provider: a.provider, label: a.label, model: a.model, domainZti: a.zti, weight: a.weight, excerpt: a.answer.slice(0, 240), sig: a.sig, queryId: id, answer: a.answer })),
       domain, fusedConfidence: Number(coordinatedPool.reduce((s, a) => s + a.weight * a.confidence, 0).toFixed(3)),
-      challengeOpenUntil: Date.now() + 300000, proofAvailable: false, costUZIR: PROTOCOL.QUERY_PRICE_UZIR,
+      challengeOpenUntil: Date.now() + 300000, proofAvailable: false, costUZIR: Math.round(PROTOCOL.QUERY_PRICE_UZIR * queryTierMultiplier(queryComplexityChars(args.question, args.history))),
     };
     return { answer: coordinated, receipt };
   }

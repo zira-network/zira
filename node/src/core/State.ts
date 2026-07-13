@@ -326,6 +326,22 @@ export class State {
     }
   }
 
+  /**
+   * True when every anchor seat is secured by a user, i.e. no seat is still held by the anchor-reserve
+   * steward (the wallet that owns the positions at genesis) and none is unclaimed. Derived purely from the
+   * root-committed anchor set, so every node agrees. Used to auto-lift the resonator-creation freeze once
+   * the anchor distribution is complete. Returns false if the reserve owner cannot be determined or there
+   * are no seats (safe: the freeze stays engaged).
+   */
+  allAnchorsSecured(): boolean {
+    const reserve = this.genesis.anchorOwnership?.find((o) => o.owner)?.owner;
+    if (!reserve || this.anchors.size === 0) return false;
+    for (const seat of this.anchors.values()) {
+      if (!seat.owner || seat.owner === reserve) return false;
+    }
+    return true;
+  }
+
   private parseAnchorPayload(tx: SignedTx): AnchorTxPayload | null {
     if (!tx.memo) return null;
     try {

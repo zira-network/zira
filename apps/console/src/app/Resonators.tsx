@@ -11,6 +11,7 @@ import { useUnlock } from "../store/useUnlock";
 import { makeSignedTx, zirToUzir } from "../lib/tx";
 import { formatZir, ztiLabel } from "../lib/format";
 import { featureEnabled } from "../lib/phase";
+import { NodeApi } from "../lib/nodeApi";
 
 const MIN_CREATE_FUND_ZIR = 10;
 const MIN_RESONANCE_FUND_ZIR = 20;
@@ -124,6 +125,9 @@ export function Resonators() {
   const [q, setQ] = useState("");
   const [domain, setDomain] = useState<Domain | "">("");
   const [sort, setSort] = useState<ListSort>("zti");
+  // Case B: creating a new Resonator is frozen network-wide until all anchors are secured. Reflect the node's
+  // canonical status so the create actions disable with a reason instead of failing on publish. Defaults open.
+  const [creationOpen, setCreationOpen] = useState(true);
   const enabled = featureEnabled(phase, "resonators");
   const slow = useSlowHint(loading && !loadedOnce);
   const mounted = useRef(true);
@@ -162,6 +166,11 @@ export function Resonators() {
     }
   }
   useEffect(() => { mounted.current = true; void load(); return () => { mounted.current = false; }; /* eslint-disable-next-line */ }, [client, address]);
+  useEffect(() => {
+    let live = true;
+    NodeApi.pricing().then((p) => { if (live && p.resonatorCreationOpen !== undefined) setCreationOpen(p.resonatorCreationOpen); }).catch(() => { /* keep default open */ });
+    return () => { live = false; };
+  }, []);
 
   function openBuilder(s: Starter | null) { setStarter(s); setBuilding(true); }
 
@@ -176,8 +185,13 @@ export function Resonators() {
           badge={<Badge tone="indigo">your own Resonator</Badge>}
           title="A Resonator is your AI worker. You own it, fund it, and it earns for you."
           description="Give it a name, a purpose, and a spending limit, then switch it on. It works on its own inside your limits, earns trust from results that check out, and gets paid in ZIR for the work it does."
-          action={<Button variant="primary" onClick={() => openBuilder(null)} disabled={!address}><Plus size={15} /> New Resonator</Button>}
+          action={<Button variant="primary" onClick={() => openBuilder(null)} disabled={!address || !creationOpen} title={!creationOpen ? "Creating new Resonators is paused until every anchor is secured. Your existing Resonators keep working." : undefined}><Plus size={15} /> New Resonator</Button>}
         />
+        {!creationOpen && (
+          <p className="mt-2 rounded-lg border border-hairline bg-base px-3 py-2 text-xs text-muted">
+            Creating new Resonators is paused until every anchor position is secured. Your existing Resonators keep coordinating and earning as usual, and you can still fund, pause, or manage them.
+          </p>
+        )}
         <Lifecycle />
       </Card>
 
@@ -189,7 +203,7 @@ export function Resonators() {
         </div>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {STARTERS.map((s) => (
-            <button key={s.key} onClick={() => openBuilder(s)} disabled={!address}
+            <button key={s.key} onClick={() => openBuilder(s)} disabled={!address || !creationOpen}
               className="group rounded-xl border border-hairline bg-base p-3 text-left transition-colors hover:border-[var(--teal)] disabled:cursor-not-allowed disabled:opacity-50">
               <div className="flex items-center justify-between">
                 <span className="text-sm font-semibold text-text">{s.name}</span>
@@ -238,7 +252,7 @@ export function Resonators() {
         <LoadingState label="Loading your Resonators..." slow={slow} />
       ) : list.length === 0 ? (
         <EmptyState title="No Resonators yet" hint="Pick a purpose above or start from scratch. Your worker gets its own key and wallet, created right here on your device."
-          action={<Button variant="primary" onClick={() => openBuilder(null)} disabled={!address}><Plus size={15} /> Create your first Resonator</Button>}>
+          action={<Button variant="primary" onClick={() => openBuilder(null)} disabled={!address || !creationOpen} title={!creationOpen ? "Creating new Resonators is paused until every anchor is secured." : undefined}><Plus size={15} /> Create your first Resonator</Button>}>
           <Bot size={40} className="text-muted" />
         </EmptyState>
       ) : filtered.length === 0 ? (

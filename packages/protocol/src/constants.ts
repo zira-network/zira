@@ -141,6 +141,23 @@ export const PROTOCOL = {
   // real operating float, while staying accessible enough for a growing network to create them.
   RESONATOR_CREATION_COST_UZIR: 100 * 1_000_000,
 
+  // Resonator-creation freeze (Case B). Once armed (this value > 0 AND the current epoch has reached it),
+  // nodes REFUSE any brand-new user Resonator until every anchor seat is secured by a user (no seat still
+  // held by the anchor-reserve steward). It is enforced on the acceptance/validation path, so old app
+  // releases cannot bypass it: their locally created Resonator is rejected by the masters, gateways, and
+  // every updated peer, so it never lists, coordinates, or earns. Existing Resonators (createdAt before this
+  // epoch) are grandfathered and keep coordinating; the 512 anchor + steward network Resonators are always
+  // exempt. Resonators are soft state (off the state root), so this is consensus-neutral: no fork risk, no
+  // genesis change. 0 = dormant (creation fully open, byte-identical to today). Set to a chosen epoch to arm.
+  RESONATOR_CREATION_FREEZE_ACTIVATION_EPOCH: 0,
+
+  // Query work-tier pricing. Once armed (this value > 0 AND the current epoch has reached it), a query's
+  // price and the answerers' budget scale with the work tier derived from the question (quick 1x / standard
+  // 2x / deep 4x) via queryTierMultiplier(). The tier is a pure function of the signed query text, so every
+  // node agrees; the asker's payment IS the answerer budget, so nothing in consensus/settlement changes shape
+  // (only the amount the asker chooses to pay). 0 = dormant (always 1x, byte-identical to today).
+  QUERY_TIER_PRICING_ACTIVATION_EPOCH: 0,
+
   // Storage-weighted emission. Hosting the field's authorized model weights is real, costly work, so a
   // contributor that serves more model data earns a bounded bonus on its emission split. The bonus is a
   // multiplier on the contributor's reward WEIGHT only (never on its trust/ZTI, which stays earned purely
@@ -177,7 +194,36 @@ export const PRICING = {
   /** Extra cost for high-complexity tasks (0..1) and extra required evidence/results. */
   TASK_COMPLEXITY_WEIGHT: 1.5,
   TASK_EVIDENCE_STEP: 0.15,
+  /** Query work tier: a heavier question needs a bigger model, so it costs more and pays answerers more.
+   *  The tier is a pure function of the SIGNED query text (question + prior turns) so every node agrees on
+   *  the price and the answerer budget. Boundaries are in characters of prompt (~4 chars per token). */
+  QUERY_TIER_STANDARD_CHARS: 400,   // ~100 tokens of prompt: a real question with some context
+  QUERY_TIER_DEEP_CHARS: 1200,      // ~300 tokens: long, multi-part, or heavy-context work
+  QUERY_TIER_MULT: { quick: 1, standard: 2, deep: 4 },
 } as const;
+
+export type QueryTier = "quick" | "standard" | "deep";
+
+/** Total prompt size that drives the work tier: the question plus every prior turn's content. Pure. */
+export function queryComplexityChars(question: string, history?: { content?: string }[]): number {
+  const h = (history ?? []).reduce((s, m) => s + (m?.content?.length ?? 0), 0);
+  return (question?.length ?? 0) + h;
+}
+
+/** Deterministic work tier from prompt size. Bigger prompt => bigger model work => higher tier. */
+export function queryTier(chars: number): QueryTier {
+  if (chars >= PRICING.QUERY_TIER_DEEP_CHARS) return "deep";
+  if (chars >= PRICING.QUERY_TIER_STANDARD_CHARS) return "standard";
+  return "quick";
+}
+
+/** Price/earn multiplier for a work tier (quick 1x, standard 2x, deep 4x). Dormant (always 1x) until the
+ *  activation epoch is reached, so shipping is byte-identical to today until we arm it. */
+export function queryTierMultiplier(chars: number, epoch?: number): number {
+  const act = PROTOCOL.QUERY_TIER_PRICING_ACTIVATION_EPOCH;
+  if (!(act > 0) || (epoch !== undefined && epoch < act)) return 1;
+  return PRICING.QUERY_TIER_MULT[queryTier(chars)];
+}
 
 function clamp(x: number, lo: number, hi: number): number { return x < lo ? lo : x > hi ? hi : x; }
 
@@ -191,6 +237,16 @@ export function adaptiveQueryPriceUZIR(ctx: { openQueries: number; providersOnli
   const pressure = Math.max(0, ctx.openQueries) / supply;
   const mult = clamp(PRICING.QUERY_MIN_MULT + pressure * 0.5, PRICING.QUERY_MIN_MULT, PRICING.QUERY_MAX_MULT);
   return Math.round(PRICING.QUERY_BASE_UZIR * mult);
+}
+
+/**
+ * Full price for one specific query: the demand-adaptive base times the work tier of the question (a heavier
+ * question needs a bigger model, so it costs more and pays the answerers more). The asker pays this and the
+ * answerers split it, so tiering the price tiers the earnings with no change to settlement. Deterministic:
+ * the tier is a pure function of the signed query text. Falls back to the plain adaptive price while dormant.
+ */
+export function queryPriceUZIR(ctx: { openQueries: number; providersOnline: number; chars: number; epoch?: number }): number {
+  return Math.round(adaptiveQueryPriceUZIR(ctx) * queryTierMultiplier(ctx.chars, ctx.epoch));
 }
 
 /**

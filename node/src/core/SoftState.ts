@@ -65,7 +65,7 @@ export class SoftState {
   // cannot be trusted or rewritten after signing) — the node reads it from the ledger, gates the creation
   // cost on it, and stores it so Discover shows the true float. Absent (internal seed callers) it falls
   // back to the record value.
-  upsertResonator(r: Resonator, agentBalanceUZIR?: number): boolean {
+  upsertResonator(r: Resonator, agentBalanceUZIR?: number, freezeNewUserResonators = false): boolean {
     if (!this.mustVerify(r, "Resonator", r?.id ?? "?")) return false;
     const floatUZIR = agentBalanceUZIR ?? (r.balanceUZIR ?? 0);
     // Anchor Resonators (one per anchor position) are minted and moved only by the anchor steward
@@ -109,6 +109,20 @@ export class SoftState {
     // vesting allocation rather than a seeded balance, and the founder's default "zira" system resonator
     // is field-answered (no per-resonator float). Only enforced for the FIRST appearance of a record.
     const isSeededResonator = isAnchorResonator || NETWORK_RESONATOR_SEED_ZTI.has(r.id) || r.id === "zira";
+    // Resonator-creation freeze (Case B): when the caller reports the freeze is engaged (armed epoch reached
+    // AND anchors not yet all secured), refuse a BRAND-NEW user Resonator. Grandfather every Resonator created
+    // before the activation epoch, so existing ones keep working and a fresh node still accepts them on sync;
+    // the seeded anchor/steward Resonators are always exempt. createdAt is signer-set but the boundary is an
+    // epoch, so a normal client on any app version is blocked at accept time regardless of its own UI. Off the
+    // state root -> consensus-neutral.
+    if (freezeNewUserResonators && !prev && !isSeededResonator) {
+      const act = PROTOCOL.RESONATOR_CREATION_FREEZE_ACTIVATION_EPOCH;
+      const createdEpoch = Math.floor((r.createdAt ?? 0) / PROTOCOL.ACCOUNTING_ROUND_MS);
+      if (act > 0 && createdEpoch >= act) {
+        log.warn("[SoftState] rejected new Resonator: creation is frozen until all anchors are secured", r.id);
+        return false;
+      }
+    }
     if (!prev && !isSeededResonator && floatUZIR < PROTOCOL.RESONATOR_CREATION_COST_UZIR) {
       log.warn("[SoftState] rejected under-funded new Resonator (below creation cost)", r.id, floatUZIR);
       return false;

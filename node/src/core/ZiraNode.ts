@@ -82,7 +82,7 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "2.2.1";
+const NODE_RELEASE_VERSION = "2.3.0";
 // Per-cycle coordination batch. Every funded+listed resonator is eligible; autonomousResonanceBatch picks
 // this many per 5-minute cycle by a DETERMINISTIC ZTI-WEIGHTED draw, so higher-trust resonators (anchors,
 // seeded 0.95/0.85/… by class) are driven most often and earn the most, while every other funded resonator
@@ -1234,7 +1234,7 @@ export class ZiraNode {
   ownTaskReady(): Promise<boolean> { return this.models.ownTaskReady(); }
 
   /** Live, decentralized prices every node computes the same way from observed network state. */
-  pricing(): { queryUZIR: number; taskBaseUZIR: number; resonatorCreationUZIR: number; openQueries: number; providersOnline: number } {
+  pricing(): { queryUZIR: number; taskBaseUZIR: number; resonatorCreationUZIR: number; resonatorCreationOpen: boolean; openQueries: number; providersOnline: number } {
     const now = Date.now();
     const providersOnline = this.soft.onlineProviders(now).length;
     const openQueries = this.soft.openQueries([], now).length;
@@ -1243,6 +1243,9 @@ export class ZiraNode {
       taskBaseUZIR: adaptiveTaskPriceUZIR({ openQueries, providersOnline }),
       // Cost to create (fund) a new Resonator, surfaced so the Console shows the same canonical floor.
       resonatorCreationUZIR: PROTOCOL.RESONATOR_CREATION_COST_UZIR,
+      // Whether creating a new Resonator is currently accepted (Case B freeze reflects to the UI so the
+      // create action can be disabled with a reason instead of failing on publish).
+      resonatorCreationOpen: !this.resonatorCreationFrozen(),
       openQueries,
       providersOnline,
     };
@@ -2155,7 +2158,7 @@ export class ZiraNode {
       case "resonator": {
         // Derive the resonator's operating float from THIS node's ledger (consensus-shared), never from the
         // gossiped record, so the creation-cost gate and the displayed balance are consistent everywhere.
-        const isNew = this.soft.upsertResonator(env.data, this.state.balanceOf(env.data.address));
+        const isNew = this.soft.upsertResonator(env.data, this.state.balanceOf(env.data.address), this.resonatorCreationFrozen());
         if (_fromWire && isNew) this.store.appendEvent(env);
         return { ok: true, isNew };
       }
@@ -2582,7 +2585,18 @@ export class ZiraNode {
     if (r.ok && r.isNew) { this.store.appendEvent({ t: "observation", data: o }); this.publish(this.topics.events, { t: "observation", data: o }); }
     return { accepted: r.ok, reason: r.reason };
   }
-  publishResonator(r: Resonator): boolean { const ok = this.soft.upsertResonator(r, this.state.provisionalBalance(r.address)); if (ok) { const env = { t: "resonator" as const, data: r }; this.store.appendEvent(env); this.publish(this.topics.app, env); } return ok; }
+  /**
+   * Case B resonator-creation freeze: true when the freeze is armed (activation epoch > 0 and reached) AND
+   * the anchors are not yet all secured by users. Enforced on the accept path (both publish and gossip), so
+   * old app releases cannot bypass it. Dormant (always false) while the activation epoch is 0 = today's
+   * behavior. Off the state root, so this is consensus-neutral.
+   */
+  private resonatorCreationFrozen(): boolean {
+    const act = PROTOCOL.RESONATOR_CREATION_FREEZE_ACTIVATION_EPOCH;
+    if (!(act > 0) || epochOf(Date.now()) < act) return false;
+    return !this.state.allAnchorsSecured();
+  }
+  publishResonator(r: Resonator): boolean { const ok = this.soft.upsertResonator(r, this.state.provisionalBalance(r.address), this.resonatorCreationFrozen()); if (ok) { const env = { t: "resonator" as const, data: r }; this.store.appendEvent(env); this.publish(this.topics.app, env); } return ok; }
   publishTask(t: Task): boolean { const ok = this.soft.upsertTask(t); if (ok) { const env = { t: "task" as const, data: t }; this.store.appendEvent(env); this.publish(this.topics.app, env); } return ok; }
   publishProvider(p: ProviderAnnounce): boolean { const ok = this.soft.upsertProvider(p, Date.now()); if (ok) this.publish(this.topics.app, { t: "provider", data: p }); return ok; }
   publishProviderProfile(p: ProviderProfile): boolean { const ok = this.soft.upsertProviderProfile(p); if (ok) { const env = { t: "providerProfile" as const, data: p }; this.store.appendEvent(env); this.publish(this.topics.app, env); } return ok; }

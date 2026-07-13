@@ -344,6 +344,41 @@ function EarningsPanel({ answered, earnedTodayUZIR, balanceUZIR, zti, state, min
   );
 }
 
+// Answering visibility: the highest earning path. Shows whether this node answers with a model, how many
+// answers it has contributed, and the honest hardware-to-earnings link. Answering pays coordination on TOP of
+// the storage baseline, weighted by trust (ZTI) and agreement, and a stronger machine answers more and better.
+function AnsweringPanel({ usingEndpoint, endpointModel, hasNativeModel, answered, hardwareName }: {
+  usingEndpoint: boolean; endpointModel?: string; hasNativeModel: boolean; answered: number; hardwareName: string;
+}) {
+  const answering = usingEndpoint || hasNativeModel;
+  return (
+    <Card>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2"><Sparkles size={18} className="text-[var(--teal)]" /><h2 className="text-lg font-semibold">Answering</h2></div>
+        <Badge tone={answering ? "teal" : "neutral"}>{answering ? "active" : "not set up"}</Badge>
+      </div>
+      <p className="mt-1 text-sm text-muted">
+        Answering the field's questions is the highest earning path. On top of the storage baseline you earn coordination pay for each answer that converges, weighted by your trust (ZTI) and how closely your answer agrees with the field. A divergent answer earns little; an accurate one earns more.
+      </p>
+      {answering ? (
+        <>
+          <div className="mt-3 grid grid-cols-2 gap-2.5">
+            <Stat label="Answers contributed" value={answered} tone="teal" />
+            <Stat label="Answering via" value={usingEndpoint ? (endpointModel || "endpoint") : "native model"} />
+          </div>
+          <p className="mt-3 rounded-lg border border-[color-mix(in_srgb,var(--teal)_24%,var(--border))] bg-[color-mix(in_srgb,var(--teal)_7%,transparent)] p-2.5 text-[11px] text-muted">
+            <span className="font-medium text-[var(--teal)]">Stronger hardware earns more here.</span> A more capable machine runs a larger, better model and answers faster, so it wins more queries and produces higher-agreement answers, each worth a bigger slice. Running on {hardwareName}.
+          </p>
+        </>
+      ) : (
+        <p className="mt-3 rounded-lg border border-hairline bg-base p-2.5 text-[11px] text-muted">
+          Add a model to move into answer mining: connect an OpenAI-compatible endpoint (Ollama, LM Studio, llama.cpp) below, or load the native model. Coordination settles once at least two capable miners answer, so this earning path grows as more miners join the field.
+        </p>
+      )}
+    </Card>
+  );
+}
+
 // Short, honest explainer. Three bullets, no hype.
 // Battery auto-pause (spec §3.4): pause mining when running on battery below a chosen threshold. Uses the
 // Battery Status API, available in the Chromium/Electron desktop app (it is the one that actually mines);
@@ -569,7 +604,6 @@ export function Mine() {
   }, [client, address, nodeBehind]);
   const [busy, setBusy] = useState(false);
   const [hardwareBusy, setHardwareBusy] = useState(false);
-  const [advanced, setAdvanced] = useState(false);
   const [endpoint, setEndpoint] = useState("");
   const [endpointModel, setEndpointModel] = useState("");
   const [storageLimit, setStorageLimit] = useState("1");
@@ -909,6 +943,17 @@ export function Mine() {
         minerAddress={minerAddress}
       />
 
+      {/* Answering visibility: the highest earning path, shown only when mining is on. */}
+      {(mining?.enabled ?? false) && (
+        <AnsweringPanel
+          usingEndpoint={usingEndpoint}
+          endpointModel={mining?.endpointModel}
+          hasNativeModel={Boolean(mining?.loadedModel)}
+          answered={(mining?.answered ?? 0) + localLaunchAnswers}
+          hardwareName={hardwareTitle(hardware)}
+        />
+      )}
+
       {/* Period earnings history: 1H / 24H / 7D / 30D, computed from the signed ledger. */}
       <EarningsHistory address={address} />
 
@@ -1107,11 +1152,35 @@ export function Mine() {
           <Toggle on={mining?.localTaskPermission ?? false} onClick={() => updateLocalTaskPermission()} disabled={busy} />
         </div>
 
-        {isFounder && <button onClick={() => setAdvanced((v) => !v)} className="mt-3 text-[11px] text-muted hover:text-text">{advanced ? "Hide" : "Show"} steward endpoint</button>}
-        {isFounder && advanced && (
-          <div className="mt-2 rounded-lg border border-hairline bg-base p-3">
+        {/* Answer with your own model: the highest earning path, open to every miner. Quick instructions for
+            the common local servers plus the endpoint editor. Stronger hardware / bigger model earns more. */}
+        <div className="mt-3 rounded-lg border border-[color-mix(in_srgb,var(--teal)_24%,var(--border))] bg-[color-mix(in_srgb,var(--teal)_5%,transparent)] p-3">
+          <div className="flex items-center gap-2"><Sparkles size={15} className="text-[var(--teal)]" /><h3 className="text-sm font-semibold">Answer with your own model <span className="text-[11px] font-normal text-faint">— earn more</span></h3></div>
+          <p className="mt-1 text-[11px] text-muted">Run a local model server and paste its address below. Your node then answers field questions and earns coordination pay on top of storage, weighted by trust and how well your answer agrees with the field. A bigger model on stronger hardware wins more.</p>
+          <div className="mt-2 grid gap-1.5 sm:grid-cols-3">
+            <div className="rounded-md border border-hairline bg-base p-2 text-[11px]">
+              <div className="font-medium text-text">Ollama <span className="text-faint">(simplest)</span></div>
+              <div className="mt-1 text-faint">Install, then run:</div>
+              <div className="mono text-[10px] text-muted">ollama pull qwen2.5:7b</div>
+              <div className="mt-1 text-faint">URL <span className="mono text-muted">http://localhost:11434/v1</span></div>
+              <div className="text-faint">Model <span className="mono text-muted">qwen2.5:7b</span></div>
+            </div>
+            <div className="rounded-md border border-hairline bg-base p-2 text-[11px]">
+              <div className="font-medium text-text">LM Studio</div>
+              <div className="mt-1 text-faint">Load a model, start its local server.</div>
+              <div className="mt-1 text-faint">URL <span className="mono text-muted">http://localhost:1234/v1</span></div>
+              <div className="text-faint">Model = the loaded model's name</div>
+            </div>
+            <div className="rounded-md border border-hairline bg-base p-2 text-[11px]">
+              <div className="font-medium text-text">llama.cpp</div>
+              <div className="mt-1 text-faint">Serve any GGUF:</div>
+              <div className="mono text-[10px] text-muted">llama-server -m model.gguf --port 8080</div>
+              <div className="mt-1 text-faint">URL <span className="mono text-muted">http://localhost:8080/v1</span></div>
+            </div>
+          </div>
+          <div className="mt-2">
             <EndpointEditor
-              hint="Steward only. Point this node at an OpenAI-compatible server if you want it to coordinate with a hosted model instead of the local engine."
+              hint="OpenAI-compatible server on this machine. Leave blank to use the built-in engine if a model is loaded locally."
               endpoint={endpoint}
               model={endpointModel}
               onEndpoint={setEndpoint}
@@ -1120,7 +1189,7 @@ export function Mine() {
               busy={busy}
             />
           </div>
-        )}
+        </div>
         {!canMineSomehow && <p className="mt-2 text-[11px] text-faint">Turn mining on to coordinate the field with your hardware. No model is required; serving a model and storage stay optional.</p>}
       </Card>
 
