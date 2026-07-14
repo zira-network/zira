@@ -83,7 +83,7 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "2.4.0";
+const NODE_RELEASE_VERSION = "2.5.0";
 // Per-cycle coordination batch. Every funded+listed resonator is eligible; autonomousResonanceBatch picks
 // this many per 5-minute cycle by a DETERMINISTIC ZTI-WEIGHTED draw, so higher-trust resonators (anchors,
 // seeded 0.95/0.85/… by class) are driven most often and earn the most, while every other funded resonator

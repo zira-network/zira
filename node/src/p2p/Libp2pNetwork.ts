@@ -125,7 +125,16 @@ export class Libp2pNetwork implements ZiraNetwork {
         maxConnections: this.maxConnections,
         maxIncomingPendingConnections: 32,
       },
-      transports: [tcp(), webSockets(), circuitRelayTransport()],
+      // circuitRelayTransport reservation tuning (R2): a NAT/CGNAT node reserves a relay slot on a public
+      // node so the masters can reach it (reverse liveness probe) and it can serve the field. The default
+      // reservation-completion timeout is too tight for a busy public relay, so reservations aborted with a
+      // TimeoutError and the home node never got a /p2p-circuit address (diagnosed live 2026-07-14: 0 of 8
+      // reservations succeeded). Give the handshake room, and try a few relays at once so one slow/full relay
+      // does not strand the node.
+      transports: [tcp(), webSockets(), circuitRelayTransport({
+        reservationCompletionTimeout: Number(process.env.ZIRA_RELAY_RESERVE_TIMEOUT_MS ?? 20_000),
+        reservationConcurrency: Number(process.env.ZIRA_RELAY_RESERVE_CONCURRENCY ?? 3),
+      })],
       connectionEncrypters: [noise()],
       streamMuxers: [yamux()],
       peerDiscovery: this.opts.bootstrap.length ? [bootstrap({ list: this.opts.bootstrap })] : [],
@@ -138,8 +147,13 @@ export class Libp2pNetwork implements ZiraNetwork {
         dht: kadDHT({ clientMode: !this.opts.relayServer, protocol: "/zira/kad/1.0.0" }),
         autonat: autoNAT(),   // learn whether we are publicly dialable
         dcutr: dcutr(),       // upgrade a relayed connection to a direct one (hole punching)
-        // Public nodes (the VPS, bootstrap) relay for peers stuck behind NAT.
-        ...(this.opts.relayServer ? { relay: circuitRelayServer() } : {}),
+        // Public nodes (the VPS, bootstrap) relay for peers stuck behind NAT. The default reservation cap is
+        // only 15 slots, so the public relays filled up and refused new home nodes (RESERVATION_REFUSED,
+        // diagnosed live 2026-07-14) — far too few for the field's home-node count. Raise it well past the
+        // expected home-node population so every NAT miner can hold a relay slot and stay reachable.
+        ...(this.opts.relayServer ? { relay: circuitRelayServer({
+          reservations: { maxReservations: Number(process.env.ZIRA_RELAY_MAX_RESERVATIONS ?? 1024) },
+        }) } : {}),
       },
     });
 

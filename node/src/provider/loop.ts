@@ -42,6 +42,7 @@ export function startMiner(node: ZiraNode, identity: Keypair, cfg: MinerConfig):
   function announce(): void {
     if (node.endpointProviderReady()) return; // the endpoint provider announces itself with model details
     if (!node.models.canServe()) return; // nothing to serve with yet
+    if (!node.models.servableHealthy()) return; // has a model/endpoint but has NOT proven it can generate: do not advertise a phantom provider
     const challenge = `zira-provider:${identity.publicKey}:${Date.now()}`;
     const sig = edSign(challenge, identity.privateKey);
     node.publishProvider({ pubKey: identity.publicKey, address: identity.address, label: cfg.label, model: node.models.answerLabel(), domains: servedDomains(), challenge, sig, ts: Date.now() });
@@ -55,7 +56,7 @@ export function startMiner(node: ZiraNode, identity: Keypair, cfg: MinerConfig):
       const sig = edSign(query.id + "\n" + answer, identity.privateKey);
       node.publishAnswer({ id, queryId: query.id, provider: identity.publicKey, answer, confidence: 0.75, sig, ts: Date.now() });
       markAnswered(query.id);
-    } catch (e) { log.debug("answer failed", (e as Error).message); }
+    } catch (e) { log.warn("field answer generation failed", (e as Error).message); }
   }
 
   async function tick(): Promise<void> {
@@ -80,7 +81,10 @@ export function startMiner(node: ZiraNode, identity: Keypair, cfg: MinerConfig):
 
   const annIv = setInterval(announce, 30_000);
   const pollIv = setInterval(() => void tick(), 2500);
-  announce();
+  // Keep the serve-health probe fresh (probeServable self-throttles to ~5 min); announce() only advertises
+  // this node once it has PROVEN it can generate, so a broken model/endpoint never becomes a phantom provider.
+  const probeIv = setInterval(() => { void node.models.probeServable(Date.now()); }, 60_000);
+  void node.models.probeServable(Date.now()).then((ok) => { if (ok) announce(); });
   log.info(`miner ready, serving [${cfg.domains.join(", ")}] when mining is on`);
-  return () => { stopped = true; clearInterval(annIv); clearInterval(pollIv); };
+  return () => { stopped = true; clearInterval(annIv); clearInterval(pollIv); clearInterval(probeIv); };
 }

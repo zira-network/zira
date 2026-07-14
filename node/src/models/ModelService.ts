@@ -3,7 +3,7 @@
 // signed enters the field. Any node that holds the file may serve it to others (so distribution is
 // still peer to peer and scalable), but not just anyone can introduce a model. For miners, this
 // loads a model into the inference engine to answer the field.
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, statfsSync } from "node:fs";
 import { join } from "node:path";
 import { freemem, totalmem } from "node:os";
 import http from "node:http";
@@ -43,6 +43,14 @@ export class ModelService {
   private mining: MiningConfig;
   private miningPath: string;
   private engineUnavailableLogged = false;
+  // Serve-health: proof this node can actually GENERATE right now, from a real bounded generation, not just
+  // from having a model loaded. A node that advertises as a provider but cannot generate poisons the field
+  // with a phantom answerer (the query routes to it and never gets a real answer), so the miner loop gates its
+  // provider announce on this. Cached with a TTL so the probe runs at most every few minutes.
+  private serveHealth: { healthy: boolean; lastProbeMs: number; lastOkMs: number; lastError: string | null } =
+    { healthy: false, lastProbeMs: 0, lastOkMs: 0, lastError: null };
+  private static readonly SERVE_PROBE_TTL_MS = 300_000;      // re-probe at most every 5 min
+  private static readonly SERVE_PROBE_TIMEOUT_MS = 30_000;   // a probe generation that hangs this long counts as unhealthy
 
   constructor(
     private dataDir: string,
@@ -644,6 +652,14 @@ export class ModelService {
         log.debug(`storage peer skipped ${entry.meta.name}: would exceed the storage cap`);
         continue;
       }
+      // Free-disk guard: never START a fetch the disk cannot hold. Without this a model download fills the
+      // disk and leaves a wedged .part that stalls a serving node. Headroom covers temp/decode overhead.
+      const size = entry.meta.sizeBytes ?? 0;
+      const free = this.freeDiskBytes();
+      if (free < size * 1.2) {
+        log.warn(`storage fetch skipped ${entry.meta.name}: ${(free / 1e9).toFixed(1)}GB free disk, need ~${(size * 1.2 / 1e9).toFixed(1)}GB`);
+        continue;
+      }
       this.storageFetches.add(entry.meta.id);
       try { if (await this.fetch(entry.meta.id)) needServing = false; }
       catch (e) { log.debug("storage replication pending", (e as Error).message); }
@@ -658,6 +674,13 @@ export class ModelService {
     let n = this.store.totalBytes();
     for (const id of this.storageFetches) n += this.registry.get(id)?.meta.sizeBytes ?? 0;
     return n;
+  }
+
+  /** Free bytes on the volume holding the data dir. If it cannot be determined (older runtime/platform), return
+   * Infinity so the disk guard never wrongly blocks a fetch. */
+  private freeDiskBytes(): number {
+    try { const st = statfsSync(this.dataDir); return st.bavail * st.bsize; }
+    catch { return Number.POSITIVE_INFINITY; }
   }
 
   // ---- mining ----
@@ -777,6 +800,43 @@ export class ModelService {
     throw new Error("no model available to answer");
   }
 
+  /** Prove this node can actually generate right now by running one small, bounded generation. Cached with a
+   * TTL so it runs at most every few minutes. The miner loop gates its provider announce on the cached result
+   * (servableHealthy) so a node whose model/endpoint cannot generate never advertises as a phantom provider.
+   * Returns true only when a real, non-empty answer came back within the timeout. */
+  async probeServable(now = Date.now()): Promise<boolean> {
+    if (!this.canServe()) {
+      this.serveHealth = { healthy: false, lastProbeMs: now, lastOkMs: this.serveHealth.lastOkMs, lastError: "no model or endpoint" };
+      return false;
+    }
+    if (this.serveHealth.lastProbeMs > 0 && now - this.serveHealth.lastProbeMs < ModelService.SERVE_PROBE_TTL_MS) return this.serveHealth.healthy;
+    this.serveHealth.lastProbeMs = now;
+    const probe = this.generate([{ role: "user", content: "ping" }], "Reply with the single word: ok", undefined);
+    probe.catch(() => { /* a late rejection after a timeout win must not surface as unhandled */ });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, rej) => {
+      timer = setTimeout(() => rej(new Error(`serve probe timed out after ${ModelService.SERVE_PROBE_TIMEOUT_MS}ms`)), ModelService.SERVE_PROBE_TIMEOUT_MS);
+    });
+    try {
+      const out = await Promise.race([probe, timeout]);
+      const ok = typeof out === "string" && out.trim().length > 0;
+      this.serveHealth = { healthy: ok, lastProbeMs: now, lastOkMs: ok ? now : this.serveHealth.lastOkMs, lastError: ok ? null : "empty generation" };
+      if (!ok) log.warn("serve probe produced no output; not advertising as a provider until the model generates");
+      return ok;
+    } catch (e) {
+      this.serveHealth = { healthy: false, lastProbeMs: now, lastOkMs: this.serveHealth.lastOkMs, lastError: (e as Error).message };
+      log.warn(`serve probe failed (${(e as Error).message}); not advertising as a provider until the model generates`);
+      return false;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /** The cached serve-health flag. Does NOT run a probe; call probeServable() to refresh. */
+  servableHealthy(): boolean { return this.serveHealth.healthy; }
+  /** Full cached serve-health, for status/RPC visibility. */
+  serveHealthInfo(): { healthy: boolean; lastProbeMs: number; lastOkMs: number; lastError: string | null } { return { ...this.serveHealth }; }
+
   // ---- own-task inference: the user's own hardware for the user's own work, decoupled from mining ----
   // This path never serves the field, never answers others, and never earns. It can run even when
   // mining is off. It reuses the same native engine and endpoint as mining, but its model loading is
@@ -830,12 +890,14 @@ export class ModelService {
     throw new Error("no local model is available yet. Load an authorized model on this node (storage peer) or set a local endpoint like Ollama.");
   }
 
-  async status(): Promise<{ mining: MiningConfig; engineAvailable: boolean; loadedModel: string | null; serving: boolean; ownTaskReady: boolean; ownTaskLabel: string; isFounder: boolean; local: ModelMeta[]; storageBytes: number; storageDownloadingBytes: number; known: { meta: ModelMeta; providers: number; targetHosts: number; distributionProgress: number; ready: boolean; local: boolean }[] }> {
+  async status(): Promise<{ mining: MiningConfig; engineAvailable: boolean; loadedModel: string | null; serving: boolean; serveHealthy: boolean; serveHealth: { healthy: boolean; lastProbeMs: number; lastOkMs: number; lastError: string | null }; ownTaskReady: boolean; ownTaskLabel: string; isFounder: boolean; local: ModelMeta[]; storageBytes: number; storageDownloadingBytes: number; known: { meta: ModelMeta; providers: number; targetHosts: number; distributionProgress: number; ready: boolean; local: boolean }[] }> {
     return {
       mining: this.mining,
       engineAvailable: await this.inference.isAvailable(),
       loadedModel: this.inference.loadedModel(),
       serving: this.canServe(),
+      serveHealthy: this.serveHealth.healthy,
+      serveHealth: this.serveHealthInfo(),
       ownTaskReady: await this.ownTaskReady(),
       ownTaskLabel: this.ownTaskLabel(),
       isFounder: this.isFounder(),
