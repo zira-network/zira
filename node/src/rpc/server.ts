@@ -393,6 +393,8 @@ const PUBLIC_GET_ROUTES = new Set<string>([
   "/marketplace", "/resonators", "/resonator", "/resonator/stats", "/tasks", "/task",
   // providers + query reads
   "/providers", "/provider/poll", "/query/answers", "/query/fusion", "/query/result",
+  // answerer leaderboard (challenge scoreboard) — a public, read-only on-chain derivation for the Explorer
+  "/answerers",
   // anchors* + resonators* reads
   "/anchors", "/anchors/classes", "/anchors/seats", "/anchors/mine", "/anchors/listings", "/anchor", "/anchors/event",
   // events status (read), own-task STATUS read (does not run inference), governance/objects reads

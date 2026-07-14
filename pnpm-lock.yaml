@@ -113,6 +113,9 @@ importers:
       '@libp2p/kad-dht':
         specifier: ^15.1.11
         version: 15.1.11
+      '@libp2p/peer-id':
+        specifier: ^5.0.0
+        version: 5.1.9
       '@libp2p/ping':
         specifier: ^2.0.0
         version: 2.0.37
@@ -5323,7 +5326,7 @@ snapshots:
 
   '@libp2p/peer-id@5.1.9':
     dependencies:
-      '@libp2p/crypto': 5.1.19
+      '@libp2p/crypto': 5.1.20
       '@libp2p/interface': 2.11.0
       multiformats: 13.4.2
       uint8arrays: 5.1.1

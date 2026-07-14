@@ -292,15 +292,10 @@ function ConvergencePanel({ converged, convergenceMin, earningUnlocked, locksPer
 
 // Earnings panel: paid ZIR (demand) vs ZTI (earned trust from all accurate serving). The status badge
 // reads from the single participation state so it never contradicts the other badges on the page.
-function EarningsPanel({ answered, earnedTodayUZIR, balanceUZIR, zti, state, minerAddress }: { answered: number; earnedTodayUZIR: number; balanceUZIR: number; zti: number; state: ParticipationState; minerAddress?: string | null }) {
+function EarningsPanel({ answered, earnedTodayUZIR, balanceUZIR, zti, minerAddress }: { answered: number; earnedTodayUZIR: number; balanceUZIR: number; zti: number; minerAddress?: string | null }) {
   return (
     <Card>
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2"><WalletIcon size={18} className="text-[var(--teal)]" /><h2 className="text-lg font-semibold">Your earnings</h2></div>
-        <Badge tone={state.tone}>
-          <span className="inline-block h-1.5 w-1.5 rounded-full bg-current" /> {state.label}
-        </Badge>
-      </div>
+      <div className="flex items-center gap-2"><WalletIcon size={18} className="text-[var(--teal)]" /><h2 className="text-lg font-semibold">Your earnings</h2></div>
       <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
         <Stat label="Answered" value={answered} />
         <Stat label="Earned (24h)" value={formatZir(earnedTodayUZIR)} tone="teal" />
@@ -605,6 +600,7 @@ export function Mine() {
   const [pricingLoading, setPricingLoading] = useState(true);
   const [pricingReload, setPricingReload] = useState(0);
   const [showIdleMiners, setShowIdleMiners] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
 
   // Live demand-driven price. Refresh on a short cadence so the demand panel reflects the field.
   // Track error/loading so an unreachable /pricing surfaces a retry instead of looking like zero demand.
@@ -786,15 +782,6 @@ export function Mine() {
   const founderMiningWithoutRewards = isFounder && (mining?.enabled ?? false) && providerStatus.earnedTodayUZIR === 0;
   const localLaunchEarnedUZIR = localLaunchMiners.reduce((sum, m) => sum + (m.earnedTodayUZIR ?? 0), 0);
   const localLaunchAnswers = localLaunchMiners.reduce((sum, m) => sum + (m.queriesAnswered ?? 0), 0);
-  const launchSignals = [
-    fieldReady,
-    peers >= 3,
-    ready || earningMiners.length > 0,
-    (mining?.storageEnabled ?? false) || hasLocalModelCache,
-    mining?.localTaskPermission ?? false,
-    localLaunchEarnedUZIR > 0 || providerStatus.earnedTodayUZIR > 0,
-  ].filter(Boolean).length;
-  const launchState = launchSignals >= 5 ? "launch aligned" : launchSignals >= 3 ? "forming" : "warming";
 
   // The 3-contributor convergence gate: a node earns ONLY when >=3 contributors converge on the field
   // heartbeat. Prefer the authoritative store stats; fall back to live pricing's provider count.
@@ -823,19 +810,12 @@ export function Mine() {
         badge={<Badge tone={state.tone}><span className="inline-block h-1.5 w-1.5 rounded-full bg-current" /> {state.label}</Badge>}
       />
 
-      <TierHeader label="Your participation" hint="Hardware, convergence, demand, and earnings" />
+      <TierHeader label="Your participation" hint="State, hardware, convergence, and earnings" />
       <Card className="field-hero">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--teal)]"><Sparkles size={14} /> ZIRA field</div>
-            <h2 className="title-glow mt-1 text-xl font-semibold text-text">Earn ZIR by lending your machine to the network</h2>
-            <p className="mt-1 text-sm text-muted">Mining puts your machine to work helping the network answer questions. You don&apos;t need an AI model or spare storage to start. Running a model and sharing storage are separate, optional add-ons.</p>
-          </div>
-          <div className="rounded-xl border border-[color-mix(in_srgb,var(--teal)_28%,var(--border))] bg-surface/70 p-3 text-center">
-            <div className="text-[10px] uppercase tracking-[0.18em] text-faint">field state</div>
-            <div className="mt-1 text-sm font-semibold text-text">{launchState}</div>
-            <div className="mono mt-1 text-xs text-[var(--teal)]">{launchSignals}/6 signals</div>
-          </div>
+        <div>
+          <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--teal)]"><Sparkles size={14} /> ZIRA field</div>
+          <h2 className="title-glow mt-1 text-xl font-semibold text-text">Earn ZIR by lending your machine to the network</h2>
+          <p className="mt-1 text-sm text-muted">Mining puts your machine to work helping the network answer questions. You don&apos;t need an AI model or spare storage to start. Running a model and sharing storage are separate, optional add-ons.</p>
         </div>
         <div className="mt-4 grid gap-2 text-xs sm:grid-cols-3">
           <div className="rounded-lg border border-hairline bg-surface/70 p-3"><div className="flex items-center gap-1 font-medium text-text"><Radio size={13} /> Coordination</div><div className="mt-1 text-faint">{peers} peers, {providersOnline} providers, {locksPerMinute} locks/min</div></div>
@@ -848,25 +828,18 @@ export function Mine() {
           exact phase so users don't think it's broken. Hidden once the node is holding+earning. */}
       <MiningReadyBanner mining={mining} earning={(balanceUZIR ?? 0) > 0} />
 
-      {/* Field convergence: the 3-contributor earning gate, the single fact that decides whether mining pays. */}
-      <ConvergencePanel
-        converged={convergedContributors}
-        convergenceMin={convergenceMin}
-        earningUnlocked={earningUnlocked}
-        locksPerMinute={locksPerMinute}
-        providersOnline={providersOnline}
-        coordinationOnly={coordinationOnly}
-        miningOn={Boolean(mining?.enabled)}
+      {/* Earnings: paid ZIR vs ZTI from coordination, honestly distinguished. */}
+      <EarningsPanel
+        answered={(mining?.answered ?? 0) + localLaunchAnswers}
+        earnedTodayUZIR={earned24hUZIR}
+        balanceUZIR={balanceUZIR || minerBalanceUZIR}
+        zti={zti}
+        minerAddress={minerAddress}
       />
 
-      {/* Your hardware: one three-state control. Mine for the field, use it for your own tasks, or off. */}
+      {/* Your hardware: one simple control. Mine for the field or off, with one-click Engage maximum. */}
       <Card>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2"><Cpu size={18} className="text-[var(--indigo)]" /><h2 className="text-lg font-semibold">Your hardware</h2></div>
-          <Badge tone={state.tone}>
-            <span className="inline-block h-1.5 w-1.5 rounded-full bg-current" /> {state.label}
-          </Badge>
-        </div>
+        <div className="flex items-center gap-2"><Cpu size={18} className="text-[var(--indigo)]" /><h2 className="text-lg font-semibold">Your hardware</h2></div>
         <p className="mt-1 text-sm text-muted">Mining gives your hardware's work to the field's coordination, no model or storage required, and earns ZIR when that work is paid. Or use this machine only for your own tasks, or turn local inference off. These are separate: you can run your own tasks without ever mining.</p>
 
         <HardwareModeControl
@@ -910,21 +883,19 @@ export function Mine() {
 
       </Card>
 
-      {/* Live, demand-driven economics. */}
-      <DemandPanel pricing={pricing} error={pricingError} loading={pricingLoading} onRetry={() => { setPricingLoading(true); setPricingReload((n) => n + 1); }} />
+      {/* Field convergence: the 3-contributor earning gate, the single health panel that decides whether mining pays. */}
+      <ConvergencePanel
+        converged={convergedContributors}
+        convergenceMin={convergenceMin}
+        earningUnlocked={earningUnlocked}
+        locksPerMinute={locksPerMinute}
+        providersOnline={providersOnline}
+        coordinationOnly={coordinationOnly}
+        miningOn={Boolean(mining?.enabled)}
+      />
 
       {/* Live field activity: terms/topics the field is converging on right now. */}
       <LiveActivity locks={locks} />
-
-      {/* Earnings: paid ZIR vs ZTI from coordination, honestly distinguished. */}
-      <EarningsPanel
-        answered={(mining?.answered ?? 0) + localLaunchAnswers}
-        earnedTodayUZIR={earned24hUZIR}
-        balanceUZIR={balanceUZIR || minerBalanceUZIR}
-        zti={zti}
-        state={state}
-        minerAddress={minerAddress}
-      />
 
       {/* Answering visibility: the highest earning path, shown only when mining is on. */}
       {(mining?.enabled ?? false) && (
@@ -941,13 +912,20 @@ export function Mine() {
       {/* Period earnings history: 1H / 24H / 7D / 30D, computed from the signed ledger. */}
       <EarningsHistory address={address} />
 
-      {/* Battery auto-pause: stop mining when on battery below a chosen threshold. */}
-      <BatteryPause miningEnabled={Boolean(mining?.enabled)} onPause={() => { void setMining({ enabled: false }); toast.push("Mining paused: battery below your threshold.", "warn"); }} />
+      {/* Details and add-ons: live economics, node consensus, hardware tuning, model serving, storage, and
+          steward tools. Collapsed by default so the main flow stays to what a contributor needs first. */}
+      <button
+        onClick={() => setShowDetails((v) => !v)}
+        className="flex w-full items-center justify-between rounded-xl border border-hairline bg-surface/60 px-4 py-3 text-sm font-medium text-text transition-colors hover:border-hairline-strong"
+      >
+        <span className="flex items-center gap-2"><Cpu size={16} className="text-[var(--indigo)]" /> Details and add-ons</span>
+        <span className="text-xs text-faint">{showDetails ? "Hide" : "Show"}</span>
+      </button>
 
-      {/* Honest, three-bullet explainer. */}
-      <HowYouEarn />
-
-      <TierHeader label="Node" hint="Always on while ZIRA runs" />
+      {showDetails && (
+        <div className="space-y-5">
+      {/* Live, demand-driven economics. */}
+      <DemandPanel pricing={pricing} error={pricingError} loading={pricingLoading} onRetry={() => { setPricingLoading(true); setPricingReload((n) => n + 1); }} />
 
       {/* Node: always on while ZIRA runs. Consensus + observation. */}
       <Card>
@@ -967,16 +945,9 @@ export function Mine() {
         </div>
       </Card>
 
-      <TierHeader label="Mining details" hint="Engine, hardware, models, and storage" />
-
       {/* Mining details: engine, hardware, models, storage, and steward controls. */}
       <Card>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2"><Cpu size={18} className="text-[var(--indigo)]" /><h2 className="text-lg font-semibold">Mining details</h2></div>
-          <Badge tone={state.tone}>
-            <span className="inline-block h-1.5 w-1.5 rounded-full bg-current" /> {state.label}
-          </Badge>
-        </div>
+        <div className="flex items-center gap-2"><Cpu size={18} className="text-[var(--indigo)]" /><h2 className="text-lg font-semibold">Mining details</h2></div>
         <p className="mt-1 text-sm text-muted">Coordination is the base. Your hardware relays signed work, submits observations, and helps converge Resonator and model outputs by earned trust. Serving a model and sharing storage are independent add-ons below; neither is required to mine.</p>
 
         <div className="mt-3 rounded-xl border border-[color-mix(in_srgb,var(--teal)_24%,var(--border))] bg-[radial-gradient(circle_at_top_left,color-mix(in_srgb,var(--teal)_14%,transparent),transparent_36%),var(--bg-base)] p-3">
@@ -1160,10 +1131,17 @@ export function Mine() {
         {!canMineSomehow && <p className="mt-2 text-[11px] text-faint">Turn mining on to coordinate the field with your hardware. No model is required; serving the field model and storage stay optional.</p>}
       </Card>
 
-      {/* Steward: models + assigned storage policy */}
-      {isFounder && <TierHeader label="Steward" hint="Active launch authority adds models to the field" />}
+      {/* Battery auto-pause: stop mining when on battery below a chosen threshold. */}
+      <BatteryPause miningEnabled={Boolean(mining?.enabled)} onPause={() => { void setMining({ enabled: false }); toast.push("Mining paused: battery below your threshold.", "warn"); }} />
+
+      {/* Honest, three-bullet explainer. */}
+      <HowYouEarn />
+
+      {/* Steward: models + assigned storage policy. Active launch authority adds models to the field. */}
       {isFounder && <FounderModels />}
       {isFounder && <FounderStorage />}
+        </div>
+      )}
 
       <p className="text-center text-[11px] text-faint">Balance: {formatZir(balanceUZIR)} ZIR, <Server size={11} className="inline" /> connected to your node</p>
     </div>

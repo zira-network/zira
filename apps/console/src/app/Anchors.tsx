@@ -104,8 +104,20 @@ export function Anchors() {
         <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <Badge tone="teal">ZRC-1 anchors live</Badge>
-            <h2 className="title-glow mt-2 text-2xl font-semibold tracking-tight">512 Anchor positions. The network&apos;s foundation.</h2>
-            <p className="mt-1 max-w-3xl text-sm text-muted">Only 512 Anchor positions exist on the network. They are foundational, high-trust positions you can hold and transfer, assigned by invitation and contribution, never sold. Each carries a class, a starting trust level, a routing weight, and a ZIR allocation that vests to its owner over one year. You can own and transfer them now. Earning from them turns on later, once every position is secured and the next phase opens.</p>
+            <h2 className="title-glow mt-2 text-2xl font-semibold tracking-tight">Anchors</h2>
+            <p className="mt-1 max-w-3xl text-sm text-muted">An anchor is one of only 512 permanent seats that form the network&apos;s trusted, well-routed core. Each carries a class, a starting trust level, a routing weight, and a ZIR allocation that vests to its owner over one year. Own and transfer one today; earning turns on in a later phase.</p>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {[
+                "Scarce: only 512, ever",
+                "Foundational trust: elevated starting ZTI",
+                "Routing weight: higher classes carry more coordination",
+                "One-year ZIR vesting",
+                "Transferable ownership now",
+                "Earning and activation later",
+              ].map((t) => (
+                <span key={t} className="rounded-full border border-hairline bg-base px-2.5 py-1 text-[11px] text-muted">{t}</span>
+              ))}
+            </div>
           </div>
           <div className="grid grid-cols-3 gap-2 text-center text-xs">
             <div className="rounded-lg border border-hairline bg-base p-2"><div className="mono text-sm text-[var(--teal)]">{claimed}/{TOTAL_ANCHOR_SEATS}</div><div className="text-faint">assigned</div></div>
@@ -278,7 +290,8 @@ function Lattice({ anchors, onPick }: { anchors: Anchor[]; onPick: (a: Anchor) =
 function ClassLegend({ anchors, totalStakeUZIR }: { anchors: Anchor[]; totalStakeUZIR: number }) {
   return (
     <Card>
-      <h3 className="title-glow mb-2 text-sm font-semibold">Six classes, fixed at {TOTAL_ANCHOR_SEATS} seats</h3>
+      <h3 className="title-glow mb-1 text-sm font-semibold">Six classes, {TOTAL_ANCHOR_SEATS} seats</h3>
+      <p className="mb-2 text-[11px] text-faint">Higher classes carry more routing weight and a higher starting trust floor.</p>
       <div className="space-y-2">
         {CLASS_CODES.map((code) => {
           const c = ANCHOR_CLASSES[code];
@@ -300,7 +313,7 @@ function ClassLegend({ anchors, totalStakeUZIR }: { anchors: Anchor[]; totalStak
       </div>
       <div className="mt-3 border-t border-hairline pt-2 text-xs text-faint">
         <div>Total reserve-backed allocation at full occupancy <span className="mono">{formatNum(totalStakeUZIR / PROTOCOL.UZIR_PER_ZIR / 1e9, 3)}B ZIR</span></div>
-        <p className="mt-2">Class sets baseline topology load. Behavior, ZTI, uptime, and useful work decide future routing priority. The allocation is a network parameter that vests to each position's owner over one year, never a price.</p>
+        <p className="mt-2">The allocation is a network parameter that vests to each position&apos;s owner over one year, not a price.</p>
         <div className="mt-3 rounded-lg border border-hairline bg-base/70 p-2">
           <div className="font-medium text-muted">Anchor reserve · 30% = <span className="mono">8.61B ZIR</span></div>
           <p className="mt-1">The full anchor reserve sits in the steward-administered anchor-reserve wallet <span className="mono">zira-anchor-reserve</span>, held on behalf of the seat owners rather than as steward funds. It is released to seat owners as their seats are assigned, each release a signed public ledger entry. The per-seat <span className="text-muted">Reserve allocation</span> shown on each seat is that seat&apos;s structural stake, one slice of this 30%, not the whole reserve.</p>
@@ -375,7 +388,7 @@ function OwnedSeats({ seats, busy, onRefresh, onTransfer, onBatchTransfer, onSet
                   <Button variant={a.contributionsOpen ? "ghost" : "primary"} disabled={busy} onClick={() => void onSetContributions([a.id], !a.contributionsOpen)}>{a.contributionsOpen ? "Close" : "Open"}</Button>
                 </div>
                 <p className="mt-1 text-[11px] text-faint">Open a position to let other participants contribute machines and storage under it. You can close it any time.</p>
-                <Button variant="ghost" className="mt-2 w-full" disabled onClick={() => onActivate(a.id)}>Activation disabled until all 512 positions are secured</Button>
+                <Button variant="ghost" className="mt-2 w-full" disabled onClick={() => onActivate(a.id)}>Earning activates in a later phase</Button>
               </div>
             ))}
           </div>

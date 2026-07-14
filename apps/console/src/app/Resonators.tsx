@@ -1,6 +1,8 @@
 // apps/console/src/app/Resonators.tsx
-// Create your own Resonators, fund them, give them a character, switch on resonance, and watch
-// them earn trust and ZIR. The lifecycle is: create, fund, it works and earns trust, it earns ZIR.
+// User-owned Resonators are a preview of what is coming. A Resonator will be your own AI agent on the
+// network that works within limits you set and earns ZIR. Until that ships, creation is gated off and
+// this page reads as a clear "coming soon". Today's resonators are the network's coordination agents,
+// visible in Discover. The builder machinery below stays intact, reachable only when CREATION_LIVE is true.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Plus, Bot, Sparkles, Wallet, Activity, Coins, Search, Check, X } from "lucide-react";
@@ -15,6 +17,11 @@ import { NodeApi } from "../lib/nodeApi";
 
 const MIN_CREATE_FUND_ZIR = 10;
 const MIN_RESONANCE_FUND_ZIR = 20;
+
+// User-owned Resonators are not live yet. This single flag hard-gates every creation path (the New
+// Resonator button, the starter cards, the empty-state CTA, and openBuilder) into a "coming soon"
+// state, independent of the node's runtime creationOpen signal. Flip to true when the feature ships.
+const CREATION_LIVE = false;
 
 function clampNum(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Number.isFinite(n) ? n : min));
@@ -172,7 +179,7 @@ export function Resonators() {
     return () => { live = false; };
   }, []);
 
-  function openBuilder(s: Starter | null) { setStarter(s); setBuilding(true); }
+  function openBuilder(s: Starter | null) { if (!CREATION_LIVE) return; setStarter(s); setBuilding(true); }
 
   if (!enabled) {
     return <div className="p-6"><EmptyState title="Resonators are almost here" hint="Resonators turn on with the economy. You can explore the field and your wallet now."><Bot size={40} className="text-muted" /></EmptyState></div>;
@@ -182,12 +189,14 @@ export function Resonators() {
     <div className="mx-auto max-w-5xl space-y-5 p-6">
       <Card className="field-hero">
         <PageHeader
-          badge={<Badge tone="indigo">your own Resonator</Badge>}
-          title="A Resonator is your AI worker. You own it, fund it, and it earns for you."
-          description="Give it a name, a purpose, and a spending limit, then switch it on. It works on its own inside your limits, earns trust from results that check out, and gets paid in ZIR for the work it does."
-          action={<Button variant="primary" onClick={() => openBuilder(null)} disabled={!address || !creationOpen} title={!creationOpen ? "Creating new Resonators is paused until every anchor is secured. Your existing Resonators keep working." : undefined}><Plus size={15} /> New Resonator</Button>}
+          badge={<Badge tone="indigo">coming soon</Badge>}
+          title="Your own Resonator is coming soon."
+          description="A Resonator will be your own AI agent on the network. It works within the limits you set and earns ZIR. This is coming soon. Today, resonators are the network's coordination agents, and you can see them in Discover."
+          action={CREATION_LIVE
+            ? <Button variant="primary" onClick={() => openBuilder(null)} disabled={!address || !creationOpen} title={!creationOpen ? "Creating new Resonators is paused until every anchor is secured. Your existing Resonators keep working." : undefined}><Plus size={15} /> New Resonator</Button>
+            : <Button variant="primary" disabled title="Creating your own Resonator is coming soon."><Plus size={15} /> Coming soon</Button>}
         />
-        {!creationOpen && (
+        {CREATION_LIVE && !creationOpen && (
           <p className="mt-2 rounded-lg border border-hairline bg-base px-3 py-2 text-xs text-muted">
             Creating new Resonators is paused until every anchor position is secured. Your existing Resonators keep coordinating and earning as usual, and you can still fund, pause, or manage them.
           </p>
@@ -198,16 +207,16 @@ export function Resonators() {
       <div>
         <div className="mb-2 flex items-center gap-2">
           <Sparkles size={15} className="text-[var(--teal)]" />
-          <h3 className="text-sm font-semibold">Start from a purpose</h3>
-          <span className="text-xs text-faint">pick one to prefill the builder, then edit anything</span>
+          <h3 className="text-sm font-semibold">A preview of what yours could do</h3>
+          <span className="text-xs text-faint">these purposes go live when Resonators arrive</span>
         </div>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {STARTERS.map((s) => (
-            <button key={s.key} onClick={() => openBuilder(s)} disabled={!address || !creationOpen}
-              className="group rounded-xl border border-hairline bg-base p-3 text-left transition-colors hover:border-[var(--teal)] disabled:cursor-not-allowed disabled:opacity-50">
+            <button key={s.key} onClick={() => openBuilder(s)} disabled={!CREATION_LIVE} title="Coming soon"
+              className="group rounded-xl border border-hairline bg-base p-3 text-left transition-colors hover:border-[var(--teal)] disabled:cursor-not-allowed disabled:opacity-60">
               <div className="flex items-center justify-between">
                 <span className="text-sm font-semibold text-text">{s.name}</span>
-                <Plus size={14} className="text-faint group-hover:text-[var(--teal)]" />
+                {CREATION_LIVE ? <Plus size={14} className="text-faint group-hover:text-[var(--teal)]" /> : <span className="text-[10px] uppercase tracking-wide text-faint">Soon</span>}
               </div>
               <p className="mt-1 text-xs text-muted">{s.blurb}</p>
               <div className="mt-2 flex flex-wrap gap-1">
@@ -251,10 +260,16 @@ export function Resonators() {
       {loading && !loadedOnce ? (
         <LoadingState label="Loading your Resonators..." slow={slow} />
       ) : list.length === 0 ? (
-        <EmptyState title="No Resonators yet" hint="Pick a purpose above or start from scratch. Your worker gets its own key and wallet, created right here on your device."
-          action={<Button variant="primary" onClick={() => openBuilder(null)} disabled={!address || !creationOpen} title={!creationOpen ? "Creating new Resonators is paused until every anchor is secured." : undefined}><Plus size={15} /> Create your first Resonator</Button>}>
-          <Bot size={40} className="text-muted" />
-        </EmptyState>
+        CREATION_LIVE ? (
+          <EmptyState title="No Resonators yet" hint="Pick a purpose above or start from scratch. Your worker gets its own key and wallet, created right here on your device."
+            action={<Button variant="primary" onClick={() => openBuilder(null)} disabled={!address || !creationOpen} title={!creationOpen ? "Creating new Resonators is paused until every anchor is secured." : undefined}><Plus size={15} /> Create your first Resonator</Button>}>
+            <Bot size={40} className="text-muted" />
+          </EmptyState>
+        ) : (
+          <EmptyState title="Your own Resonator is coming soon" hint="Creating and funding your own Resonator is not live yet. Today, resonators are the network's coordination agents. You can explore them in Discover while this feature is on the way.">
+            <Bot size={40} className="text-muted" />
+          </EmptyState>
+        )
       ) : filtered.length === 0 ? (
         <EmptyState title="No Resonators match" hint="No Resonator matches your search or filters. Clear them to see all of yours."
           action={<Button variant="secondary" onClick={() => { setQ(""); setDomain(""); setSort("zti"); }}><X size={14} /> Clear filters</Button>}>

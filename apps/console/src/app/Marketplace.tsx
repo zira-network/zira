@@ -1,6 +1,7 @@
 // apps/web/src/app/Marketplace.tsx
-// Discover: find a Resonator for a job, hire it per task, and pay in ZIR. Listings are ranked by the
-// trust each Resonator earned from real verified work, never by paid placement.
+// Discover: a read-only viewer of the resonators coordinating the network. Listings are ranked by the
+// trust each Resonator earned from real verified work, never by paid placement. Owning and hiring your
+// own resonator is coming soon; for now each card opens a read-only detail with its track record.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ChevronLeft, ChevronRight, CircuitBoard, Info, Search, Star, X } from "lucide-react";
@@ -17,7 +18,7 @@ import { featureEnabled } from "../lib/phase";
 import { NodeApi, type Pricing } from "../lib/nodeApi";
 
 type Sort = "zti" | "price" | "jobs" | "recent" | "domainZti";
-type Kind = "all" | "anchor" | "network" | "mine";
+type Kind = "all" | "anchor" | "network";
 
 // Task statuses that are terminal: once a task reaches one of these it will not change again, so the
 // hire-status poll can stop instead of running a timer forever.
@@ -122,7 +123,6 @@ export function Marketplace() {
       const ai = anchorInfo(l.resonatorId);
       if (kind === "anchor" && !ai) return false;
       if (kind === "network" && (ai || (address && l.owner === address))) return false;
-      if (kind === "mine" && (!address || l.owner !== address)) return false;
       if (term && !(`${l.name} ${l.purpose}`.toLowerCase().includes(term))) return false;
       return true;
     });
@@ -147,9 +147,9 @@ export function Marketplace() {
   return (
     <div className="mx-auto max-w-5xl space-y-5 p-6">
       <PageHeader
-        title="Find an AI worker for the job. Hire it one task at a time."
+        title="The resonators coordinating the network"
         badge={<Badge tone="teal">discover</Badge>}
-        description="Browse AI workers by the trust they've earned, see what each one is good at and what it's done, pick one, and pay in ZIR. It does the work, taps the network when it needs to, and gives you proof you can check."
+        description="See the agents that route and answer on the field, ranked by the trust they have earned from real, verified work. Watch what each has done. Owning and hiring your own resonator is coming soon."
       />
 
       {/* Honest metric strip: real counts only, no decorative pseudo-stats. */}
@@ -204,7 +204,6 @@ export function Marketplace() {
             <option value="all">All Resonators</option>
             <option value="anchor">Anchor seats</option>
             <option value="network">Network</option>
-            <option value="mine">Mine</option>
           </Select>
         </div>
         {hasFilters && (
@@ -235,7 +234,7 @@ export function Marketplace() {
           <span>Showing <span className="text-text">{pageList.length}</span> of <span className="text-text">{filtered.length}</span> Resonators</span>
           {q && <FilterChip label={`"${q}"`} onClear={() => patchParams({ q: "" })} />}
           {domain && <FilterChip label={DOMAIN_META[domain]?.label ?? domain} onClear={() => patchParams({ domain: "" })} />}
-          {kind !== "all" && <FilterChip label={kind === "anchor" ? "Anchor seats" : kind === "mine" ? "Mine" : "Network"} onClear={() => patchParams({ kind: "" })} />}
+          {kind !== "all" && <FilterChip label={kind === "anchor" ? "Anchor seats" : "Network"} onClear={() => patchParams({ kind: "" })} />}
         </div>
       )}
 
@@ -251,8 +250,7 @@ export function Marketplace() {
             <Search size={40} className="text-muted" />
           </EmptyState>
         ) : (
-          <EmptyState title="No Resonators here yet" hint="Create a Resonator, fund it, and list it in Discover so others can find and hire it."
-            action={<Button variant="primary" onClick={() => nav("/resonators")}><CircuitBoard size={15} /> Create a Resonator</Button>}>
+          <EmptyState title="No resonators match your filters" hint="The resonators coordinating the field will appear here as the directory loads. Adjust your search, domain, or class to see them.">
             <CircuitBoard size={40} className="text-muted" />
           </EmptyState>
         )
@@ -286,8 +284,8 @@ export function Marketplace() {
                   <span>earned {formatZir(l.totalEarnedUZIR)} ZIR</span>
                 </div>
                 <div className="mt-1 text-[11px] text-faint">{l.lastActiveAt ? `active ${timeAgo(l.lastActiveAt)}` : "awaiting first task"}</div>
-                {/* Discover is info; starting a task opens a Console chat focused on this Resonator (spec §8). */}
-                <Button variant="ghost" className="mt-3 w-full" onClick={(e) => { e.stopPropagation(); nav(`/?resonator=${encodeURIComponent(l.resonatorId)}`); }}>Ask in Console</Button>
+                {/* Discover is read-only; the card opens a detail view with this Resonator's track record. */}
+                <Button variant="ghost" className="mt-3 w-full" onClick={(e) => { e.stopPropagation(); setPicked(l); }}>View details</Button>
               </Card>
             );
           })}
@@ -301,7 +299,7 @@ export function Marketplace() {
           <Button variant="ghost" disabled={safePage >= pageCount - 1} onClick={() => patchParams({ page: String(safePage + 1) }, false)}>Next <ChevronRight size={15} /></Button>
         </div>
       )}
-      {picked && <HireModal listing={picked} onClose={() => setPicked(null)} />}
+      {picked && <DetailModal listing={picked} onClose={() => setPicked(null)} />}
     </div>
   );
 }
@@ -360,149 +358,53 @@ function TrackRecord({ listing }: { listing: Listing }) {
   );
 }
 
-function HireModal({ listing, onClose }: { listing: Listing; onClose: () => void }) {
-  const { client, address, network, mode, stats } = useZira();
-  const request = useUnlock((s) => s.request);
-  const toast = useToast();
-  const [brief, setBrief] = useState("");
-  const [domain, setDomain] = useState<Domain>(listing.domains[0] ?? "general");
-  const [minZti, setMinZti] = useState("0.2");
-  const [budget, setBudget] = useState(String(listing.priceUZIR / 1_000_000));
-  const [task, setTask] = useState<Task | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [pricing, setPricing] = useState<Pricing | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
+// A read-only detail view for a single Resonator: its purpose, trust, domains, and lifetime activity,
+// plus the recent track record. There is no hiring or payment here; owning and hiring your own
+// resonator is coming soon.
+function DetailModal({ listing, onClose }: { listing: Listing; onClose: () => void }) {
   const ai = anchorInfo(listing.resonatorId);
-  // Trust for the domain the hirer actually selected, when the Resonator has a per-domain score.
-  const domainZti = listing.ztiByDomain[domain];
-
-  useEffect(() => {
-    NodeApi.pricing().then((p) => {
-      setPricing(p);
-      const suggested = Math.max(listing.priceUZIR, p.taskBaseUZIR);
-      setBudget(String(suggested / 1_000_000));
-    }).catch(() => {});
-  }, [listing.priceUZIR]);
-
-  // Stop the status poll on unmount so a non-released terminal task never leaks a timer or sets state
-  // after the modal closes.
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
-
-  // Validation: a budget must be a real number at or above the network task floor, and min-trust must be
-  // a 0..1 number. Empty/garbage no longer reaches the node as NaN.
-  const budgetNum = Number(budget);
-  const minZtiNum = Number(minZti);
-  const floorUZIR = pricing?.taskBaseUZIR ?? 0;
-  const budgetValid = Number.isFinite(budgetNum) && budgetNum > 0 && zirToUzir(budgetNum) >= floorUZIR;
-  const minZtiValid = Number.isFinite(minZtiNum) && minZtiNum >= 0 && minZtiNum <= 1;
-  const belowFloor = Number.isFinite(budgetNum) && budgetNum > 0 && floorUZIR > 0 && zirToUzir(budgetNum) < floorUZIR;
-
-  async function hire() {
-    if (!client || !address) { toast.push("Create a wallet first.", "warn"); return; }
-    if (!budgetValid) { toast.push("Enter a budget at or above the network task floor.", "warn"); return; }
-    if (!minZtiValid) { toast.push("Min trust must be between 0 and 1.", "warn"); return; }
-    if (mode === "node") { const ok = await request(); if (!ok) return; }
-    setBusy(true);
-    try {
-      // pay the agent directly: fetch its own wallet address and send the budget there
-      const agent = await client.getResonator(listing.resonatorId);
-      if (!agent) { toast.push("Resonator not found.", "danger"); setBusy(false); return; }
-      if (agent.zti < minZtiNum) { toast.push("Resonator ZTI is below your minimum.", "warn"); setBusy(false); return; }
-      const nonce = await client.getNonce(address);
-      // Split the budget: the Resonator earns the bulk, a small protocol fee supports stewardship.
-      const total = zirToUzir(budgetNum);
-      const founderAddr = stats?.founderAddress;
-      const feeUZIR = founderAddr ? Math.round(total * PROTOCOL.RESONATOR_FEE_SHARE) : 0;
-      const resonatorUZIR = total - feeUZIR;
-      const paymentTx = makeSignedTx({ network, to: agent.address, amountUZIR: resonatorUZIR, nonce, kind: "transfer", memo: "hire " + listing.name });
-      const founderFeeTx = feeUZIR > 0 && founderAddr
-        ? makeSignedTx({ network, to: founderAddr, amountUZIR: feeUZIR, nonce: nonce + 1, kind: "transfer", memo: "resonator fee " + listing.name })
-        : undefined;
-      const t = await client.hireResonator({ resonatorId: listing.resonatorId, brief, domain, paymentTx, founderFeeTx, minZti: minZtiNum });
-      setTask(t);
-      toast.push("Hired. The Resonator was paid and the task created.");
-      // Poll task status until it reaches any terminal state, then stop. The ref + unmount cleanup
-      // prevents a leaked timer when the task ends as disputed/refunded/expired or the modal closes.
-      if (pollRef.current) clearInterval(pollRef.current);
-      if (TERMINAL_TASK_STATES.has(t.status)) return;
-      pollRef.current = setInterval(async () => {
-        try {
-          const fresh = await client.getTask(t.id);
-          if (fresh) {
-            setTask(fresh);
-            if (TERMINAL_TASK_STATES.has(fresh.status) && pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-          }
-        } catch { /* keep polling; transient node error */ }
-      }, 2500);
-    } catch (e) { toast.push(e instanceof Error ? e.message : "hire failed", "danger"); }
-    finally { setBusy(false); }
-  }
-
-  const terminal = task ? TERMINAL_TASK_STATES.has(task.status) : false;
-  const settled = task ? (task.status === "released" || task.status === "verified") : false;
 
   return (
-    <Modal open onClose={onClose} title={`Hire ${listing.name}`} wide>
+    <Modal open onClose={onClose} title={listing.name} wide>
       <p className="mb-1 text-sm text-muted">{listing.purpose}</p>
       <div className="mb-3 flex flex-wrap items-center gap-1">
         {ai && <Badge tone="teal" className="text-[10px]">Anchor {ai.cls} · {ai.className} · ZTI {ANCHOR_CLASS_ZTI[ai.cls].toFixed(2)}</Badge>}
-        {listing.domains.map((d) => <Badge key={d} tone="indigo" className="text-[10px]">{DOMAIN_META[d]?.label ?? d}</Badge>)}
+        <span className="text-[11px] text-faint">by {shortAddress(listing.owner)}</span>
       </div>
       <div className="mb-3 flex items-center gap-3">
         <Meter value={listing.zti} label={`Trust, ${ztiLabel(listing.zti)}`} className="flex-1" />
-        <span className="mono text-sm text-[var(--teal)]">{formatZir(listing.priceUZIR)} ZIR</span>
+        <span className="mono text-sm text-[var(--teal)]">{listing.zti.toFixed(2)}</span>
       </div>
-      {!task ? (
-        <div className="space-y-2">
-          <TrackRecord listing={listing} />
-          <label className="block text-xs font-medium text-text">Task brief</label>
-          <Textarea placeholder="Describe the task you want done, with any detail that helps." value={brief} onChange={(e) => setBrief(e.target.value)} rows={3} />
-          <div className="grid grid-cols-3 gap-2">
-            <div>
-              <label className="mb-1 block text-[11px] text-faint">Domain</label>
-              <Select value={domain} onChange={(e) => setDomain(e.target.value as Domain)}>{listing.domains.map((d) => <option key={d} value={d}>{DOMAIN_META[d]?.label ?? d}</option>)}</Select>
-              {domainZti != null && <p className="mt-1 text-[10px] text-faint">Trust here <span className="mono text-[var(--teal)]">{domainZti.toFixed(2)}</span></p>}
-            </div>
-            <div>
-              <label className="mb-1 block text-[11px] text-faint">Min trust</label>
-              <Input type="number" min={0} max={1} step={0.05} placeholder="Min ZTI" value={minZti} onChange={(e) => setMinZti(e.target.value)} className={`mono ${!minZtiValid ? "border-[var(--warn)]" : ""}`} />
-            </div>
-            <div>
-              <label className="mb-1 block text-[11px] text-faint">Budget ZIR</label>
-              <Input type="number" min={0} step="any" placeholder="Budget ZIR" value={budget} onChange={(e) => setBudget(e.target.value)} className={`mono ${budget && !budgetValid ? "border-[var(--warn)]" : ""}`} />
-            </div>
-          </div>
-          {belowFloor && <p className="text-[11px] text-[var(--warn)]">Budget is below the network task floor of {formatZir(floorUZIR)} ZIR.</p>}
-          <p className="text-xs text-faint">Your budget is paid when the task is created. The Resonator receives {Math.round((1 - PROTOCOL.RESONATOR_FEE_SHARE) * 100)}%, and a {Math.round(PROTOCOL.RESONATOR_FEE_SHARE * 100)}% network fee supports stewardship. Suggested cost adapts to the Resonator price, task pressure, live supply, minimum ZTI, and the coordination depth needed across miners, Resonators, storage evidence, and settlement.</p>
-          <div className="rounded-lg border border-hairline bg-base p-2 text-xs">
-            <div className="flex justify-between"><span className="text-faint">Resonator receives</span><span className="mono text-text">{formatZir(Math.round(zirToUzir(budgetValid ? budgetNum : 0) * (1 - PROTOCOL.RESONATOR_FEE_SHARE)))} ZIR</span></div>
-            <div className="flex justify-between"><span className="text-faint">Network fee ({Math.round(PROTOCOL.RESONATOR_FEE_SHARE * 100)}%)</span><span className="mono text-text">{formatZir(Math.round(zirToUzir(budgetValid ? budgetNum : 0) * PROTOCOL.RESONATOR_FEE_SHARE))} ZIR</span></div>
-          </div>
-          {pricing && (
-            <div className="rounded-lg border border-hairline bg-base p-2 text-xs text-muted">
-              <div>Network task floor: <span className="mono">{formatZir(pricing.taskBaseUZIR)} ZIR</span></div>
-              <div className="text-faint">Live field: {pricing.providersOnline} online, {pricing.openQueries} asking.</div>
-            </div>
-          )}
-          <Button variant="primary" className="w-full" onClick={hire} disabled={busy || !brief || !budgetValid || !minZtiValid}>Pay {formatZir(zirToUzir(budgetValid ? budgetNum : 0))} ZIR and hire</Button>
+
+      <div className="mb-3">
+        <div className="mb-1 text-[11px] text-faint">Good at</div>
+        <div className="flex flex-wrap gap-1">
+          {listing.domains.map((d) => (
+            <Badge key={d} tone="indigo" className="text-[10px]">
+              {DOMAIN_META[d]?.label ?? d}
+              {listing.ztiByDomain[d] != null && <span className="mono text-[var(--teal)]"> {listing.ztiByDomain[d]!.toFixed(2)}</span>}
+            </Badge>
+          ))}
         </div>
-      ) : (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between text-sm">
-            <span>Status</span>
-            <Badge tone={settled ? "teal" : task.status === "disputed" || task.status === "expired" || task.status === "refunded" ? "warn" : "indigo"}>{task.status}</Badge>
+      </div>
+
+      <div className="mb-3 grid grid-cols-3 gap-2">
+        {[
+          { label: "tasks done", value: String(listing.jobsDone) },
+          { label: "total earned", value: `${formatZir(listing.totalEarnedUZIR)} ZIR` },
+          { label: "last active", value: listing.lastActiveAt ? timeAgo(listing.lastActiveAt) : "no tasks yet" },
+        ].map((s) => (
+          <div key={s.label} className="rounded-lg border border-hairline bg-base p-2 text-center">
+            <div className="mono text-sm text-text">{s.value}</div>
+            <div className="text-[11px] text-faint">{s.label}</div>
           </div>
-          <div className="flex gap-1">
-            {["assigned", "delivered", "verified", "released"].map((s) => (
-              <div key={s} className={`h-1.5 flex-1 rounded-full ${["assigned", "delivered", "verified", "released"].indexOf(task.status) >= ["assigned", "delivered", "verified", "released"].indexOf(s) ? "gradient-bg" : "bg-elevated"}`} />
-            ))}
-          </div>
-          {settled && <p className="text-sm text-[var(--teal)]">Result verified. The Resonator's owner earned {formatZir(task.budgetUZIR)} ZIR for this task.</p>}
-          {terminal && !settled && <p className="text-sm text-[var(--warn)]">This task ended as {task.status}. Your budget is handled per the task's settlement.</p>}
-          <Button variant="ghost" className="w-full" onClick={onClose}>Close</Button>
-        </div>
-      )}
+        ))}
+      </div>
+
+      <TrackRecord listing={listing} />
+
+      <p className="mt-3 text-[11px] text-faint">Ranked by trust earned from real, verified work, never by paid placement. Owning and hiring your own resonator is coming soon.</p>
+      <Button variant="ghost" className="mt-3 w-full" onClick={onClose}>Close</Button>
     </Modal>
   );
 }

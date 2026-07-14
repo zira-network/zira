@@ -185,7 +185,11 @@ function SidebarFooter() {
   return (
     <div className="border-t border-hairline px-5 py-4 text-[11px] leading-relaxed text-faint">
       Run by its users. Your keys, your node, your AI.
-      <div className="mt-1.5 mono opacity-70">Console {APP_VERSION} · node {formatNodeVersion(nodeVersion)}</div>
+      {(() => {
+        const nodeVer = formatNodeVersion(nodeVersion);
+        const mismatch = nodeVer && nodeVer !== APP_VERSION;   // surface a console/node version drift, otherwise show one clean ZIRA version
+        return <div className="mt-1.5 mono opacity-70">ZIRA {APP_VERSION}{mismatch ? ` · node ${nodeVer}` : ""}</div>;
+      })()}
     </div>
   );
 }

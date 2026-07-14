@@ -233,15 +233,28 @@ export class Libp2pNetwork implements ZiraNetwork {
    * is what keeps a home miner reachable for the masters' liveness probe, so it stays vouched and keeps
    * earning. Bounded and best-effort: a slow/dead peer never blocks the others.
    */
+  private pingFails = new Map<string, number>();   // consecutive keepalive-ping misses per peer
   private async keepAliveSweep(): Promise<void> {
     if (!this.node) return;
     const pinger: any = this.node.services?.ping;
     if (!pinger || typeof pinger.ping !== "function") return;
     const conns = this.node.getConnections();
+    const seen = new Set<string>();
     await Promise.allSettled(conns.map(async (c) => {
-      try { await pinger.ping(c.remotePeer, { signal: AbortSignal.timeout(8_000) }); }
-      catch { try { await c.close(); } catch { /* pruned; discoverySweep will redial */ } }
+      const id = c.remotePeer.toString(); seen.add(id);
+      try {
+        await pinger.ping(c.remotePeer, { signal: AbortSignal.timeout(15_000) });
+        this.pingFails.delete(id);   // responsive again: reset the miss counter
+      } catch {
+        // A busy-but-ALIVE master (co-located, hundreds of connections) is often slow to answer a single ping.
+        // Do NOT drop it on one timeout, or a home node churns off the masters and drifts to a single relay peer
+        // (the "degraded, 1 peer" state). Close only after several consecutive misses = genuinely dead.
+        const n = (this.pingFails.get(id) ?? 0) + 1;
+        this.pingFails.set(id, n);
+        if (n >= 3) { this.pingFails.delete(id); try { await c.close(); } catch { /* pruned; discoverySweep redials */ } }
+      }
     }));
+    for (const id of [...this.pingFails.keys()]) if (!seen.has(id)) this.pingFails.delete(id);   // forget gone peers
   }
 
   /** Dial all configured bootstrap + announce seeds in parallel (best effort). */
@@ -504,7 +517,10 @@ export class Libp2pNetwork implements ZiraNetwork {
 
   async dial(addr: string): Promise<void> {
     if (!this.node) throw new Error("node not started");
-    await this.node.dial(multiaddr(addr));
+    // A busy public master accepts the TCP quickly but is slow to finish the encrypted libp2p handshake
+    // (noise + mux + identify) under load, so the default dial timeout aborts before it completes and a home
+    // node fails to hold the masters. Give the handshake room so slow-but-alive masters actually connect.
+    await this.node.dial(multiaddr(addr), { signal: AbortSignal.timeout(Number(process.env.ZIRA_DIAL_TIMEOUT_MS ?? 30_000)) });
   }
 
   multiaddrs(): string[] { return this.node ? this.node.getMultiaddrs().map((m) => m.toString()) : []; }

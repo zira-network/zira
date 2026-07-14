@@ -360,11 +360,9 @@ export function Console() {
   // A pending "ask the field instead" offer belongs to one message in one thread; drop it when the user
   // switches mode or conversation so it never attaches to an unrelated message.
   useEffect(() => { setLocalFieldOffer(null); }, [answerMode, activeId]);
-  // If a local task can't run because this machine has no model, answer it from the network automatically,
-  // with no extra click. Only the question is sent to the field, never local files, so workspace privacy
-  // holds. Fires once the failed turn has finished streaming; askFieldFallback clears the offer so it cannot loop.
-  useEffect(() => { if (localFieldOffer && !streaming) void askFieldFallback(); // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [localFieldOffer, streaming]);
+  // If a local task can't run because this machine has no model, we offer an explicit choice (the card below
+  // the failed message): ask the network, or use this machine. We do NOT auto-send the question to the field,
+  // so nothing leaves the machine without a deliberate click and workspace privacy always holds.
   // Switching mode or project switches to that scope's most recent thread (separate histories).
   useEffect(() => {
     const inScope = (c: ModeConvo) => (c.mode ?? "field") === answerMode && (activeProjectId ? c.projectId === activeProjectId : !c.projectId);
@@ -991,24 +989,6 @@ export function Console() {
         {/* composer */}
         <div className="sticky bottom-0 border-t border-hairline bg-surface/60 p-3 backdrop-blur-xl sm:p-4">
           <div className="mx-auto max-w-3xl">
-            {answerMode === "field" && (
-              <div className="mb-2 flex flex-wrap items-center gap-1.5 text-xs">
-                <span className="text-faint">Answer with</span>
-                <button onClick={() => setPersonaId("")}
-                  className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 transition-colors ${personaId === "" ? "border-[var(--teal)] bg-[color-mix(in_srgb,var(--teal)_12%,transparent)] text-[var(--teal)]" : "border-hairline text-muted hover:text-text"}`}>
-                  <Sparkles size={11} /> The network
-                </button>
-                {personaId !== "" && (
-                  <span className="inline-flex max-w-[14rem] items-center gap-1 rounded-full border border-[var(--indigo)] bg-[color-mix(in_srgb,var(--indigo)_12%,transparent)] px-2.5 py-1 text-[var(--indigo)]" title="Selected on Discover. Tap The network to clear.">
-                    <Bot size={11} /> <span className="truncate">{personas.find((p) => p.id === personaId)?.name ?? "AI worker"}</span>
-                  </span>
-                )}
-                <button onClick={() => navigate("/marketplace")} title="Choose a Resonator in Discover"
-                  className="inline-flex items-center gap-1 rounded-full border border-dashed border-hairline px-2.5 py-1 text-faint transition-colors hover:border-[var(--teal)] hover:text-[var(--teal)]">
-                  <Compass size={11} /> Browse Discover <ArrowRight size={10} />
-                </button>
-              </div>
-            )}
             {answerMode === "local" && tasks.length > 0 && (
               <TaskListPanel tasks={tasks} onToggle={toggleTaskDone} onClear={() => setAndPersistTasks(() => [])} />
             )}
@@ -1531,7 +1511,7 @@ function Message({ m, onPick, busy }: { m: ChatMessage; onPick: (opt: string) =>
         <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-[color-mix(in_srgb,var(--teal)_40%,transparent)] bg-[color-mix(in_srgb,var(--teal)_12%,transparent)] text-[var(--teal)]">
           <Sparkles size={11} />
         </span>
-        <span>Resonator</span>
+        <span>The field</span>
         {pending && <span className="text-faint">thinking</span>}
       </div>
       {(pending || bodyText) && (
