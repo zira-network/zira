@@ -1,7 +1,7 @@
 {
   "name": "@zira/desktop",
   "private": true,
-  "version": "2.5.0",
+  "version": "2.5.1",
   "author": "ZIRA",
   "description": "ZIRA desktop app. Runs a full ZIRA Core node (with mining) and the Console in one window.",
   "main": "electron/main.cjs",

@@ -957,6 +957,18 @@ export class ModelService {
     if (mineEndpoint) {
       loaded.endpoint = mineEndpoint;
       loaded.endpointModel = process.env.ZIRA_MINE_MODEL || process.env.ZIRA_PROVIDE_MODEL || process.env.ZIRA_PROVIDER_MODEL || loaded.endpointModel;
+    } else if (loaded.endpoint) {
+      // The isolated inference SUBPROCESS endpoint (127.0.0.1 at the derived inference port) is EPHEMERAL: it
+      // belongs to a child process from a previous run, not an external provider. Older builds persisted it to
+      // mining.json, so a restart loaded it back and reconcileAuto treated it as an external endpoint and never
+      // respawned the subprocess -> the node held a model but NEVER served (a miner "answers 0" after any
+      // restart). Drop a persisted subprocess endpoint here so reconcileAuto cleanly respawns and serving
+      // resumes on every restart. An explicit env endpoint (handled above) is always preserved.
+      const inferencePort = Number(process.env.ZIRA_INFERENCE_PORT) || (Number(process.env.ZIRA_RPC_PORT || 8645) + 31);
+      if (loaded.endpoint === `http://127.0.0.1:${inferencePort}/v1` || loaded.endpoint === `http://localhost:${inferencePort}/v1`) {
+        loaded.endpoint = undefined;
+        loaded.endpointModel = undefined;
+      }
     }
     if (process.env.ZIRA_GPU_LAYERS) loaded.gpuLayers = Math.max(0, Math.min(100, Math.floor(Number(process.env.ZIRA_GPU_LAYERS) || 0)));
     if (process.env.ZIRA_THREADS) loaded.threads = Math.max(1, Math.min(256, Math.floor(Number(process.env.ZIRA_THREADS) || loaded.threads || 1)));
@@ -1005,5 +1017,14 @@ export class ModelService {
     await this.setMining(next);
     return this.storageState();
   }
-  private saveMining(): void { try { writeFileSync(this.miningPath, JSON.stringify(this.mining, null, 2)); } catch { /* */ } }
+  private saveMining(): void {
+    try {
+      // Never persist the ephemeral inference-subprocess endpoint: it is tied to a running child + this run's
+      // port, and persisting it makes a restart mistake it for an external endpoint (see loadMining), so the
+      // subprocess is never respawned and the miner stops serving. External endpoints (endpointIsSubprocess
+      // false) persist normally.
+      const toSave = this.endpointIsSubprocess ? { ...this.mining, endpoint: undefined, endpointModel: undefined } : this.mining;
+      writeFileSync(this.miningPath, JSON.stringify(toSave, null, 2));
+    } catch { /* */ }
+  }
 }
