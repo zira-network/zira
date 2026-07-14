@@ -13,6 +13,7 @@ import {
   NETWORK_RESONATOR_SPECS, MAINNET_NETWORK_RESONATOR_OWNER, type NetworkResonatorSpec,
   anchorResonatorSpec, anchorResonatorOperatingFloatUZIR, type AnchorResonatorSpec, type Anchor,
   settleCoordination, addressFromPubKey, verify as edVerify,
+  convergenceAdjustedBudget, queryComplexityChars, queryTier, PRICING, type Address,
 } from "@zira/protocol";
 import { settlementWalletsFor, treasuryWalletsFor } from "../genesis-docs.js";
 import { launchModelsFor } from "../launch-models.js";
@@ -82,7 +83,7 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "2.3.0";
+const NODE_RELEASE_VERSION = "2.4.0";
 // Per-cycle coordination batch. Every funded+listed resonator is eligible; autonomousResonanceBatch picks
 // this many per 5-minute cycle by a DETERMINISTIC ZTI-WEIGHTED draw, so higher-trust resonators (anchors,
 // seeded 0.95/0.85/… by class) are driven most often and earn the most, while every other funded resonator
@@ -592,6 +593,12 @@ export class ZiraNode {
     if (saved.minerAnswerCredits && typeof saved.minerAnswerCredits === "object") {
       this.minerAnswerCredits = new Map(Object.entries(saved.minerAnswerCredits).filter(([, v]) => typeof v === "number") as [string, number][]);
     }
+    if (saved.pendingQueryCharges && typeof saved.pendingQueryCharges === "object") {
+      // Durable paid-query charges observed but not yet settled: rebuild so a restart never loses an asker's
+      // funded query (and never re-scans a charge that has already scrolled out of the bounded ledger history).
+      this.pendingQueryCharges = new Map(Object.entries(saved.pendingQueryCharges)
+        .filter(([, v]) => v && typeof (v as { amountUZIR?: unknown }).amountUZIR === "number" && typeof (v as { ts?: unknown }).ts === "number") as [string, { amountUZIR: number; ts: number }][]);
+    }
     if (saved.stuckFiller && typeof saved.stuckFiller.nonce === "number" && typeof saved.stuckFiller.ts === "number") {
       this.stuckFiller = { nonce: saved.stuckFiller.nonce, ts: saved.stuckFiller.ts };   // rebuild the identical filler after a restart
     }
@@ -628,6 +635,7 @@ export class ZiraNode {
         paidResonatorRewards: [...this.paidResonatorRewards],
         settledCoordinationQueries: [...this.settledCoordinationQueries],
         minerAnswerCredits: Object.fromEntries(this.minerAnswerCredits),
+        pendingQueryCharges: Object.fromEntries(this.pendingQueryCharges),
         stuckFiller: this.stuckFiller ?? undefined,
       });
     } catch { /* best effort; in-memory guard still holds until next restart */ }
@@ -1354,7 +1362,7 @@ export class ZiraNode {
       this.lastReapAt = now; this.reapTasks(now);
       // Skip ALL settler payout/coordination/filler issuance while paused (ops recovery: pure-emission-only
       // advancement walks a diverged fleet past a stuck fork). Reaping tasks above is safe (no balance txs).
-      if (!this.settlerPaused) { this.coordinateAutonomousResonance(now); this.settleFieldParticipation(now); this.unstickSettlerNonce(now); }
+      if (!this.settlerPaused) { this.coordinateAutonomousResonance(now); this.settleRealUserCoordination(now); this.settleFieldParticipation(now); this.unstickSettlerNonce(now); }
     }
     // Field heartbeat: contributing (mining/storage) nodes attest participation so PoR Locks form and the
     // round emission flows to them (storage-weighted). Self-throttled to FIELD_HEARTBEAT_INTERVAL_MS.
@@ -1870,6 +1878,84 @@ export class ZiraNode {
     }
   }
 
+  // Memo an asker's paid-query charge carries so the settler can tie a real on-chain payment to the query it
+  // funds. Kept as a stable, parseable prefix: `query-charge <queryId>`. Used by the /query ingress (to build
+  // the charge) and by settleRealUserCoordination (to read it back deterministically from the ledger).
+  static QUERY_CHARGE_MEMO_PREFIX = "query-charge ";
+  static queryChargeMemo(queryId: string): string { return ZiraNode.QUERY_CHARGE_MEMO_PREFIX + queryId; }
+
+  /**
+   * Pay the miners who answered PAID real-user queries. The asker funds the query at ask time with a charge tx
+   * to the network coordination wallet (see the /query ingress), and here the network settler reads those
+   * charges straight from the ledger (deterministic, on-chain — never a self-reported query field) and pays the
+   * converged answerers via settleQueryCoordination with the convergence policy: >= REAL_USER_QUERY_CONVERGENCE
+   * answers earn the full charged budget, a lone answerer earns REAL_USER_LONE_ANSWER_FACTOR of it. Exactly ONE
+   * funder (the settler) issues the payout as a single signed batch_transfer, so it applies byte-identically on
+   * every node — same fork-safe shape as autonomous coordination. Idempotent per query (settledCoordinationQueries
+   * + persisted watermark). Dormant until REAL_USER_QUERY_PAYOUT_ACTIVATION_EPOCH, so this is a no-op today.
+   *
+   * The charged ZIR accrues to the network wallet (protocol treasury) while the settler funds the payout from its
+   * base emission; the two are equal in magnitude (budget = charged amount), so the treasury nets out and the
+   * asker's payment genuinely sizes the answerers' budget, with the single-funder payout kept fork-safe.
+   */
+  // Durable set of paid-query charges the settler has OBSERVED on-chain but not yet settled. Decouples payout
+  // from the bounded ledger-history scan window: once a charge is seen it is remembered (and persisted) until it
+  // is paid or ages out, so a high settlement volume that scrolls the charge out of history — or a settler
+  // restart — never loses an asker's funded query. queryId -> { amountUZIR (the funded budget), ts (charge time) }.
+  private pendingQueryCharges = new Map<string, { amountUZIR: number; ts: number }>();
+
+  /** Ops/diagnostics + test entry point: run one pass of the paid real-user settlement now (the settler tick
+   *  calls the private path on its own schedule). No-op unless this node is the active settler and the feature
+   *  is armed, so calling it on a non-settler or while dormant does nothing. */
+  settleRealUserQueriesNow(now = Date.now()): void { this.settleRealUserCoordination(now); }
+
+  private settleRealUserCoordination(now = Date.now()): void {
+    if (!this.realUserPayoutActive(now)) return;            // dormant: byte-identical to today (no charge, no payout)
+    if (!this.isNetworkSettler()) return;                   // one deterministic funder only
+    const revenue = settlementWalletsFor(this.genesis.network).network;
+    const minTs = now - ZiraNode.REAL_USER_SETTLE_WINDOW_MS; // charges older than this are past the answer window
+    // 1. OBSERVE: fold any NEW on-chain charges into the durable pending map. A charge is an asker->revenue
+    //    transfer whose memo is `query-charge <queryId>`; the entry amount IS the budget the asker funded.
+    for (const e of this.state.recentHistory(revenue, 400)) {
+      if (e.to !== revenue) continue;
+      if (typeof e.memo !== "string" || !e.memo.startsWith(ZiraNode.QUERY_CHARGE_MEMO_PREFIX)) continue;
+      const ts = e.timestamp ?? 0;
+      if (ts < minTs) continue;
+      const queryId = e.memo.slice(ZiraNode.QUERY_CHARGE_MEMO_PREFIX.length).trim();
+      // Only the reserved real-user namespace settles here. A charge crafted for an autonomous (hashed) id — even
+      // one submitted directly to the mempool to bypass the ingress check — is ignored, so it can never pre-empt
+      // or double-settle autonomous coordination. The stray ZIR simply stays in the network wallet (treasury).
+      if (!queryId || !queryId.startsWith(ZiraNode.REAL_USER_QUERY_ID_PREFIX)) continue;
+      if (this.settledCoordinationQueries.has(queryId) || this.pendingQueryCharges.has(queryId)) continue;
+      const amountUZIR = Math.max(0, Math.floor(e.amountUZIR ?? 0));
+      if (amountUZIR > 0) this.pendingQueryCharges.set(queryId, { amountUZIR, ts });
+    }
+    // 2. SETTLE: pay each answered charge (convergence policy applied), drop settled + aged-out. One signed
+    //    batch_transfer per query, applied byte-identically on every node — same fork-safe shape as autonomous.
+    let changed = false;
+    for (const [queryId, charge] of [...this.pendingQueryCharges]) {
+      if (charge.ts < minTs) { this.pendingQueryCharges.delete(queryId); changed = true; continue; } // aged out, never answered
+      const answers = this.modelBackedProviderAnswers(this.soft.answers.get(queryId) ?? []);
+      if (answers.length === 0) continue;                   // no eligible answer yet; retry a later cycle
+      const result = this.settleQueryCoordination(queryId, charge.amountUZIR, { convergencePolicy: true });
+      if (!result.ok) continue;                             // insufficient settler balance etc.; retry next cycle
+      this.settledCoordinationQueries.add(queryId);
+      this.pendingQueryCharges.delete(queryId);
+      changed = true;
+      for (const p of result.payouts ?? []) if (/^zir1[0-9a-z]{6,}$/.test(p.address)) {
+        this.minerAnswerCredits.set(p.address, (this.minerAnswerCredits.get(p.address) ?? 0) + 1);
+      }
+      log.info(`real-user coordination payout for query ${queryId.slice(0, 12)}: ${result.payouts?.length ?? 0} answerer(s), budget ${charge.amountUZIR}, ${answers.length >= PROTOCOL.REAL_USER_QUERY_CONVERGENCE ? "converged" : "lone (reduced)"}`);
+    }
+    // Bound every settler-local map so a long-running node never grows unbounded.
+    if (this.minerAnswerCredits.size > 5000) this.minerAnswerCredits = new Map([...this.minerAnswerCredits.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2500));
+    if (this.settledCoordinationQueries.size > 5000) this.settledCoordinationQueries = new Set([...this.settledCoordinationQueries].slice(-2500));
+    if (this.pendingQueryCharges.size > 5000) this.pendingQueryCharges = new Map([...this.pendingQueryCharges.entries()].sort((a, b) => b[1].ts - a[1].ts).slice(0, 2500));
+    if (changed) this.persistSettlerProgress();             // survive restart: never re-pay a settled query, never lose a pending one
+  }
+  // A charge older than this is no longer paid (the query has aged out of the answer window); bounds settler work.
+  private static REAL_USER_SETTLE_WINDOW_MS = Number(process.env.ZIRA_REAL_USER_SETTLE_WINDOW_MS ?? 30 * 60_000);
+
   private autonomousResonanceEligible(): Resonator[] {
     // Every funded, listed, resonance-enabled resonator is eligible — NOT just the 12 alphabetically-first
     // (the old `.slice(0, 12)` sorted by id starved every user-created resonator and ~500 anchors, so only
@@ -2158,7 +2244,7 @@ export class ZiraNode {
       case "resonator": {
         // Derive the resonator's operating float from THIS node's ledger (consensus-shared), never from the
         // gossiped record, so the creation-cost gate and the displayed balance are consistent everywhere.
-        const isNew = this.soft.upsertResonator(env.data, this.state.balanceOf(env.data.address), this.resonatorCreationFrozen());
+        const isNew = this.soft.upsertResonator(env.data, this.state.balanceOf(env.data.address), this.resonatorCreationFrozen(), this.resonatorFreezeActivationEpoch());
         if (_fromWire && isNew) this.store.appendEvent(env);
         return { ok: true, isNew };
       }
@@ -2591,12 +2677,19 @@ export class ZiraNode {
    * old app releases cannot bypass it. Dormant (always false) while the activation epoch is 0 = today's
    * behavior. Off the state root, so this is consensus-neutral.
    */
+  /** Effective freeze activation epoch: the env override ZIRA_RESONATOR_FREEZE_EPOCH (operators can arm/disarm
+   *  without a rebuild) else the compiled constant. Off the state root, so per-node config is consensus-neutral;
+   *  set it on the masters + gateways (the authoritative accept layer) to freeze creation network-wide. */
+  private resonatorFreezeActivationEpoch(): number {
+    const env = Number(process.env.ZIRA_RESONATOR_FREEZE_EPOCH);
+    return Number.isFinite(env) && env > 0 ? Math.floor(env) : PROTOCOL.RESONATOR_CREATION_FREEZE_ACTIVATION_EPOCH;
+  }
   private resonatorCreationFrozen(): boolean {
-    const act = PROTOCOL.RESONATOR_CREATION_FREEZE_ACTIVATION_EPOCH;
+    const act = this.resonatorFreezeActivationEpoch();
     if (!(act > 0) || epochOf(Date.now()) < act) return false;
     return !this.state.allAnchorsSecured();
   }
-  publishResonator(r: Resonator): boolean { const ok = this.soft.upsertResonator(r, this.state.provisionalBalance(r.address), this.resonatorCreationFrozen()); if (ok) { const env = { t: "resonator" as const, data: r }; this.store.appendEvent(env); this.publish(this.topics.app, env); } return ok; }
+  publishResonator(r: Resonator): boolean { const ok = this.soft.upsertResonator(r, this.state.provisionalBalance(r.address), this.resonatorCreationFrozen(), this.resonatorFreezeActivationEpoch()); if (ok) { const env = { t: "resonator" as const, data: r }; this.store.appendEvent(env); this.publish(this.topics.app, env); } return ok; }
   publishTask(t: Task): boolean { const ok = this.soft.upsertTask(t); if (ok) { const env = { t: "task" as const, data: t }; this.store.appendEvent(env); this.publish(this.topics.app, env); } return ok; }
   publishProvider(p: ProviderAnnounce): boolean { const ok = this.soft.upsertProvider(p, Date.now()); if (ok) this.publish(this.topics.app, { t: "provider", data: p }); return ok; }
   publishProviderProfile(p: ProviderProfile): boolean { const ok = this.soft.upsertProviderProfile(p); if (ok) { const env = { t: "providerProfile" as const, data: p }; this.store.appendEvent(env); this.publish(this.topics.app, env); } return ok; }
@@ -2629,6 +2722,100 @@ export class ZiraNode {
   minerAnswered = 0;
   publishAnswer(a: AnswerMsg): boolean { const ok = this.soft.addAnswer(a); if (ok) { this.minerAnswered++; this.publish(this.topics.app, { t: "answer", data: a }); } return ok; }
 
+  // Reserved id prefix every PAID real-user query must carry. Autonomous-coordination query ids are content
+  // hashes (hex), so they can never collide with this namespace — which means a charge tx crafted for an
+  // autonomous query id (to try to pre-empt or double-settle it) is rejected at ingress AND ignored by the
+  // settler. This is the anti-collision guard: real-user settlement only ever touches `ru-` ids.
+  static REAL_USER_QUERY_ID_PREFIX = "ru-";
+
+  /** Real-user payout activation epoch. Env-overridable (ZIRA_REAL_USER_PAYOUT_EPOCH) so it can be ARMED
+   *  operationally on the settler without a recompile — same approach as the resonator-creation freeze —
+   *  falling back to the compiled constant. */
+  private realUserPayoutActivationEpoch(): number {
+    const env = Number(process.env.ZIRA_REAL_USER_PAYOUT_EPOCH);
+    return Number.isFinite(env) && env > 0 ? Math.floor(env) : PROTOCOL.REAL_USER_QUERY_PAYOUT_ACTIVATION_EPOCH;
+  }
+  /** Whether PAID real-user answering is live right now (activation epoch reached). Dormant => false, and the
+   *  whole paid path is skipped, so asking is byte-identical to today. */
+  realUserPayoutActive(now = Date.now()): boolean { const act = this.realUserPayoutActivationEpoch(); return act > 0 && epochOf(now) >= act; }
+
+  /** Query-tier pricing activation epoch, env-overridable (ZIRA_QUERY_TIER_EPOCH) for operational arming. */
+  private queryTierActivationEpoch(): number {
+    const env = Number(process.env.ZIRA_QUERY_TIER_EPOCH);
+    return Number.isFinite(env) && env > 0 ? Math.floor(env) : PROTOCOL.QUERY_TIER_PRICING_ACTIVATION_EPOCH;
+  }
+  /** Price/earn multiplier for a query's work tier (quick 1x / standard 2x / deep 4x), 1x while dormant. Uses
+   *  the env-overridable activation epoch so ingress pricing matches whatever the settler is armed to. */
+  queryTierMult(chars: number, now = Date.now()): number {
+    const act = this.queryTierActivationEpoch();
+    if (!(act > 0) || epochOf(now) < act) return 1;
+    return PRICING.QUERY_TIER_MULT[queryTier(chars)];
+  }
+
+  /** The network coordination wallet an asker funds a paid query into (the settler reads charges back from it). */
+  queryChargeWallet(): Address { return settlementWalletsFor(this.genesis.network).network; }
+
+  /** Minimum ZIR to fund a paid real-user query: the base query price scaled by the work tier of the signed
+   *  question (quick 1x / standard 2x / deep 4x). Deterministic from the query text + current epoch. */
+  queryChargeMinUZIR(q: QueryMsg, now = Date.now()): number {
+    const chars = queryComplexityChars(q.question, q.history);
+    return Math.round(PROTOCOL.QUERY_PRICE_UZIR * this.queryTierMult(chars, now));
+  }
+
+  /**
+   * Validate + submit an asker's paid-query charge, tying a real on-chain payment to the query it funds. The
+   * charge must be an asker-signed transfer to the network coordination wallet, carry the `query-charge <id>`
+   * memo, and meet the tier minimum. On acceptance the settler will later pay the converged answerers a budget
+   * equal to the charged amount (convergence policy applied). Returns the accepted budget or a reason.
+   */
+  acceptQueryCharge(q: QueryMsg, charge: SignedTx): { ok: boolean; reason?: string; amountUZIR?: number } {
+    if (!charge || typeof charge !== "object") return { ok: false, reason: "missing query charge" };
+    if (!q.id || !q.id.startsWith(ZiraNode.REAL_USER_QUERY_ID_PREFIX)) return { ok: false, reason: `paid query id must start with "${ZiraNode.REAL_USER_QUERY_ID_PREFIX}"` };
+    if (charge.to !== this.queryChargeWallet()) return { ok: false, reason: "charge must pay the network coordination wallet" };
+    if (charge.from !== q.asker) return { ok: false, reason: "charge must be signed by the asker" };
+    if (charge.memo !== ZiraNode.queryChargeMemo(q.id)) return { ok: false, reason: "charge memo must reference this query" };
+    const min = this.queryChargeMinUZIR(q);
+    if ((charge.amountUZIR ?? 0) < min) return { ok: false, reason: `charge below the tier minimum (${min} uZIR)` };
+    const r = this.submitTx(charge);
+    if (!r.accepted) return { ok: false, reason: r.reason ?? "charge tx rejected" };
+    return { ok: true, amountUZIR: charge.amountUZIR };
+  }
+
+  /**
+   * Answerer leaderboard — the challenge scoreboard. Derived from ON-CHAIN coordination payouts, so it is
+   * globally available on ANY node (including the read gateway), deterministic, and durable — not a
+   * settler-local counter. Each settled coordination payout is a `batch_transfer` whose memo carries
+   * `k: "coord ..."`; this sums the contributor slice each address earned from those payouts (autonomous +
+   * paid real-user answering) over recent history, excluding the protocol network/pool wallets. Ranked by
+   * ZIR earned by answering, which is exactly "who did the most paid answering".
+   */
+  answererLeaderboard(limit = 50, scan = 5000): { address: string; earnedUZIR: number; payouts: number }[] {
+    const w = settlementWalletsFor(this.genesis.network);
+    const exclude = new Set([w.network, w.resonatorPool, this.genesis.founder]);
+    const tally = new Map<string, { earnedUZIR: number; payouts: number }>();
+    for (const e of this.state.recentHistory(null, Math.max(100, Math.min(scan, 20000)))) {
+      if (e.kind !== "batch_transfer" || typeof e.memo !== "string") continue;
+      let parsed: { o?: [string, number][]; k?: string };
+      try { parsed = JSON.parse(e.memo); } catch { continue; }
+      if (typeof parsed.k !== "string" || !parsed.k.startsWith("coord")) continue;   // coordination payouts only
+      for (const [addr, amt] of parsed.o ?? []) {
+        if (!/^zir1[0-9a-z]{6,}$/.test(addr) || exclude.has(addr) || !(amt > 0)) continue; // skip protocol wallets
+        const row = tally.get(addr) ?? { earnedUZIR: 0, payouts: 0 };
+        row.earnedUZIR += amt; row.payouts += 1; tally.set(addr, row);
+      }
+    }
+    return [...tally.entries()].map(([address, v]) => ({ address, earnedUZIR: v.earnedUZIR, payouts: v.payouts }))
+      .sort((a, b) => b.earnedUZIR - a.earnedUZIR || (a.address < b.address ? -1 : 1))
+      .slice(0, Math.max(1, Math.min(limit, 500)));
+  }
+
+  /** One address's earnings from answering the field (coordination payouts), derived on-chain the same way as
+   *  the leaderboard. Powers the Mine page "earned from answering" stat. Zeroes if the address never answered. */
+  answererEarnings(address: string, scan = 5000): { address: string; earnedUZIR: number; payouts: number } {
+    const row = this.answererLeaderboard(500, scan).find((r) => r.address === address);
+    return row ?? { address, earnedUZIR: 0, payouts: 0 };
+  }
+
   /**
    * Settle a coordinated query with the §9 four-way split: contributors (77%, by domain ZTI x confidence),
    * the network wallet (8%), the resonator pool (10%), and a burn (5%). This is the multi-LLM coordination
@@ -2637,7 +2824,7 @@ export class ZiraNode {
    * emission and the supply cap are untouched. Founder-gated at the RPC layer (the funding wallet is the
    * node identity, which must hold the budget). Returns the split.
    */
-  settleQueryCoordination(queryId: string, budgetUZIR: number, opts: { poolBeneficiary?: string } = {}): { ok: boolean; reason?: string; payouts?: { address: string; amountUZIR: number }[]; networkUZIR?: number; resonatorPoolUZIR?: number; burnUZIR?: number; confidenceScore?: number } {
+  settleQueryCoordination(queryId: string, budgetUZIR: number, opts: { poolBeneficiary?: string; convergencePolicy?: boolean } = {}): { ok: boolean; reason?: string; payouts?: { address: string; amountUZIR: number }[]; networkUZIR?: number; resonatorPoolUZIR?: number; burnUZIR?: number; confidenceScore?: number } {
     const query = this.soft.queries.get(queryId);
     const domain: Domain = query?.domain ?? "general";
     const answers = this.soft.answers.get(queryId) ?? [];
@@ -2662,7 +2849,13 @@ export class ZiraNode {
       return { address, domainZti, confidence: a.confidence, agreement };
     });
     if (contributions.length === 0) return { ok: false, reason: "no contributions with positive confidence to settle" };
-    const split = settleCoordination(budgetUZIR, contributions);
+    // Paid real-user answering applies the convergence policy: the full budget when >= REAL_USER_QUERY_CONVERGENCE
+    // contributors converged, a reduced fraction for a lone answerer (thin serving pool). Autonomous coordination
+    // does NOT pass convergencePolicy, so its settlement is byte-identical to before (its own >=2 model-backed
+    // gate lives in settleAutonomousCoordination). Pure + deterministic: the settler applies it before the split.
+    const effectiveBudget = opts.convergencePolicy ? convergenceAdjustedBudget(budgetUZIR, contributions.length) : budgetUZIR;
+    if (effectiveBudget <= 0) return { ok: false, reason: "convergence-adjusted budget is zero" };
+    const split = settleCoordination(effectiveBudget, contributions);
     const wallets = settlementWalletsFor(this.genesis.network);
     const tag = queryId.slice(0, 12);
     // The resonator-pool slice normally accrues to the shared pool wallet, but for autonomous coordination the

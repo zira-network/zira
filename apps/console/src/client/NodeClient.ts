@@ -90,12 +90,30 @@ export class NodeClient implements ZiraClient {
     asker: Address; paymentTx?: SignedTx; pay?: boolean; onToken: (t: string) => void; signal?: AbortSignal;
   }): Promise<{ answer: string; receipt: AnswerReceipt }> {
     const domain = classify(args.question);
-    const id = "q-" + Math.random().toString(36).slice(2) + "-" + Date.now();
+    const wantPay = args.pay !== false && Wallet.isUnlocked();
+    // Learn whether PAID real-user answering is armed on this node. When active, the asker funds ONE charge to
+    // the network coordination wallet and the network settler pays the answerers (robust + fork-safe). When
+    // dormant, this stays inert and the legacy per-miner client tip below keeps paid asks rewarding miners today.
+    let price: { active?: boolean; chargeToUZIR?: number; chargeWallet?: string; idPrefix?: string } = {};
+    if (wantPay) price = await this.post<typeof price>("/query/price", { query: { question: args.question, history: args.history } }).catch(() => ({}));
+    const usePaidCharge = !!(wantPay && price.active && price.chargeWallet && (price.chargeToUZIR ?? 0) > 0);
+    // A paid query lives in the reserved "ru-" namespace so its charge can never collide with an autonomous id.
+    const id = (usePaidCharge ? (price.idPrefix || "ru-") : "q-") + Math.random().toString(36).slice(2) + "-" + Date.now();
+    // Build the asker's charge (to the network wallet, tagged to this query) so the settler pays the answerers a
+    // budget equal to the charge. Best effort: if it can't be signed we post a free ask and the legacy tip runs.
+    let charge: SignedTx | undefined;
+    if (usePaidCharge) {
+      try {
+        const stats = await this.getStats();
+        const nonce = await this.getNonce(args.asker);
+        charge = makeSignedTx({ network: stats.network, to: price.chargeWallet!, amountUZIR: price.chargeToUZIR!, nonce, kind: "agent_spend", memo: `query-charge ${id}` });
+      } catch { charge = undefined; }
+    }
     // Post the query directly so a 429 free-tier rejection becomes a typed, catchable error. On a 429
     // the node returns { ok:false, reason, retryInMs, limit, windowMs }; on success { ok:true, freeTier }.
     const qres = await fetch(this.rpc("/query"), {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: { id, domain, question: args.question, history: args.history, asker: args.asker, postedAt: Date.now() } }),
+      body: JSON.stringify({ query: { id, domain, question: args.question, history: args.history, asker: args.asker, postedAt: Date.now() }, charge }),
     });
     if (qres.status === 429) {
       const body = await qres.json().catch(() => ({})) as { reason?: string; retryInMs?: number; limit?: number };
@@ -184,7 +202,9 @@ export class NodeClient implements ZiraClient {
     // requires an unlocked wallet, and settlement is on the now-live ledger path.
     // Tip the coordinating miners only on the paid (ZIR) tier. Free-tier questions never move ZIR; the
     // miners still earn from emission and the network's own coordination, just not a per-question tip.
-    if (args.pay !== false && Wallet.isUnlocked()) {
+    // Skipped when a settler charge was sent above (`charge`): the network settler pays the answerers from
+    // that single charge, so we must NOT also tip per-miner (that would double-pay).
+    if (!charge && args.pay !== false && Wallet.isUnlocked()) {
       try {
         const stats = await this.getStats();
         const founderAddr = stats.founderAddress;
@@ -212,7 +232,7 @@ export class NodeClient implements ZiraClient {
     const receipt: AnswerReceipt = {
       contributors: coordinatedPool.map((a) => ({ provider: a.provider, label: a.label, model: a.model, domainZti: a.zti, weight: a.weight, excerpt: a.answer.slice(0, 240), sig: a.sig, queryId: id, answer: a.answer })),
       domain, fusedConfidence: Number(coordinatedPool.reduce((s, a) => s + a.weight * a.confidence, 0).toFixed(3)),
-      challengeOpenUntil: Date.now() + 300000, proofAvailable: false, costUZIR: Math.round(PROTOCOL.QUERY_PRICE_UZIR * queryTierMultiplier(queryComplexityChars(args.question, args.history))),
+      challengeOpenUntil: Date.now() + 300000, proofAvailable: false, costUZIR: charge ? (price.chargeToUZIR ?? 0) : Math.round(PROTOCOL.QUERY_PRICE_UZIR * queryTierMultiplier(queryComplexityChars(args.question, args.history))),
     };
     return { answer: coordinated, receipt };
   }

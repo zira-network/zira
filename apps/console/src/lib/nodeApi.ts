@@ -203,6 +203,9 @@ export const NodeApi = {
   setMining: (patch: MiningPatch) => rpcPost<StatusInfo>("/status", { mining: patch }),
   refreshHardware: () => rpcPost<StatusInfo>("/hardware/refresh", {}),
 
+  // What this address earned by ANSWERING the field (coordination payouts), derived on-chain by the node.
+  answererEarnings: (address: string) => rpcGet<{ address: string; earnedUZIR: number; payouts: number }>(`/answerers/mine?address=${encodeURIComponent(address)}`),
+
   // user-controllable peer-to-peer storage: enable/disable + byte cap (default 1 GiB). Persisted node-side.
   getStorage: () => rpcGet<StorageState>("/storage"),
   setStorage: (patch: { enabled?: boolean; capBytes?: number }) => rpcPost<StorageState>("/storage", patch),

@@ -581,6 +581,11 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
     case "GET /task": return json(res, node.soft.tasks.get(q.get("id") ?? "") ?? null);
     case "POST /task": { const b = await body(req); node.publishTask(b.task); return json(res, b.task); }
 
+    // ---- answerer leaderboard (challenge scoreboard): who earned the most by answering the field, from
+    //      on-chain coordination payouts. Globally available on any node incl. the read gateway. ----
+    case "GET /answerers": return json(res, node.answererLeaderboard(Number(q.get("limit") ?? 50), Number(q.get("scan") ?? 5000)));
+    case "GET /answerers/mine": return json(res, node.answererEarnings(q.get("address") ?? "", Number(q.get("scan") ?? 5000)));
+
     // ---- providers + query fusion ----
     case "GET /providers": return json(res, providers(node));
     case "GET /providers/mine": return json(res, node.inferenceProvider?.lastProfile ?? null);
@@ -590,6 +595,15 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
     case "POST /query": {
       const b = await body(req);
       const query = b.query ?? b;
+      // Paid real-user answering (additive; dormant until armed): if the asker attached a valid query-tier
+      // charge, record it on-chain so the network settler pays the answerers. A query with no charge follows
+      // the existing free-tier / contributor path below unchanged, so arming this never breaks free asking.
+      if (b.charge && node.realUserPayoutActive()) {
+        const acc = node.acceptQueryCharge(query, b.charge);
+        if (!acc.ok) return json(res, { ok: false, reason: acc.reason }, 400);
+        node.publishQuery(query);
+        return json(res, { ok: true, paid: true, budgetUZIR: acc.amountUZIR });
+      }
       const fqWindow = opts.freeQueryWindowMs ?? 600_000;
       const fqLimit = effectiveFreeLimit(opts.freeQueryLimit ?? 10, opts.freeTierStartMs, opts.freeTierDurationMs, Date.now());
       // A node that lends its hardware to the field (mining on) gets free, unlimited field questions: it
@@ -610,6 +624,19 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
       const lim = effectiveFreeLimit(opts.freeQueryLimit ?? 10, opts.freeTierStartMs, opts.freeTierDurationMs, Date.now());
       if (lim <= 0) return json(res, { limit: 0, used: 0, remaining: 0, resetMs: 0, windowMs: opts.freeQueryWindowMs ?? 600_000, freeTierEnded: true });
       return json(res, queryQuota(clientIp(req), lim, opts.freeQueryWindowMs ?? 600_000));
+    }
+    case "POST /query/price": {
+      // What a paid real-user query would cost + where to send the charge, so a client can build the asker
+      // charge tx. When dormant, active=false and the client just asks free as today.
+      const b = await body(req);
+      const query = (b.query ?? b) as { id?: string; question?: string; history?: { content?: string }[]; asker?: string };
+      return json(res, {
+        active: node.realUserPayoutActive(),
+        chargeToUZIR: node.realUserPayoutActive() ? node.queryChargeMinUZIR(query as never) : 0,
+        chargeWallet: node.queryChargeWallet(),
+        memo: query.id ? `query-charge ${query.id}` : undefined,
+        idPrefix: "ru-",   // a paid query's id MUST start with this reserved namespace
+      });
     }
     case "GET /query/answers": return json(res, node.soft.answers.get(q.get("id") ?? "") ?? []);
     case "GET /query/fusion": return json(res, queryFusion(node, q.get("id") ?? ""));

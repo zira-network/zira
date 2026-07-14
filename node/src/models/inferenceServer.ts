@@ -12,15 +12,23 @@
 // a hard timeout, aborts if the client disconnects, and defaults to a modest token budget. On CPU these are
 // the difference between a field that answers within the query TTL and one that falls irrecoverably behind.
 import http from "node:http";
+import { availableParallelism, cpus } from "node:os";
 import { log } from "../log.js";
 
 const GEN_TIMEOUT_MS = Number(process.env.ZIRA_INFERENCE_TIMEOUT_MS) || 60_000;
 const DEFAULT_MAX_TOKENS = Number(process.env.ZIRA_INFERENCE_MAX_TOKENS) || 160;
-const CONTEXT_SEQUENCES = 4;
-// Default 1: on a CPU-only node, giving ONE generation all the cores finishes it within the query TTL;
-// running several at once just makes each ~N times slower so none land in time (the field-wedge cause).
-// GPU / high-core operators raise this via ZIRA_INFERENCE_CONCURRENCY (capped to the sequence pool).
-const MAX_CONCURRENT = Math.max(1, Math.min(CONTEXT_SEQUENCES - 1, Number(process.env.ZIRA_INFERENCE_CONCURRENCY) || 1));
+const CONTEXT_SEQUENCES = Math.max(2, Math.min(8, Number(process.env.ZIRA_INFERENCE_SEQUENCES) || 4));
+
+/** How many generations run at once, sized to the hardware so it is FULLY used without missing the query TTL.
+ *  A GPU can run several in parallel; a many-core CPU can run a couple; a small CPU stays at 1 (concurrent CPU
+ *  generations slow each other so none land in time, the old field-wedge cause). Explicit override always wins. */
+function autoConcurrency(hasGpu: boolean): number {
+  const env = Number(process.env.ZIRA_INFERENCE_CONCURRENCY);
+  if (Number.isFinite(env) && env > 0) return Math.max(1, Math.min(CONTEXT_SEQUENCES - 1, Math.floor(env)));
+  const cores = (availableParallelism?.() ?? cpus().length) || 4;
+  const auto = hasGpu ? 3 : (cores >= 12 ? 2 : 1);
+  return Math.max(1, Math.min(CONTEXT_SEQUENCES - 1, auto));
+}
 
 export async function runInferenceServer(modelPath: string, port: number): Promise<void> {
   // node-llama-cpp is an optional native dependency loaded dynamically, the same way the in-process
@@ -30,21 +38,23 @@ export async function runInferenceServer(modelPath: string, port: number): Promi
     LlamaChatSession: LlamaChatSessionCtor;
   };
   const llama = await mod.getLlama();
-  log.info(`inference engine ready (gpu=${llama.gpu || "none"}); loading ${modelPath}`);
+  const hasGpu = !!llama.gpu && llama.gpu !== "none" && llama.gpu !== "false";
+  const maxConcurrent = autoConcurrency(hasGpu);
+  log.info(`inference engine ready (gpu=${llama.gpu || "none"}, concurrency=${maxConcurrent}); loading ${modelPath}`);
   const model = await llama.loadModel({ modelPath, gpuLayers: 999 });
   // A small pool of sequences with explicit release per request. Each query is independent (fresh
   // session + sequence), so we MUST dispose the sequence afterwards or the context runs out of slots
   // ("No sequences left") after the first generation.
   const context = await model.createContext({ contextSize: 4096, sequences: CONTEXT_SEQUENCES });
 
-  // Bounded concurrency over the sequence pool: up to MAX_CONCURRENT generations run at once (each on its
+  // Bounded concurrency over the sequence pool: up to maxConcurrent generations run at once (each on its
   // own sequence), the rest queue. This replaces the old single serialized chain, where one stuck or slow
   // generation blocked every later request forever.
   let active = 0;
   const waiters: Array<() => void> = [];
   function acquire(): Promise<void> {
     return new Promise((resolve) => {
-      const take = () => { if (active < MAX_CONCURRENT) { active++; resolve(); } else waiters.push(take); };
+      const take = () => { if (active < maxConcurrent) { active++; resolve(); } else waiters.push(take); };
       take();
     });
   }
@@ -101,7 +111,7 @@ export async function runInferenceServer(modelPath: string, port: number): Promi
       res.end(JSON.stringify({ ok: true, model: modelPath, active, queued: waiters.length }));
     }
   });
-  server.listen(port, "127.0.0.1", () => log.info(`inference server listening on 127.0.0.1:${port} (max ${MAX_CONCURRENT} concurrent, ${GEN_TIMEOUT_MS}ms timeout)`));
+  server.listen(port, "127.0.0.1", () => log.info(`inference server listening on 127.0.0.1:${port} (max ${maxConcurrent} concurrent, ${GEN_TIMEOUT_MS}ms timeout)`));
 }
 
 interface LlamaSequenceLike { dispose: () => void; }

@@ -65,7 +65,7 @@ export class SoftState {
   // cannot be trusted or rewritten after signing) — the node reads it from the ledger, gates the creation
   // cost on it, and stores it so Discover shows the true float. Absent (internal seed callers) it falls
   // back to the record value.
-  upsertResonator(r: Resonator, agentBalanceUZIR?: number, freezeNewUserResonators = false): boolean {
+  upsertResonator(r: Resonator, agentBalanceUZIR?: number, freezeNewUserResonators = false, freezeActivationEpoch: number = PROTOCOL.RESONATOR_CREATION_FREEZE_ACTIVATION_EPOCH): boolean {
     if (!this.mustVerify(r, "Resonator", r?.id ?? "?")) return false;
     const floatUZIR = agentBalanceUZIR ?? (r.balanceUZIR ?? 0);
     // Anchor Resonators (one per anchor position) are minted and moved only by the anchor steward
@@ -116,7 +116,7 @@ export class SoftState {
     // epoch, so a normal client on any app version is blocked at accept time regardless of its own UI. Off the
     // state root -> consensus-neutral.
     if (freezeNewUserResonators && !prev && !isSeededResonator) {
-      const act = PROTOCOL.RESONATOR_CREATION_FREEZE_ACTIVATION_EPOCH;
+      const act = freezeActivationEpoch || PROTOCOL.RESONATOR_CREATION_FREEZE_ACTIVATION_EPOCH;
       const createdEpoch = Math.floor((r.createdAt ?? 0) / PROTOCOL.ACCOUNTING_ROUND_MS);
       if (act > 0 && createdEpoch >= act) {
         log.warn("[SoftState] rejected new Resonator: creation is frozen until all anchors are secured", r.id);

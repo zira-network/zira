@@ -158,6 +158,20 @@ export const PROTOCOL = {
   // (only the amount the asker chooses to pay). 0 = dormant (always 1x, byte-identical to today).
   QUERY_TIER_PRICING_ACTIVATION_EPOCH: 0,
 
+  // Paid real-user answering. Once armed (this value > 0 AND the current epoch has reached it), a real user's
+  // field question is a PAID query: the asker funds a query-tier budget and the network settler pays the miners
+  // whose answers converged, via settleQueryCoordination — the SAME §9 split + single settler-signed
+  // batch_transfer as autonomous coordination, so it is fork-safe (one deterministic funder, applied
+  // byte-identically). Convergence policy (whitepaper "paid answering"): >= REAL_USER_QUERY_CONVERGENCE
+  // converged answers earn the FULL budget; a lone answerer (thin serving pool) is paid only
+  // REAL_USER_LONE_ANSWER_FACTOR of it, so coverage stays alive without letting one self-dealing answerer
+  // collect full pay. Contributors (mining on) always ask FREE — they pay with work — so arming this only
+  // prices non-contributor asks. 0 = dormant: real-user queries stay free/answer-only exactly as today
+  // (byte-identical, no charge, no payout). Set to a chosen epoch to arm.
+  REAL_USER_QUERY_PAYOUT_ACTIVATION_EPOCH: 0,
+  REAL_USER_QUERY_CONVERGENCE: 2,      // >= this many converged answers earns the full budget
+  REAL_USER_LONE_ANSWER_FACTOR: 0.4,   // a single answerer earns this fraction of the budget (no convergence bonus)
+
   // Storage-weighted emission. Hosting the field's authorized model weights is real, costly work, so a
   // contributor that serves more model data earns a bounded bonus on its emission split. The bonus is a
   // multiplier on the contributor's reward WEIGHT only (never on its trust/ZTI, which stays earned purely
@@ -247,6 +261,26 @@ export function adaptiveQueryPriceUZIR(ctx: { openQueries: number; providersOnli
  */
 export function queryPriceUZIR(ctx: { openQueries: number; providersOnline: number; chars: number; epoch?: number }): number {
   return Math.round(adaptiveQueryPriceUZIR(ctx) * queryTierMultiplier(ctx.chars, ctx.epoch));
+}
+
+/** Whether PAID real-user answering is live at `epoch`. Dormant (false) until armed, so a real user's field
+ *  question stays free/answer-only and byte-identical to today (no charge, no payout). Pure. */
+export function realUserQueryPayoutActive(epoch: number): boolean {
+  const act = PROTOCOL.REAL_USER_QUERY_PAYOUT_ACTIVATION_EPOCH;
+  return act > 0 && epoch >= act;
+}
+
+/**
+ * Convergence policy for a paid real-user query budget: the settler pays the FULL budget when at least
+ * REAL_USER_QUERY_CONVERGENCE contributors converged on an answer, and only REAL_USER_LONE_ANSWER_FACTOR of
+ * it when a single answerer replied (thin serving pool). Keeps coverage alive without paying a lone,
+ * possibly self-dealing, answerer full price. Pure + deterministic — the settler applies it before the
+ * §9 split, so the resulting batch_transfer is identical on every node. Zero contributors => zero.
+ */
+export function convergenceAdjustedBudget(budgetUZIR: number, contributorCount: number): number {
+  if (contributorCount <= 0) return 0;
+  if (contributorCount >= PROTOCOL.REAL_USER_QUERY_CONVERGENCE) return Math.max(0, Math.floor(budgetUZIR));
+  return Math.max(0, Math.floor(budgetUZIR * PROTOCOL.REAL_USER_LONE_ANSWER_FACTOR));
 }
 
 /**

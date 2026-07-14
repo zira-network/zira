@@ -5,7 +5,7 @@
 // loads a model into the inference engine to answer the field.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { freemem } from "node:os";
+import { freemem, totalmem } from "node:os";
 import http from "node:http";
 import { spawn, type ChildProcess } from "node:child_process";
 import { canonical, sign as edSign, verify as edVerify, addressFromPubKey, defaultDomainsForModelType, modelServesDomain, preferredModelTypeForDomain, type Domain, type ModelType, type Keypair, type Address } from "@zira/protocol";
@@ -609,23 +609,37 @@ export class ModelService {
    * their models look under-replicated again and surviving peers re-fetch them. */
   async reconcileStorage(): Promise<void> {
     this.enforceStorageCap();
-    if (!this.mining.storageEnabled) return;
+    // A MINING node must hold at least one servable model so it actually ANSWERS (not just coordinates) and puts
+    // the hardware to work. This is ensured on "Mine on" EVEN WHEN the full storage role is off — otherwise a
+    // miner heartbeats and coordinates but never serves an answer. With storage off it fetches ONLY that one
+    // serving model (it is not a general replicator); with storage on it also fills replication gaps.
+    const storageOn = this.mining.storageEnabled;
+    let needServing = this.mining.enabled && !this.bestLocalModelId();
+    if (!storageOn && !needServing) return; // storage off and either not mining or already have a servable model
     const cap = this.storageCapBytes();
     const connected = new Set(this.net.peers());
     const liveReplicas = (e: RegistryEntry): number => [...e.peerIds].filter((p) => connected.has(p)).length;
-    // A mining node must hold at least one servable model to answer; force grabbing one even when the field
-    // already has it well replicated. A pure storage node just fills replication gaps.
-    let needServing = this.mining.enabled && !this.bestLocalModelId();
-    // Steward-ASSIGNED models first (the steward wants them on every storage node), then under-replicated
-    // (fewest live holders), then newest, so assignments spread and gaps fill before extra copies pile up.
+    // Serving pick is HARDWARE-AWARE: prefer the LARGEST model this machine can actually run (bigger model =
+    // stronger answers = more coordination pay), capped by what fits in memory, so strong hardware serves a big
+    // model and a small machine serves a small one. Steward-ASSIGNED first, then under-replicated, then, when
+    // just securing a serving model, largest-that-fits first; otherwise newest first.
+    const fitsHardware = (e: RegistryEntry): boolean => (e.meta.sizeBytes ?? 0) * 1.3 <= totalmem();
     const entries = [...this.registry.values()].sort((a, b) =>
-      (Number(!!b.meta.assigned) - Number(!!a.meta.assigned)) || (liveReplicas(a) - liveReplicas(b)) || (b.meta.ts - a.meta.ts));
+      (Number(!!b.meta.assigned) - Number(!!a.meta.assigned))
+      || (liveReplicas(a) - liveReplicas(b))
+      || (!storageOn ? ((b.meta.sizeBytes ?? 0) - (a.meta.sizeBytes ?? 0)) : (b.meta.ts - a.meta.ts)));
     for (const entry of entries) {
       if (this.store.hasValidGguf(entry.meta.id)) continue;
       if (this.storageFetches.has(entry.meta.id)) continue;
-      const wellReplicated = liveReplicas(entry) >= MODEL_REPLICATION_TARGET;
-      // An assigned model is fetched even when well replicated: the steward wants it on the whole network.
-      if (wellReplicated && !needServing && !entry.meta.assigned) continue; // else spread, don't clone covered
+      if (!storageOn) {
+        // Just securing the ONE serving model: skip anything too big to run here, and stop once we have it.
+        if (!needServing) break;
+        if (!fitsHardware(entry)) continue;
+      } else {
+        const wellReplicated = liveReplicas(entry) >= MODEL_REPLICATION_TARGET;
+        // An assigned model is fetched even when well replicated: the steward wants it on the whole network.
+        if (wellReplicated && !needServing && !entry.meta.assigned) continue; // else spread, don't clone covered
+      }
       if (this.projectedStorageBytes() + (entry.meta.sizeBytes ?? 0) > cap) {
         log.debug(`storage peer skipped ${entry.meta.name}: would exceed the storage cap`);
         continue;
@@ -634,6 +648,7 @@ export class ModelService {
       try { if (await this.fetch(entry.meta.id)) needServing = false; }
       catch (e) { log.debug("storage replication pending", (e as Error).message); }
       finally { this.storageFetches.delete(entry.meta.id); }
+      if (!storageOn && !needServing) break; // secured a servable model; a non-storage miner stops there
     }
   }
 

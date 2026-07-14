@@ -61,26 +61,6 @@ function TierHeader({ label, hint }: { label: string; hint?: string }) {
   );
 }
 
-// One reusable OpenAI-compatible endpoint editor, used by both the field-serving editor and the
-// steward endpoint editor (previously two near-identical blocks).
-function EndpointEditor({ hint, endpoint, model, onEndpoint, onModel, onSave, busy }: {
-  hint: string; endpoint: string; model: string;
-  onEndpoint: (v: string) => void; onModel: (v: string) => void; onSave: () => void; busy: boolean;
-}) {
-  return (
-    <div className="space-y-2">
-      <p className="text-[11px] text-faint">{hint}</p>
-      <Field label="Local endpoint" hint="OpenAI-compatible base URL on this machine. Blank = use the native engine if a model is loaded locally.">
-        <Input className="mono" value={endpoint} onChange={(e) => onEndpoint(e.target.value)} placeholder="http://localhost:11434/v1" />
-      </Field>
-      <Field label="Model" hint="The model your local endpoint serves.">
-        <Input className="mono" value={model} onChange={(e) => onModel(e.target.value)} placeholder="qwen2.5-coder:14b" />
-      </Field>
-      <Button variant="secondary" onClick={onSave} disabled={busy}>Save endpoint</Button>
-    </div>
-  );
-}
-
 // The hardware control for the field. Two choices: "field" lends this machine to the field's
 // coordination and earns; "off" does not. Using your OWN hardware for your OWN tasks is not here;
 // it lives in the Console (Local mode), so this page is only about contributing to the field.
@@ -117,7 +97,7 @@ function HardwareModeControl({ mode, busy, hardwareName, usingEndpoint, endpoint
         })}
       </div>
       <div className="rounded-lg border border-hairline bg-base px-3 py-2 text-[11px] text-faint">
-        {mode === "field" && <span>{usingEndpoint ? `Serving via endpoint (${endpointModel || "server"})` : `${hardwareName} serving as ${fieldDetail}`}.</span>}
+        {mode === "field" && <span>{usingEndpoint ? `Serving the field model (${endpointModel || "loading"})` : `${hardwareName} serving as ${fieldDetail}`}.</span>}
         {mode === "off" && <span>Not lending this machine to the field. Field mode still works over the network, and Local mode in the Console can use this machine for your own tasks.</span>}
       </div>
     </div>
@@ -163,7 +143,7 @@ function miningContributionLabel(args: { mining: MiningStatus | null | undefined
   if (mining.serving && mining.answerLabel === "field-coordinator") return "coordinating";
   if (mining.serving) return "answering";
   if (mining.localTaskPermission) return "workspace tasks";
-  if (usingEndpoint) return "endpoint starting";
+  if (usingEndpoint) return "model starting";
   if (!fieldReady) return "coordinating";
   if (!mining.engineAvailable) return "field relay";
   return "loading model";
@@ -178,11 +158,11 @@ function hardwareTitle(hardware: HardwareProfile | null): string {
 function earningLane(args: { mining: MiningStatus | null | undefined; usingEndpoint: boolean; coordinationOnly: boolean; fieldReady: boolean }): { title: string; detail: string; tone: "teal" | "indigo" | "warn" | "neutral" } {
   const { mining, usingEndpoint, coordinationOnly, fieldReady } = args;
   if (!mining?.enabled) return { title: "Mining off", detail: "Turn mining on to relay queries, coordinate models, and prepare earning paths.", tone: "neutral" };
-  if (usingEndpoint) return { title: "Endpoint answer mining", detail: "Highest earning path: this node can answer user queries with a configured model endpoint and collect signed query tips.", tone: "teal" };
-  if (mining.loadedModel) return { title: "Native model answer mining", detail: "Highest decentralized path: this machine is running the authorized GGUF model for signed field answers.", tone: "teal" };
-  if (coordinationOnly) return { title: "Coordination mining", detail: "Active now: signed query relay, model-field verification, autonomous Resonator coordination, workspace routing, observations, and field-status answers. Add native inference or an endpoint for stronger answer rewards.", tone: "indigo" };
+  if (usingEndpoint) return { title: "Answer mining", detail: "Highest earning path: this node is serving the field's distributed model on your hardware and answering paid queries for coordination pay.", tone: "teal" };
+  if (mining.loadedModel) return { title: "Answer mining", detail: "Highest earning path: this machine is running the field's distributed model for signed field answers.", tone: "teal" };
+  if (coordinationOnly) return { title: "Coordination mining", detail: "Active now: signed query relay, model-field verification, autonomous Resonator coordination, workspace routing, observations, and field-status answers. Turn on Storage to serve the field model and earn answer rewards.", tone: "indigo" };
   if (mining.localTaskPermission) return { title: "Workspace task permission", detail: "This node allows the field to route private build, file, planning, or debugging tasks here when you allow it. This permission does not mean downloading or running a local model by itself.", tone: "indigo" };
-  if (fieldReady) return { title: "Model ready, engine needed", detail: "The field model is distributed. Install the native GGUF engine or configure an endpoint to move into full answer mining.", tone: "warn" };
+  if (fieldReady) return { title: "Model ready, receiving", detail: "The field model is distributed. Turn on Storage to receive and serve it on this machine and move into full answer mining.", tone: "warn" };
   return { title: "Coordinating field", detail: "Mining is enabled for relay, observations, and coordination. Local model bytes are optional unless this node will do full model inference.", tone: "indigo" };
 }
 
@@ -200,8 +180,8 @@ function participationState(args: {
   const { mining, usingEndpoint, coordinationOnly, earningUnlocked } = args;
   if (!mining?.enabled) return { key: "off", label: "Off", tone: "neutral", detail: "Not lending this machine to the field." };
   if (!earningUnlocked) return { key: "below-convergence", label: "Building trust", tone: "warn", detail: "Below the convergence line. Serving builds ZTI, but paid work unlocks once the field has 3+ converged contributors." };
-  if (usingEndpoint) return { key: "endpoint-answering", label: "Answering", tone: "teal", detail: "Answering paid queries through your configured endpoint." };
-  if (mining.loadedModel) return { key: "native-answering", label: "Answering", tone: "teal", detail: "Answering paid queries with the authorized native model on this machine." };
+  if (usingEndpoint) return { key: "endpoint-answering", label: "Answering", tone: "teal", detail: "Serving the field's distributed model on your hardware and answering paid queries." };
+  if (mining.loadedModel) return { key: "native-answering", label: "Answering", tone: "teal", detail: "Answering paid queries with the field's distributed model on this machine." };
   if (coordinationOnly) return { key: "coordinating", label: "Coordinating", tone: "indigo", detail: "Coordinating the field heartbeat. Capable serving miners produce the paid answers." };
   if (mining.serving) return { key: "answering", label: "Answering", tone: "teal", detail: "Serving the field with answers." };
   return { key: "coordinating", label: "Coordinating", tone: "indigo", detail: "Coordinating the field heartbeat." };
@@ -347,8 +327,8 @@ function EarningsPanel({ answered, earnedTodayUZIR, balanceUZIR, zti, state, min
 // Answering visibility: the highest earning path. Shows whether this node answers with a model, how many
 // answers it has contributed, and the honest hardware-to-earnings link. Answering pays coordination on TOP of
 // the storage baseline, weighted by trust (ZTI) and agreement, and a stronger machine answers more and better.
-function AnsweringPanel({ usingEndpoint, endpointModel, hasNativeModel, answered, hardwareName }: {
-  usingEndpoint: boolean; endpointModel?: string; hasNativeModel: boolean; answered: number; hardwareName: string;
+function AnsweringPanel({ usingEndpoint, endpointModel, hasNativeModel, answered, hardwareName, earnedAnsweringUZIR }: {
+  usingEndpoint: boolean; endpointModel?: string; hasNativeModel: boolean; answered: number; hardwareName: string; earnedAnsweringUZIR?: number;
 }) {
   const answering = usingEndpoint || hasNativeModel;
   return (
@@ -364,7 +344,8 @@ function AnsweringPanel({ usingEndpoint, endpointModel, hasNativeModel, answered
         <>
           <div className="mt-3 grid grid-cols-2 gap-2.5">
             <Stat label="Answers contributed" value={answered} tone="teal" />
-            <Stat label="Answering via" value={usingEndpoint ? (endpointModel || "endpoint") : "native model"} />
+            <Stat label="Earned answering" value={`${formatZir(earnedAnsweringUZIR ?? 0)} ZIR`} tone="teal" />
+            <Stat label="Answering with" value={usingEndpoint ? (endpointModel || "field model") : "field model"} />
           </div>
           <p className="mt-3 rounded-lg border border-[color-mix(in_srgb,var(--teal)_24%,var(--border))] bg-[color-mix(in_srgb,var(--teal)_7%,transparent)] p-2.5 text-[11px] text-muted">
             <span className="font-medium text-[var(--teal)]">Stronger hardware earns more here.</span> A more capable machine runs a larger, better model and answers faster, so it wins more queries and produces higher-agreement answers, each worth a bigger slice. Running on {hardwareName}.
@@ -372,7 +353,7 @@ function AnsweringPanel({ usingEndpoint, endpointModel, hasNativeModel, answered
         </>
       ) : (
         <p className="mt-3 rounded-lg border border-hairline bg-base p-2.5 text-[11px] text-muted">
-          Add a model to move into answer mining: connect an OpenAI-compatible endpoint (Ollama, LM Studio, llama.cpp) below, or load the native model. Coordination settles once at least two capable miners answer, so this earning path grows as more miners join the field.
+          Turn on <span className="font-medium text-text">Storage</span> to receive the field's distributed model. Your node then answers on your own hardware automatically, with no external model needed. Coordination settles once at least two capable miners answer, so this earning path grows as more miners join the field.
         </p>
       )}
     </Card>
@@ -602,10 +583,19 @@ export function Mine() {
     const t = setInterval(pull, 30_000);
     return () => { live = false; clearInterval(t); };
   }, [client, address, nodeBehind]);
+  // Lifetime ZIR this address earned by ANSWERING the field (coordination payouts), derived on-chain by the
+  // node the same way as the Explorer answerer leaderboard. Slow cadence: it changes only when a query settles.
+  const [earnedAnsweringUZIR, setEarnedAnsweringUZIR] = useState(0);
+  useEffect(() => {
+    if (mode !== "node" || !address) { setEarnedAnsweringUZIR(0); return; }
+    let live = true;
+    const pull = () => { NodeApi.answererEarnings(address).then((r) => { if (live) setEarnedAnsweringUZIR(r.earnedUZIR ?? 0); }).catch(() => { /* keep last */ }); };
+    pull();
+    const t = setInterval(pull, 30_000);
+    return () => { live = false; clearInterval(t); };
+  }, [mode, address]);
   const [busy, setBusy] = useState(false);
   const [hardwareBusy, setHardwareBusy] = useState(false);
-  const [endpoint, setEndpoint] = useState("");
-  const [endpointModel, setEndpointModel] = useState("");
   const [storageLimit, setStorageLimit] = useState("1");
   const [gpuLayers, setGpuLayers] = useState("0");
   const [threads, setThreads] = useState("4");
@@ -626,7 +616,6 @@ export function Mine() {
   }, 5000, [pricingReload]);
 
   useEffect(() => { void refreshStatus(); }, [refreshStatus]);
-  useEffect(() => { if (mining) { setEndpoint(mining.endpoint ?? ""); setEndpointModel(mining.endpointModel ?? ""); } }, [mining?.endpoint, mining?.endpointModel]);
   useEffect(() => {
     // Prefer the authoritative byte cap; fall back to the legacy GB field. Show it as whole GB in the input.
     const capGb = mining?.storageCapBytes ? Math.max(1, Math.round(mining.storageCapBytes / 1024 ** 3)) : mining?.storageLimitGb;
@@ -693,12 +682,6 @@ export function Mine() {
     finally { setBusy(false); }
   }
 
-  async function saveEndpoint() {
-    setBusy(true);
-    try { await setMining({ endpoint: endpoint.trim() || undefined, endpointModel: endpointModel.trim() || undefined }); await refreshStatus(); toast.push(endpoint.trim() ? "Saved your local endpoint." : "Using the built-in engine."); }
-    catch (e) { toast.push(e instanceof Error ? e.message : "could not save endpoint", "danger"); }
-    finally { setBusy(false); }
-  }
 
   async function rescanHardware() {
     setHardwareBusy(true);
@@ -951,6 +934,7 @@ export function Mine() {
           hasNativeModel={Boolean(mining?.loadedModel)}
           answered={(mining?.answered ?? 0) + localLaunchAnswers}
           hardwareName={hardwareTitle(hardware)}
+          earnedAnsweringUZIR={earnedAnsweringUZIR}
         />
       )}
 
@@ -1004,7 +988,7 @@ export function Mine() {
           <div className="mt-3 grid gap-2 text-xs sm:grid-cols-3">
             <div className="rounded-lg border border-hairline bg-surface/70 p-2"><div className="text-faint">Contribution</div><div className="font-medium text-text">{contributionLabel}</div></div>
             <div className="rounded-lg border border-hairline bg-surface/70 p-2"><div className="text-faint">Continuity</div><div className="font-medium text-text">{peers >= 2 ? "multi-peer" : peers === 1 ? "one peer" : "solo"}</div></div>
-            <div className="rounded-lg border border-hairline bg-surface/70 p-2"><div className="text-faint">Model serving</div><div className="font-medium text-text">{coordinationOnly ? "coordination only" : ready ? "answering" : usingEndpoint ? "endpoint" : mining?.loadedModel ? "local model" : "not serving"}</div></div>
+            <div className="rounded-lg border border-hairline bg-surface/70 p-2"><div className="text-faint">Model serving</div><div className="font-medium text-text">{coordinationOnly ? "coordination only" : ready ? "answering" : usingEndpoint ? "field model" : mining?.loadedModel ? "field model" : "not serving"}</div></div>
           </div>
         </div>
 
@@ -1152,45 +1136,28 @@ export function Mine() {
           <Toggle on={mining?.localTaskPermission ?? false} onClick={() => updateLocalTaskPermission()} disabled={busy} />
         </div>
 
-        {/* Answer with your own model: the highest earning path, open to every miner. Quick instructions for
-            the common local servers plus the endpoint editor. Stronger hardware / bigger model earns more. */}
-        <div className="mt-3 rounded-lg border border-[color-mix(in_srgb,var(--teal)_24%,var(--border))] bg-[color-mix(in_srgb,var(--teal)_5%,transparent)] p-3">
-          <div className="flex items-center gap-2"><Sparkles size={15} className="text-[var(--teal)]" /><h3 className="text-sm font-semibold">Answer with your own model <span className="text-[11px] font-normal text-faint">— earn more</span></h3></div>
-          <p className="mt-1 text-[11px] text-muted">Run a local model server and paste its address below. Your node then answers field questions and earns coordination pay on top of storage, weighted by trust and how well your answer agrees with the field. A bigger model on stronger hardware wins more.</p>
+        {/* One answering path: the field's own distributed model, served automatically on your hardware when
+            Mining + Storage are on. No external model and no endpoint to configure; every answerer runs the
+            same canonical model, so answers converge and settle, and stronger hardware serves a bigger model. */}
+        <div className="mt-3 rounded-lg border border-[color-mix(in_srgb,var(--teal)_24%,var(--border))] bg-[color-mix(in_srgb,var(--teal)_7%,transparent)] p-3">
+          <div className="flex items-center gap-2"><Sparkles size={15} className="text-[var(--teal)]" /><h3 className="text-sm font-semibold">Answer the field <span className="text-[11px] font-normal text-faint">earn more</span></h3></div>
+          <p className="mt-1 text-[11px] text-muted">Turn on <span className="font-medium text-text">Mining</span> and <span className="font-medium text-text">Storage</span>. Your node receives the field's distributed model and answers on your own hardware automatically, with nothing to install and no model server to run. Your machine picks the largest field model it can run, so stronger hardware serves a bigger model, wins more queries, and earns more coordination pay on top of the storage baseline.</p>
           <div className="mt-2 grid gap-1.5 sm:grid-cols-3">
             <div className="rounded-md border border-hairline bg-base p-2 text-[11px]">
-              <div className="font-medium text-text">Ollama <span className="text-faint">(simplest)</span></div>
-              <div className="mt-1 text-faint">Install, then run:</div>
-              <div className="mono text-[10px] text-muted">ollama pull qwen2.5:7b</div>
-              <div className="mt-1 text-faint">URL <span className="mono text-muted">http://localhost:11434/v1</span></div>
-              <div className="text-faint">Model <span className="mono text-muted">qwen2.5:7b</span></div>
+              <div className="font-medium text-text">1. Mining on</div>
+              <div className="mt-1 text-faint">Lend this machine to the field above.</div>
             </div>
             <div className="rounded-md border border-hairline bg-base p-2 text-[11px]">
-              <div className="font-medium text-text">LM Studio</div>
-              <div className="mt-1 text-faint">Load a model, start its local server.</div>
-              <div className="mt-1 text-faint">URL <span className="mono text-muted">http://localhost:1234/v1</span></div>
-              <div className="text-faint">Model = the loaded model's name</div>
+              <div className="font-medium text-text">2. Storage on</div>
+              <div className="mt-1 text-faint">Receive the field model, then serve it here.</div>
             </div>
             <div className="rounded-md border border-hairline bg-base p-2 text-[11px]">
-              <div className="font-medium text-text">llama.cpp</div>
-              <div className="mt-1 text-faint">Serve any GGUF:</div>
-              <div className="mono text-[10px] text-muted">llama-server -m model.gguf --port 8080</div>
-              <div className="mt-1 text-faint">URL <span className="mono text-muted">http://localhost:8080/v1</span></div>
+              <div className="font-medium text-text">3. Answer automatically</div>
+              <div className="mt-1 text-faint">Your node answers questions and earns. Works behind a home router or NAT, with no inbound connection needed.</div>
             </div>
-          </div>
-          <div className="mt-2">
-            <EndpointEditor
-              hint="OpenAI-compatible server on this machine. Leave blank to use the built-in engine if a model is loaded locally."
-              endpoint={endpoint}
-              model={endpointModel}
-              onEndpoint={setEndpoint}
-              onModel={setEndpointModel}
-              onSave={saveEndpoint}
-              busy={busy}
-            />
           </div>
         </div>
-        {!canMineSomehow && <p className="mt-2 text-[11px] text-faint">Turn mining on to coordinate the field with your hardware. No model is required; serving a model and storage stay optional.</p>}
+        {!canMineSomehow && <p className="mt-2 text-[11px] text-faint">Turn mining on to coordinate the field with your hardware. No model is required; serving the field model and storage stay optional.</p>}
       </Card>
 
       {/* Steward: models + assigned storage policy */}
