@@ -70,3 +70,13 @@ test("the probe is throttled to its TTL (no generation storm)", async () => {
   await s.probeServable(1000 + 400_000);  // past TTL -> probes again
   assert.equal(calls, 2);
 });
+
+test("a hung serving subprocess self-heals: torn down after 2 bad probes so it respawns", async () => {
+  const s = svcWithEndpoint();
+  (s as any).endpointIsSubprocess = true;               // we are serving via our OWN subprocess
+  (s as any).generate = async () => { throw new Error("engine hung"); };
+  await s.probeServable(1000);                            // strike 1
+  assert.equal((s as any).endpointIsSubprocess, true, "still serving after a single bad probe");
+  await s.probeServable(1000 + 400_000);                 // strike 2 (past TTL) -> self-heal
+  assert.equal((s as any).endpointIsSubprocess, false, "hung subprocess torn down so reconcileAuto respawns");
+});

@@ -51,6 +51,7 @@ export class ModelService {
     { healthy: false, lastProbeMs: 0, lastOkMs: 0, lastError: null };
   private static readonly SERVE_PROBE_TTL_MS = 300_000;      // re-probe at most every 5 min
   private static readonly SERVE_PROBE_TIMEOUT_MS = 30_000;   // a probe generation that hangs this long counts as unhealthy
+  private serveUnhealthyStreak = 0;                          // consecutive failed serve probes; drives self-heal of a hung subprocess
 
   constructor(
     private dataDir: string,
@@ -817,19 +818,30 @@ export class ModelService {
     const timeout = new Promise<never>((_, rej) => {
       timer = setTimeout(() => rej(new Error(`serve probe timed out after ${ModelService.SERVE_PROBE_TIMEOUT_MS}ms`)), ModelService.SERVE_PROBE_TIMEOUT_MS);
     });
+    let ok = false; let err: string | null = null;
     try {
       const out = await Promise.race([probe, timeout]);
-      const ok = typeof out === "string" && out.trim().length > 0;
-      this.serveHealth = { healthy: ok, lastProbeMs: now, lastOkMs: ok ? now : this.serveHealth.lastOkMs, lastError: ok ? null : "empty generation" };
-      if (!ok) log.warn("serve probe produced no output; not advertising as a provider until the model generates");
-      return ok;
+      ok = typeof out === "string" && out.trim().length > 0;
+      if (!ok) err = "empty generation";
     } catch (e) {
-      this.serveHealth = { healthy: false, lastProbeMs: now, lastOkMs: this.serveHealth.lastOkMs, lastError: (e as Error).message };
-      log.warn(`serve probe failed (${(e as Error).message}); not advertising as a provider until the model generates`);
-      return false;
+      err = (e as Error).message;
     } finally {
       if (timer) clearTimeout(timer);
     }
+    this.serveHealth = { healthy: ok, lastProbeMs: now, lastOkMs: ok ? now : this.serveHealth.lastOkMs, lastError: err };
+    if (ok) { this.serveUnhealthyStreak = 0; return true; }
+    this.serveUnhealthyStreak++;
+    log.warn(`serve probe unhealthy (${err}); streak ${this.serveUnhealthyStreak}. Not advertising as a provider until it generates.`);
+    // Self-heal: if we serve via our OWN inference subprocess and it can no longer generate (a hung or wedged
+    // engine, which reconcileAuto treats as "already serving" and never restarts), tear it down after two
+    // consecutive bad probes so reconcileAuto respawns a fresh one on its next tick. This reuses the health
+    // probe as the liveness signal, so a miner recovers serving on its own with no user action and no endpoint.
+    if (this.serveUnhealthyStreak >= 2 && this.endpointIsSubprocess) {
+      log.warn("serving subprocess unhealthy twice; restarting it to recover serving");
+      this.stopSubprocessInference();
+      this.serveUnhealthyStreak = 0;
+    }
+    return false;
   }
 
   /** The cached serve-health flag. Does NOT run a probe; call probeServable() to refresh. */

@@ -28,11 +28,13 @@ const MAINNET_DEFAULT_BOOTSTRAP = [
   "/ip4/157.173.106.50/tcp/9646/ws/p2p/12D3KooWDybdhTxKevNHXktAAKioj24d5oKpDYLF8JAdBMy92U86",
   "/ip4/157.173.106.50/tcp/9655/p2p/12D3KooWQGdpVUWBTCuZqyrFL4DPCizp7DmWJ3RXXmf3v5EpsLdF",
   "/ip4/157.173.106.50/tcp/9656/ws/p2p/12D3KooWQGdpVUWBTCuZqyrFL4DPCizp7DmWJ3RXXmf3v5EpsLdF",
-  "/ip4/157.173.106.50/tcp/9665/p2p/12D3KooWNdZPJ8pqeKugEizSMmFvzau7nBxSv2592rZLgajHDkfj",
-  "/ip4/157.173.106.50/tcp/9666/ws/p2p/12D3KooWNdZPJ8pqeKugEizSMmFvzau7nBxSv2592rZLgajHDkfj",
-  "/ip4/157.173.106.50/tcp/9675/p2p/12D3KooWNDqUzsh8ZUhjKcskTBMnyaeYTX4fX2ZoiqFnSycGjco9",
-  "/ip4/157.173.106.50/tcp/9676/ws/p2p/12D3KooWNDqUzsh8ZUhjKcskTBMnyaeYTX4fX2ZoiqFnSycGjco9",
-  // box2 (model serving)
+  // box2 masters (verified live 2026-07-14). These replace two earlier entries that pointed at box1 ports
+  // with lost peer keys, so a fresh install now has live seeds across BOTH hosts and survives either box.
+  "/ip4/164.68.97.111/tcp/9665/p2p/12D3KooWA3cjPK85zVZQa64adWyfkQAPmJP7fDttooB56FCU9oYm",
+  "/ip4/164.68.97.111/tcp/9666/ws/p2p/12D3KooWA3cjPK85zVZQa64adWyfkQAPmJP7fDttooB56FCU9oYm",
+  "/ip4/164.68.97.111/tcp/9675/p2p/12D3KooWRmY5p2BepcwL4Pacx258bBDkg4XP4A6aEPdKBVX1aeRg",
+  "/ip4/164.68.97.111/tcp/9676/ws/p2p/12D3KooWRmY5p2BepcwL4Pacx258bBDkg4XP4A6aEPdKBVX1aeRg",
+  // box2 (model serving + relay)
   "/ip4/164.68.97.111/tcp/9645/p2p/12D3KooWL3koL9N8gYoPgEmAYn98cG9AsDEVyCZXigSvuy16BGuG",
   "/ip4/164.68.97.111/tcp/9646/ws/p2p/12D3KooWL3koL9N8gYoPgEmAYn98cG9AsDEVyCZXigSvuy16BGuG",
 ];
