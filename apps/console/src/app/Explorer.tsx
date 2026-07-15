@@ -49,11 +49,11 @@ export function Explorer() {
   const { locks, mode } = useZira();
 
   return (
-    <div className="mx-auto max-w-6xl space-y-5 p-6">
+    <div className="mx-auto max-w-6xl space-y-4 p-5">
       <PageHeader
         title="Explorer"
         badge={<Badge tone="teal">live</Badge>}
-        description="Trace the whole network, from day one to now. Every transfer, reward, and answer is a signed record. This is the same public data an exchange or indexer reads."
+        description="Trace the whole network. Every transfer, reward, and answer is a signed public record, the same data an exchange or indexer reads."
       />
       <NetworkAndSupply showHealth={mode === "node"} />
       <div className="grid gap-4 lg:grid-cols-2">
@@ -115,7 +115,6 @@ function NetworkAndSupply({ showHealth }: { showHealth: boolean }) {
         <div>
           <Badge tone="indigo">network &amp; supply</Badge>
           <h3 className="mt-2 text-sm font-semibold">Network health and supply audit</h3>
-          <p className="text-[11px] text-faint">ZIR exposes signed history, balances, supply audit, state roots, and peer health through the RPC an exchange or public indexer needs.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {updatedAt > 0 && <span className="text-[11px] text-faint">updated {timeAgo(updatedAt)}</span>}
