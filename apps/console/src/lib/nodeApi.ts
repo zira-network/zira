@@ -188,6 +188,11 @@ export const NodeApi = {
   // On web/mobile anchorBase() already IS the gateway, so this is identical to stats()/supply() there.
   networkStats: () => rpcGetFrom<ExtendedStats>(anchorBase(), "/stats"),
   networkSupply: () => rpcGetFrom<SupplyInfo>(anchorBase(), "/supply"),
+  // Network-scoped reads for the Explorer, mirroring networkStats/networkSupply: on a local desktop node
+  // these target the shared consensus gateway so the Explorer shows the WHOLE network's online providers and
+  // anchor seats, not just what the local node has heard. On web/mobile anchorBase() already IS the gateway.
+  networkProviders: () => rpcGetFrom<ProviderView[]>(anchorBase(), "/providers"),
+  networkAnchorSeats: () => rpcGetFrom<AnchorSeatSummary>(anchorBase(), "/anchors/seats"),
 
   // labeled project wallets (reserve, events, network, resonator pool, steward ops) + live balances
   treasury: () => rpcGet<Treasury>("/treasury"),

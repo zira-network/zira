@@ -1,9 +1,10 @@
 // apps/console/src/app/Explorer.tsx
-// The public RPC surface: network health, supply audit, signed event history, address lookup,
-// recent Locks, and field convergence, the explorer/exchange-integration view.
-import { useEffect, useRef, useState, type ReactNode } from "react";
+// The public RPC surface, read live from the node/gateway: network health, supply audit, online model
+// providers, the 512 anchor seats, signed event history, address lookup, and recent Locks. This is the
+// same public data an exchange or indexer reads. Every panel shows live data or an honest empty state.
+import { useEffect, useState, type ReactNode } from "react";
 import { Copy, ChevronDown, ChevronRight } from "lucide-react";
-import { PROTOCOL, type Lock, type SignedTx, type FieldNode } from "@zira/protocol";
+import { PROTOCOL, TOTAL_ANCHOR_SEATS, type Lock, type SignedTx } from "@zira/protocol";
 import {
   Card, Badge, Meter, Select, Button, Input, PageHeader,
   EmptyState, LoadingState, ErrorState, useSlowHint, usePoll, useToast,
@@ -11,12 +12,7 @@ import {
 import { useZira } from "../store/useZira";
 import { formatNum, formatZir, shortAddress, shortHash, timeAgo } from "../lib/format";
 import { loadReconciledHistory } from "../lib/history";
-import { NodeApi, type ExtendedStats, type SupplyInfo } from "../lib/nodeApi";
-
-// The field converges on multi-LLM coordination subjects, not hardware or commodity prices. These are
-// the resonant values that matter for a distributed assistant: how strongly models agree, how confident
-// the coordinated answer is, and how well the field performs per inference domain.
-const SUBJECTS = ["ANSWER_QUALITY", "COORDINATION_CONFIDENCE", "MODEL_AGREEMENT", "REASONING_DOMAIN"];
+import { NodeApi, type ExtendedStats, type SupplyInfo, type ProviderView, type AnchorSeatSummary } from "../lib/nodeApi";
 
 // ---- local helpers (kept in this file; not promoted to ui.tsx) ----
 
@@ -50,37 +46,22 @@ function Metric({ label, value, sub, tone }: { label: string; value: ReactNode; 
 }
 
 export function Explorer() {
-  const { client, locks, events, mode } = useZira();
-  const [values, setValues] = useState<Record<string, Lock | null>>({});
-
-  useEffect(() => {
-    if (!client) return;
-    const load = async () => {
-      try {
-        const entries = await Promise.all(SUBJECTS.map(async (s) => [s, await client.getResonantValue(s).catch(() => null)] as const));
-        setValues(Object.fromEntries(entries));
-      } catch { /* ticker is best-effort */ }
-    };
-    void load();
-    const t = setInterval(load, 6000);
-    return () => clearInterval(t);
-  }, [client]);
+  const { locks, mode } = useZira();
 
   return (
     <div className="mx-auto max-w-6xl space-y-5 p-6">
       <PageHeader
         title="Explorer"
         badge={<Badge tone="teal">live</Badge>}
-        description="Trace the whole network, from day one to now. Every transfer, reward, answer, and agreement is a signed record. This is the same public data an exchange or indexer reads."
+        description="Trace the whole network, from day one to now. Every transfer, reward, and answer is a signed record. This is the same public data an exchange or indexer reads."
       />
       <NetworkAndSupply showHealth={mode === "node"} />
-      <ValueTicker values={values} />
+      <div className="grid gap-4 lg:grid-cols-2">
+        <ProvidersPanel />
+        <AnchorsPanel />
+      </div>
       <AddressLookup />
       <TxExplorer />
-      <div className="grid gap-4 lg:grid-cols-2">
-        <FieldConvergence />
-        <EventWeb events={events} />
-      </div>
       <LockFeed locks={locks} />
     </div>
   );
@@ -446,20 +427,110 @@ function AddressLookup() {
   );
 }
 
-function ValueTicker({ values }: { values: Record<string, Lock | null> }) {
+// Online model providers: the miners currently serving a model to the field, read live from /providers.
+// These are the nodes that actually answer questions. Sorted by trust so the most credible lead.
+function ProvidersPanel() {
+  const [providers, setProviders] = useState<ProviderView[] | null>(null);
+  const [error, setError] = useState("");
+  const slow = useSlowHint(providers === null);
+
+  const load = () => {
+    NodeApi.networkProviders()
+      .catch(() => NodeApi.providers())
+      .then((next) => { setProviders(Array.isArray(next) ? next : []); setError(""); })
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load providers."));
+  };
+  usePoll(load, 8000, []);
+
+  const rows = (providers ?? []).slice().sort((a, b) => b.zti - a.zti).slice(0, 8);
+
   return (
-    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-      {SUBJECTS.map((s) => {
-        const v = values[s];
-        return (
-          <Card key={s} className="py-3">
-            <div className="text-xs text-faint">{s}</div>
-            <div className="mono text-lg text-text">{v ? formatNum(v.resonantValue, 4) : "."}</div>
-            {v && <div className="text-[11px] text-faint">cv {formatNum(v.cv, 3)}, {v.domain}</div>}
-          </Card>
-        );
-      })}
-    </div>
+    <Card>
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold">Serving providers</h3>
+          <p className="text-[11px] text-faint">Nodes lending a model to answer the field right now.</p>
+        </div>
+        {providers !== null && <Badge tone={rows.length > 0 ? "teal" : "neutral"}>{providers.length} online</Badge>}
+      </div>
+      {providers === null && !error ? <LoadingState slow={slow} /> : error && providers === null ? (
+        <ErrorState message={error} onRetry={load} />
+      ) : rows.length === 0 ? (
+        <EmptyState title="No providers serving right now" hint="When a node turns on serving and loads a model, it appears here and starts answering questions for the field." />
+      ) : (
+        <div className="divide-y divide-hairline">
+          {rows.map((p) => (
+            <div key={p.pubKey} className="grid grid-cols-[1fr_auto] items-center gap-3 py-2 text-sm">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="truncate font-medium">{p.label || "Provider"}</span>
+                  {p.supportsStreaming && <Badge tone="indigo" className="text-[10px]">streaming</Badge>}
+                </div>
+                <div className="mono truncate text-[11px] text-faint">{p.model || "model"} · {shortAddress(p.address)}</div>
+              </div>
+              <div className="flex items-center gap-3">
+                {p.tokensPerSec > 0 && <span className="mono text-[11px] text-faint">{formatNum(p.tokensPerSec, 0)} tok/s</span>}
+                <div className="w-16"><Meter value={p.zti} /></div>
+                <span className="mono w-9 text-right text-[var(--teal)]">{formatNum(p.zti, 2)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// The 512 anchor seats: the network's foundational, well-routed core. Live seat assignment read from
+// /anchors/seats. Earning on seats and user-owned Resonators activate in a later phase.
+function AnchorsPanel() {
+  const [summary, setSummary] = useState<AnchorSeatSummary | null>(null);
+  const [error, setError] = useState("");
+  const slow = useSlowHint(summary === null);
+
+  const load = () => {
+    NodeApi.networkAnchorSeats()
+      .catch(() => NodeApi.anchorSeats())
+      .then((next) => { setSummary(next); setError(""); })
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load anchors."));
+  };
+  usePoll(load, 30000, []);
+
+  const total = summary?.total ?? TOTAL_ANCHOR_SEATS;
+  const assigned = (summary?.classes ?? []).reduce((n, c) => n + c.taken, 0);
+  const listed = (summary?.classes ?? []).reduce((n, c) => n + c.listed, 0);
+
+  return (
+    <Card>
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold">Anchor seats</h3>
+          <p className="text-[11px] text-faint">{TOTAL_ANCHOR_SEATS} foundational seats form the network's trusted core.</p>
+        </div>
+        <Badge tone="indigo">coordination agents soon</Badge>
+      </div>
+      {summary === null && !error ? <LoadingState slow={slow} /> : error && summary === null ? (
+        <ErrorState message={error} onRetry={load} />
+      ) : (
+        <>
+          <div className="mb-3 grid grid-cols-3 gap-2">
+            <Metric label="Seats" value={String(total)} />
+            <Metric label="Assigned" value={String(assigned)} tone="teal" />
+            <Metric label="Listed" value={String(listed)} />
+          </div>
+          <div className="space-y-1.5">
+            {(summary?.classes ?? []).map((c) => (
+              <div key={c.class} className="flex items-center gap-3 text-[11px]">
+                <span className="w-24 shrink-0 truncate text-muted" title={c.name}>{c.name}</span>
+                <div className="flex-1"><Meter value={c.total > 0 ? c.taken / c.total : 0} /></div>
+                <span className="mono w-14 shrink-0 text-right text-faint">{c.taken}/{c.total}</span>
+              </div>
+            ))}
+          </div>
+          <p className="mt-3 text-[11px] text-faint">Seats carry a class, a routing weight, and a ZIR allocation that vests over one year. Seat earning turns on in a later phase.</p>
+        </>
+      )}
+    </Card>
   );
 }
 
@@ -489,111 +560,3 @@ function LockFeed({ locks }: { locks: Lock[] }) {
   );
 }
 
-function EventWeb({ events }: { events: SignedTx[] }) {
-  const recent = events.slice(0, 60);
-  return (
-    <Card>
-      <h3 className="mb-2 text-sm font-semibold">The Living Web</h3>
-      <svg viewBox="0 0 400 200" className="w-full" style={{ minHeight: 160 }}>
-        {recent.map((e, i) => {
-          const x = 20 + (i % 20) * 19;
-          const y = 30 + Math.floor(i / 20) * 55 + (i % 2) * 12;
-          return (
-            <g key={e.id}>
-              {i > 0 && <line x1={x} y1={y} x2={20 + ((i - 1) % 20) * 19} y2={30 + Math.floor((i - 1) / 20) * 55 + ((i - 1) % 2) * 12} stroke="var(--border)" strokeWidth="0.5" />}
-              <circle cx={x} cy={y} r={4} fill="var(--accent)" opacity={1 - i / 80}>
-                <title>{shortHash(e.id)}</title>
-              </circle>
-            </g>
-          );
-        })}
-      </svg>
-      <p className="text-[11px] text-faint">{recent.length} recent signed events, each pointing back into the web. No blocks, no block race.</p>
-    </Card>
-  );
-}
-
-function FieldConvergence() {
-  const { client } = useZira();
-  const [subject, setSubject] = useState(SUBJECTS[0]!);
-  const [nodes, setNodes] = useState<FieldNode[]>([]);
-  const [lock, setLock] = useState<Lock | null>(null);
-  const [paused, setPaused] = useState(false);
-  const estimatesRef = useRef<Record<string, number>>({});
-  const [, force] = useState(0);
-
-  useEffect(() => {
-    if (!client) return;
-    const load = async () => {
-      if (paused) return;
-      const [ns, lk] = await Promise.all([client.getFieldNodes(subject), client.getResonantValue(subject)]);
-      setNodes(ns); setLock(lk);
-    };
-    void load();
-    const t = setInterval(load, 4000);
-    return () => clearInterval(t);
-  }, [client, subject, paused]);
-
-  // Only nodes with a REAL signed estimate are plotted, no fabricated values. This is an explorer:
-  // synthetic readings would undermine the verifiable-event-web claim.
-  const readings = nodes.filter((n) => n.estimate != null);
-
-  // animate the real estimates smoothly toward the resonant value (no random seeding).
-  useEffect(() => {
-    let raf = 0;
-    const tick = () => {
-      const target = lock?.resonantValue ?? 1;
-      readings.forEach((n) => {
-        const key = n.pubKey;
-        const cur = estimatesRef.current[key] ?? (n.estimate as number);
-        estimatesRef.current[key] = cur + (target - cur) * 0.05 * (1 - 0.7 * n.zti);
-      });
-      force((x) => x + 1);
-      raf = requestAnimationFrame(tick);
-    };
-    if (!paused && readings.length > 0) raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [readings, lock, paused]);
-
-  const target = lock?.resonantValue ?? 1;
-  const vals = readings.map((n) => estimatesRef.current[n.pubKey] ?? (n.estimate as number));
-  const min = Math.min(target * 0.9, ...vals, target);
-  const max = Math.max(target * 1.1, ...vals, target);
-  const scale = (v: number) => max === min ? 100 : 20 + ((v - min) / (max - min)) * 360;
-  // how many readings have pulled within the convergence band around the locked value
-  const band = Math.abs(target) * 0.02 || 0.02;
-  const withinBand = readings.filter((n) => Math.abs((estimatesRef.current[n.pubKey] ?? (n.estimate as number)) - target) <= band).length;
-
-  return (
-    <Card>
-      <div className="mb-2 flex items-center justify-between">
-        <h3 className="text-sm font-semibold">Field convergence</h3>
-        <div className="flex items-center gap-2">
-          <Select value={subject} onChange={(e) => setSubject(e.target.value)} className="w-auto text-xs">
-            {SUBJECTS.map((s) => <option key={s} value={s}>{s}</option>)}
-          </Select>
-          <Button variant="ghost" onClick={() => setPaused((p) => !p)}>{paused ? "Play" : "Pause"}</Button>
-        </div>
-      </div>
-      {readings.length === 0 ? (
-        <EmptyState title="No live readings yet" hint="No node has published a signed estimate for this subject. Readings appear here as the field reports them." />
-      ) : (
-        <>
-          <svg viewBox="0 0 400 140" className="w-full" style={{ minHeight: 130 }}>
-            <line x1={scale(target)} y1="10" x2={scale(target)} y2="130" stroke="var(--teal)" strokeWidth="1.5" opacity="0.8" />
-            {readings.map((n, i) => {
-              const v = estimatesRef.current[n.pubKey] ?? (n.estimate as number);
-              return <circle key={n.pubKey} cx={scale(v)} cy={25 + (i % 8) * 13} r={3 + n.zti * 5} fill="url(#hf-cell)" opacity={0.5 + n.zti * 0.5}><title>{shortAddress(n.pubKey)} ZTI {formatNum(n.zti, 2)}</title></circle>;
-            })}
-            <defs>
-              <linearGradient id="hf-cell" x1="0" y1="0" x2="400" y2="140" gradientUnits="userSpaceOnUse">
-                <stop offset="0" stopColor="var(--accent)" /><stop offset="0.5" stopColor="var(--accent)" /><stop offset="1" stopColor="var(--violet)" />
-              </linearGradient>
-            </defs>
-          </svg>
-          <p className="text-[11px] text-faint">{readings.length} live reading{readings.length === 1 ? "" : "s"}, {withinBand} within the convergence band. {lock && `Locked at ${formatNum(lock.resonantValue, 4)}, cv ${formatNum(lock.cv, 3)}.`}</p>
-        </>
-      )}
-    </Card>
-  );
-}
