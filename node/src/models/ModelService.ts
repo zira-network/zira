@@ -5,7 +5,7 @@
 // loads a model into the inference engine to answer the field.
 import { readFileSync, writeFileSync, existsSync, statfsSync } from "node:fs";
 import { join } from "node:path";
-import { freemem, totalmem } from "node:os";
+import { freemem, totalmem, cpus } from "node:os";
 import http from "node:http";
 import { spawn, type ChildProcess } from "node:child_process";
 import { canonical, sign as edSign, verify as edVerify, addressFromPubKey, defaultDomainsForModelType, modelServesDomain, preferredModelTypeForDomain, type Domain, type ModelType, type Keypair, type Address } from "@zira/protocol";
@@ -773,6 +773,20 @@ export class ModelService {
   canServe(): boolean {
     if (!this.mining.enabled) return false;
     return this.inference.loadedModel() !== null || !!this.mining.endpoint;
+  }
+  /** How many field queries this node answers in parallel, by hardware tier. A single-slot CPU node stays at 1
+   * (full cores make one generation fast enough to beat the TTL); a many-core CPU runs 2; a GPU-offloaded node
+   * runs several, so strong hardware is actually used instead of sitting idle between single answers. Purely
+   * local scheduling: it changes only this node's own throughput and never touches consensus. Env-overridable
+   * for tuning (ZIRA_ANSWER_CONCURRENCY). Zero when the node cannot serve. */
+  answerConcurrency(): number {
+    if (!this.canServe()) return 0;
+    const override = Number(process.env.ZIRA_ANSWER_CONCURRENCY);
+    if (Number.isFinite(override) && override >= 1) return Math.min(8, Math.floor(override));
+    let cores = 4; try { cores = cpus().length || 4; } catch { /* keep default */ }
+    if (this.mining.gpuLayers > 0) return 4;   // GPU offload: run several generations at once
+    if (cores >= 12) return 2;                 // strong many-core CPU
+    return 1;                                  // small CPU: one at a time to beat the TTL
   }
   /** A short label for what is answering, for the provider announcement. */
   answerLabel(): string {

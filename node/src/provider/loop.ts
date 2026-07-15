@@ -20,7 +20,10 @@ export function startMiner(node: ZiraNode, identity: Keypair, cfg: MinerConfig):
   // so trimming the oldest is safe. Mirrors the InferenceProvider guard (else this Set leaks forever).
   const markAnswered = (id: string): void => { answered.add(id); if (answered.size > 4000) for (const old of [...answered].slice(0, 2000)) answered.delete(old); };
   const inFlight = new Set<string>();
-  const MAX_INFLIGHT = 1;          // a CPU node answers one query at a time (full cores -> fast enough to beat the TTL); the field parallelizes across nodes
+  // Answering concurrency is HARDWARE-AWARE (ModelService.answerConcurrency): a small CPU stays at one query
+  // at a time so it beats the TTL, a many-core CPU runs two, a GPU-offloaded node runs several in parallel so
+  // a strong machine is actually used instead of idling between single answers. Resolved live each tick because
+  // the mining config (GPU layers) can change at runtime. Purely local scheduling; never a consensus surface.
   const EXPECTED_GEN_MS = 35_000;  // a CPU generation takes tens of seconds; skip work that can't beat the TTL
   const QUERY_TTL_MS = 240_000;    // MUST match SoftState.QUERY_TTL_MS (240s): the field retains a query this long, so a serving miner must answer it across that whole window, not skip it after ~25s (which starved coordination answers)
 
@@ -62,17 +65,18 @@ export function startMiner(node: ZiraNode, identity: Keypair, cfg: MinerConfig):
   async function tick(): Promise<void> {
     if (node.endpointProviderReady()) return;
     if (stopped || !node.models.canServe()) return;
-    if (inFlight.size >= MAX_INFLIGHT) return; // already at the concurrency budget; let them finish first
+    const maxInflight = node.models.answerConcurrency(); // hardware-tier parallelism, resolved live
+    if (inFlight.size >= maxInflight) return; // already at the concurrency budget; let them finish first
     try {
       const now = Date.now();
       for (const query of node.soft.openQueries(pickupDomains(), now)) {
-        if (inFlight.size >= MAX_INFLIGHT) break;
+        if (inFlight.size >= maxInflight) break;
         if (answered.has(query.id) || inFlight.has(query.id)) continue;
         // Skip queries whose remaining time-to-live is shorter than a generation takes: the answer would
         // land after the query has TTL-expired from the field, wasting CPU and backing up the engine.
         if (typeof query.postedAt === "number" && (query.postedAt + QUERY_TTL_MS - now) < EXPECTED_GEN_MS) { markAnswered(query.id); continue; }
         inFlight.add(query.id);
-        // Fire-and-forget up to MAX_INFLIGHT at once (matching the subprocess pool) instead of awaiting each
+        // Fire-and-forget up to maxInflight at once (matching the subprocess pool) instead of awaiting each
         // generation in series, so a slow answer never blocks picking up the next query.
         void answerQuery(query).finally(() => inFlight.delete(query.id));
       }

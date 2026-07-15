@@ -83,7 +83,7 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "2.6.1";
+const NODE_RELEASE_VERSION = "2.6.2";
 // Per-cycle coordination batch. Every funded+listed resonator is eligible; autonomousResonanceBatch picks
 // this many per 5-minute cycle by a DETERMINISTIC ZTI-WEIGHTED draw, so higher-trust resonators (anchors,
 // seeded 0.95/0.85/… by class) are driven most often and earn the most, while every other funded resonator
@@ -2347,7 +2347,18 @@ export class ZiraNode {
       return;
     }
     // CHALLENGE (reverse probe, backward compatible): sign the master's nonce so it can confirm we are live.
+    // COMMITMENT GATE (invariant I1: earning is pay for lending the machine, not for merely being reachable).
+    // Only a node that actually contributes answers with its address: mining or storage on (a committed
+    // community miner), OR a consensus node (genesis or earned master, which participates through finality and
+    // must always answer so master-to-master liveness and settler failover keep working). An idle community
+    // node that has NOT committed replies with an address-less ack, so verifyPeerLive treats it as "no vouch"
+    // and the settler never pays it. Backward compatible: the frame shape is unchanged; older masters simply
+    // read no address and skip it. Consensus-safe: this only narrows which peers a master vouches, and payouts
+    // still ride the settler's single signed batch_transfer applied identically by every node.
+    const isMasterSelf = this.state.isGenesisMaster(this.identity.address) || (this.state.accounts.get(this.identity.address)?.isMaster ?? false);
+    const committed = this.models.miningEnabled() || this.models.storageState().enabled || isMasterSelf;
     const nonce = String(msg.nonce ?? "").slice(0, 96);
+    if (!committed) { yield enc.encode(JSON.stringify({ ok: true, committed: false })); return; }
     yield enc.encode(JSON.stringify({
       address: this.identity.address,
       pubKey: this.identity.publicKey,
