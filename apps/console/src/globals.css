@@ -54,6 +54,13 @@
   --shadow-1: 0 1px 2px rgba(10, 10, 10, 0.04);
   --shadow-2: 0 1px 3px rgba(10, 10, 10, 0.07), 0 6px 16px -8px rgba(10, 10, 10, 0.08);
   --shadow-float: 0 18px 48px -20px rgba(10, 10, 10, 0.22), 0 2px 8px rgba(10, 10, 10, 0.06);
+
+  /* Cards get a whisper of resting depth so surfaces read layered, not painted-on flat. Kept faint
+     enough to stay corporate: a 1px seat plus a soft, wide penumbra. */
+  --shadow-card: 0 1px 1px rgba(10, 10, 10, 0.03), 0 4px 14px -8px rgba(10, 10, 10, 0.07);
+  /* A near-invisible top-to-bottom card wash: surface at the top settling toward the page base at the
+     foot, for gentle dimensionality without a visible gradient. */
+  --card-wash: linear-gradient(180deg, var(--bg-surface) 0%, color-mix(in srgb, var(--bg-base) 45%, var(--bg-surface)) 100%);
 }
 
 /* ---- DARK (true ink: near-black, not slate) ---- */
@@ -90,6 +97,10 @@
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.40);
   --shadow-2: 0 2px 8px rgba(0, 0, 0, 0.46);
   --shadow-float: 0 20px 50px -20px rgba(0, 0, 0, 0.70), 0 2px 8px rgba(0, 0, 0, 0.34);
+
+  /* On ink, depth reads through the shadow, not a border; keep it soft and low. */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.34), 0 6px 18px -10px rgba(0, 0, 0, 0.50);
+  --card-wash: linear-gradient(180deg, color-mix(in srgb, #ffffff 3%, var(--bg-surface)) 0%, var(--bg-surface) 100%);
 }
 
 * {
@@ -134,8 +145,27 @@ h1, h2, .title-glow {
   line-height: 1.15;
   text-shadow: none;
 }
-h3 { font-weight: 640; letter-spacing: -0.018em; }
-h4, h5 { font-weight: 600; letter-spacing: -0.012em; }
+h3 { font-weight: 640; letter-spacing: -0.018em; line-height: 1.25; }
+h4, h5 { font-weight: 600; letter-spacing: -0.012em; line-height: 1.3; }
+
+/* Comfortable reading rhythm for body copy: paragraphs breathe, links carry the single accent. */
+p { line-height: 1.6; }
+
+/* A shared, quiet section label used across pages for cohesive eyebrows/kickers. */
+.eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* A single hairline top rule in the accent, for the one hero figure per screen. */
+.accent-rule {
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 12%, transparent));
+}
 
 input,
 textarea,
@@ -167,8 +197,10 @@ option {
 .field-hero {
   position: relative;
   overflow: hidden;
-  background: var(--bg-surface);
+  background-color: var(--bg-surface);
+  background-image: var(--card-wash);
   border-color: var(--border);
+  box-shadow: var(--shadow-card);
 }
 
 /* Anchor stage: a calm, contained panel for the seat map. Flat with a faint center lift. */
@@ -201,9 +233,11 @@ option {
   color: var(--text);
 }
 
-/* Flat elevation: cards read as hairline-bordered surfaces; hover firms the border with a whisper of lift. */
+/* Gentle elevation: cards read as hairline-bordered surfaces lifted by a faint wash and a soft resting
+   shadow. Depth stays a whisper so the app remains calm and corporate, never glossy. */
 .elevate {
-  box-shadow: none;
+  background-image: var(--card-wash);
+  box-shadow: var(--shadow-card);
   transition: border-color var(--dur) var(--ease), transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 .lift:hover {

@@ -11,12 +11,12 @@ import { cn } from "../lib/cn";
 // ---- Button ----
 type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
 export function Button({ variant = "secondary", className, children, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }) {
-  const base = "inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed focus:outline-none active:scale-[0.99]";
+  const base = "inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-all duration-[var(--dur)] ease-[var(--ease)] disabled:opacity-40 disabled:cursor-not-allowed focus:outline-none active:scale-[0.99]";
   const styles: Record<ButtonVariant, string> = {
-    primary: "font-semibold text-[var(--accent-contrast)] bg-[var(--accent)] hover:bg-[color-mix(in_srgb,var(--accent)_90%,black)] shadow-[var(--shadow-1)]",
-    secondary: "bg-surface text-text border border-hairline-strong hover:bg-elevated",
+    primary: "font-semibold text-[var(--accent-contrast)] bg-[var(--accent)] hover:bg-[color-mix(in_srgb,var(--accent)_90%,black)] shadow-[var(--shadow-1)] hover:shadow-[var(--shadow-2)]",
+    secondary: "bg-surface text-text border border-hairline-strong hover:bg-elevated hover:border-[var(--border-strong)]",
     ghost: "text-muted hover:text-text hover:bg-elevated",
-    danger: "font-medium text-white bg-[var(--danger)] hover:bg-[color-mix(in_srgb,var(--danger)_88%,black)]",
+    danger: "font-medium text-white bg-[var(--danger)] hover:bg-[color-mix(in_srgb,var(--danger)_88%,black)] shadow-[var(--shadow-1)] hover:shadow-[var(--shadow-2)]",
   };
   return <button className={cn(base, styles[variant], className)} {...props}>{children}</button>;
 }
