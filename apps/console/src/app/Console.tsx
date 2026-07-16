@@ -47,8 +47,30 @@ const MAX_WORKSPACE_BYTES = 240_000;
 const MAX_FILE_CHARS = 40_000;
 const MAX_WORKSPACE_ENTRIES = 80;
 
+// A message persisted mid-stream (streaming:true) is STALE the moment it is read back from storage: the
+// request that was feeding it does not survive a reload or a navigation away from the Console, so the live
+// `streamingIds` set that drives the spinner is empty on mount while the message still says streaming:true.
+// Without settling it, that message shows "thinking" (empty) or a blinking cursor (partial) forever. Settle
+// every such message on load: keep whatever text already streamed in, clear the flag, and give an empty one
+// an honest line so an interrupted ask reads as interrupted, never as a permanent hang.
+function sanitizeLoadedConvos(list: ModeConvo[]): ModeConvo[] {
+  if (!Array.isArray(list)) return [];
+  let changed = false;
+  const next = list.map((c) => {
+    if (!c?.messages?.some((m) => m.streaming)) return c;
+    changed = true;
+    return {
+      ...c,
+      messages: c.messages.map((m) => m.streaming
+        ? { ...m, streaming: false, content: m.content?.trim() ? m.content : "That answer was interrupted before it finished. Ask again to retry." }
+        : m),
+    };
+  });
+  return changed ? next : list;
+}
+
 function loadConvos(): ModeConvo[] {
-  try { return JSON.parse(localStorage.getItem(STORE) || "[]"); } catch { return []; }
+  try { return sanitizeLoadedConvos(JSON.parse(localStorage.getItem(STORE) || "[]")); } catch { return []; }
 }
 function saveConvos(c: Conversation[]) { localStorage.setItem(STORE, JSON.stringify(c)); }
 
@@ -373,6 +395,14 @@ export function Console() {
   }, [answerMode, activeProjectId]);
   useEffect(() => { localStorage.setItem("zira.console.coordinationProfile", coordinationProfile); }, [coordinationProfile]);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [active?.messages.length, streaming]);
+  // Leaving the Console (route change / app close) unmounts this component, and any state update from an
+  // in-flight ask after that is dropped by React, so the answer can never land in the thread anyway. Abort
+  // those requests on unmount rather than leaking them; the half-written message is settled by
+  // sanitizeLoadedConvos when the user comes back. Runs once (mount/unmount only).
+  useEffect(() => {
+    const inflight = abortMap.current;
+    return () => { for (const ctrl of inflight.values()) ctrl.abort(); };
+  }, []);
 
   // Escape closes the project editor overlay when it is open (the global handler covers the palette and
   // drawers). Bound only while the editor is open so it never swallows Escape elsewhere.

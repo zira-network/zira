@@ -668,8 +668,11 @@ export function Mine() {
   async function setHardwareMode(next: "field" | "off") {
     setBusy(true);
     try {
+      // "off" disables BOTH mining and storage so the node fully disengages: no serving, no vouch, no earning.
+      // Leaving storage on after mining-off kept the node "committed" (it still earned via the liveness vouch),
+      // which read as "mine off but still on". "field" enables mining, which auto-enables storage server-side.
       if (next === "field") await setMining({ enabled: true });
-      else await setMining({ enabled: false });
+      else await setMining({ enabled: false, storageEnabled: false });
       await refreshStatus();
       toast.push(next === "field"
         ? "Mining on. Serving the field and earning when work is paid."
@@ -819,8 +822,8 @@ export function Mine() {
         </div>
         <div className="mt-4 grid gap-2 text-xs sm:grid-cols-3">
           <div className="rounded-lg border border-hairline bg-surface/70 p-3"><div className="flex items-center gap-1 font-medium text-text"><Radio size={13} /> Coordination</div><div className="mt-1 text-faint">{peers} peers, {providersOnline} providers, {locksPerMinute} locks/min</div></div>
-          <div className="rounded-lg border border-hairline bg-surface/70 p-3"><div className="flex items-center gap-1 font-medium text-text"><Boxes size={13} /> Models (optional)</div><div className="mt-1 text-faint">{knownModels.length} known, {knownModels.filter((m) => m.ready).length} ready, {usingEndpoint || mining?.loadedModel ? "serving here" : "not serving here"}</div></div>
-          <div className="rounded-lg border border-hairline bg-surface/70 p-3"><div className="flex items-center gap-1 font-medium text-text"><Link2 size={13} /> Storage (optional)</div><div className="mt-1 text-faint">{mining?.storageEnabled ? `on, ${formatBytes(mining?.storageUsedBytes ?? 0)} cached` : "off"}, workspace tasks {mining?.localTaskPermission ? "allowed" : "off"}</div></div>
+          <div className="rounded-lg border border-hairline bg-surface/70 p-3"><div className="flex items-center gap-1 font-medium text-text"><Boxes size={13} /> Models (optional)</div><div className="mt-1 text-faint">{knownModels.length} known, {knownModels.filter((m) => m.ready).length} ready, {mining?.enabled && (usingEndpoint || mining?.loadedModel) ? "serving here" : "not serving here"}</div></div>
+          <div className="rounded-lg border border-hairline bg-surface/70 p-3"><div className="flex items-center gap-1 font-medium text-text"><Link2 size={13} /> Storage (optional)</div><div className="mt-1 text-faint">{mining?.storageEnabled ? `on, ${formatBytes(mining?.storageUsedBytes ?? 0)} cached` : "off"}, workspace tasks {mining?.enabled && mining?.localTaskPermission ? "allowed" : "off"}</div></div>
         </div>
       </Card>
 
@@ -1073,16 +1076,16 @@ export function Mine() {
         <div className="mt-3 rounded-lg border border-hairline bg-base p-3">
           <div className="flex items-center justify-between gap-3">
             <div className="text-xs">
-              <div className="flex items-center gap-2 font-medium text-text"><Link2 size={14} className="text-[var(--indigo)]" /> Storage (peer-to-peer) <span className="font-normal text-faint">optional, on by default</span></div>
+              <div className="flex items-center gap-2 font-medium text-text"><Link2 size={14} className="text-[var(--indigo)]" /> Storage (peer-to-peer) <span className="font-normal text-faint">optional, on while you mine</span></div>
               <div className="mt-0.5 text-faint">Serving authorized model bytes earns a bonus on top of coordination, and passes models to other peers without a central host. It is optional: turn it off and this node still mines and earns from coordination, it just stops holding and serving heavy model bytes.</div>
             </div>
             <Toggle on={mining?.storageEnabled ?? false} onClick={() => updateStorage(!(mining?.storageEnabled ?? false))} disabled={busy} />
           </div>
           <div className="mt-2 grid gap-2 sm:grid-cols-3">
-            <Field label="Storage cap" hint="GB. Default is 1 GB. The node never stores more than this; when full it stops taking new bytes and keeps serving what fits.">
+            <Field label="Storage cap" hint="GB. Default is 8 GB, enough to hold one authorized model so this node can actually serve the field. The node never stores more than this; when full it stops taking new bytes and keeps serving what fits.">
               <Input className="mono" value={storageLimit} onChange={(e) => setStorageLimit(e.target.value)} onBlur={() => updateStorage(mining?.storageEnabled ?? false)} disabled={busy} />
             </Field>
-            <Stat label="Used of cap" value={<span className="text-sm">{formatBytes(mining?.storageUsedBytes ?? 0)} / {formatBytes(mining?.storageCapBytes ?? (mining?.storageLimitGb ?? 1) * 1024 ** 3)}{(mining?.storageDownloadingBytes ?? 0) > 0 ? <span className="text-faint"> (+{formatBytes(mining?.storageDownloadingBytes ?? 0)} downloading)</span> : null}</span>} />
+            <Stat label="Used of cap" value={<span className="text-sm">{formatBytes(mining?.storageUsedBytes ?? 0)} / {formatBytes(mining?.storageCapBytes ?? (mining?.storageLimitGb ?? 8) * 1024 ** 3)}{(mining?.storageDownloadingBytes ?? 0) > 0 ? <span className="text-faint"> (+{formatBytes(mining?.storageDownloadingBytes ?? 0)} downloading)</span> : null}</span>} />
             <Stat label="Mode" value={<span className="text-sm">{mining?.storageEnabled ? "storage peer" : "light node"}</span>} />
           </div>
           {(mining?.storageUsedBytes ?? 0) > 0 && (
@@ -1091,7 +1094,7 @@ export function Mine() {
               <Button variant="ghost" onClick={emptyStorage} disabled={busy} className="shrink-0 text-xs">Empty stored models</Button>
             </div>
           )}
-          {mining?.storageEnabled && (mining?.storageUsedBytes ?? 0) >= (mining?.storageCapBytes ?? (mining?.storageLimitGb ?? 1) * 1024 ** 3) && (
+          {mining?.storageEnabled && (mining?.storageUsedBytes ?? 0) >= (mining?.storageCapBytes ?? (mining?.storageLimitGb ?? 8) * 1024 ** 3) && (
             <div className="mt-2 rounded-lg border border-[color-mix(in_srgb,var(--warn)_35%,transparent)] bg-[color-mix(in_srgb,var(--warn)_7%,transparent)] p-2 text-[11px] text-muted">
               Storage is at its cap. This node keeps serving what it already holds and will not take new bytes until you raise the cap.
             </div>
@@ -1246,7 +1249,7 @@ function FounderStorage() {
   return (
     <Card>
       <div className="mb-2 flex items-center gap-2"><Server size={16} className="text-[var(--warn)]" /><h3 className="text-sm font-semibold">Steward: storage addresses</h3></div>
-      <p className="mb-3 text-xs text-muted">Steward-assigned storage addresses are trusted backbone hosts, not the only storage peers. Every node starts as a small 1GB storage peer by default, and any user can disable it or raise the cap. Together these peers distribute authorized models and future field artifacts without a central host.</p>
+      <p className="mb-3 text-xs text-muted">Steward-assigned storage addresses are trusted backbone hosts, not the only storage peers. Any node that turns on mining becomes a storage peer (an 8GB cap by default), and a user can disable it or raise the cap. Together these peers distribute authorized models and future field artifacts without a central host.</p>
       <Field label="Assign a storage address" hint="A trusted node multiaddr. It will be allowed to host and serve heavy bytes.">
         <div className="flex gap-2">
           <Input className="mono flex-1" value={val} onChange={(e) => setVal(e.target.value)} placeholder="/dns4/store.example.com/tcp/9645/p2p/12D3..." />
@@ -1263,7 +1266,7 @@ function FounderStorage() {
           ))}
         </div>
       )}
-      {peers.length === 0 && <p className="mt-2 text-[11px] text-faint">No backbone storage addresses assigned yet. Regular nodes still contribute as storage peers through their default 1GB cap, unless the user disables storage.</p>}
+      {peers.length === 0 && <p className="mt-2 text-[11px] text-faint">No backbone storage addresses assigned yet. Mining nodes still contribute as storage peers through their default 8GB cap, unless the user disables storage.</p>}
     </Card>
   );
 }

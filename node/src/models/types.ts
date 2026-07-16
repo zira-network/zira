@@ -83,7 +83,10 @@ export interface MiningConfig {
 // a light relay still stays small. Operators can raise it (storage role) or lower it in Settings.
 export const STORAGE_DEFAULT_CAP_BYTES = 8 * 1024 ** 3; // 8 GiB
 
-export const DEFAULT_MINING: MiningConfig = { enabled: false, mode: "auto", modelId: null, gpuLayers: 0, threads: 4, useRecommendedHardware: true, localTaskPermission: false, storageEnabled: true, storageCapBytes: STORAGE_DEFAULT_CAP_BYTES, storageLimitGb: 8, ownTaskInference: false };
+// storageEnabled defaults OFF so a fresh node that has not turned mining on does not silently serve storage
+// and (via the commitment vouch) earn while "off". Turning mining on auto-enables storage (ModelService),
+// and turning the hardware mode off disables both, so "off" means off: no mining, no storage, no earning.
+export const DEFAULT_MINING: MiningConfig = { enabled: false, mode: "auto", modelId: null, gpuLayers: 0, threads: 4, useRecommendedHardware: true, localTaskPermission: false, storageEnabled: false, storageCapBytes: STORAGE_DEFAULT_CAP_BYTES, storageLimitGb: 8, ownTaskInference: false };
 
 export const MODEL_PROTOCOL = "/zira/model/1.0.0";
 export const MODEL_CHUNK_BYTES = 1 << 20; // 1 MiB chunks
