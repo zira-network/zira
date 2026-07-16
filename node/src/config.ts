@@ -37,6 +37,10 @@ const MAINNET_DEFAULT_BOOTSTRAP = [
   // box2 (model serving + relay)
   "/ip4/164.68.97.111/tcp/9645/p2p/12D3KooWL3koL9N8gYoPgEmAYn98cG9AsDEVyCZXigSvuy16BGuG",
   "/ip4/164.68.97.111/tcp/9646/ws/p2p/12D3KooWL3koL9N8gYoPgEmAYn98cG9AsDEVyCZXigSvuy16BGuG",
+  // box3 (169.58.22.204) added 2026-07-16: a public relay node with headroom (ZIRA_ANNOUNCE -> circuit-relay
+  // server) so home/NAT nodes get another reachable seed + relay reservation and hold more than one peer.
+  "/ip4/169.58.22.204/tcp/9645/p2p/12D3KooWNVoejYgimd7bLrENbetS8aEkj94fzXKAbXgCE6b2A3G3",
+  "/ip4/169.58.22.204/tcp/9646/ws/p2p/12D3KooWNVoejYgimd7bLrENbetS8aEkj94fzXKAbXgCE6b2A3G3",
 ];
 
 export interface NodeRuntimeConfig {
