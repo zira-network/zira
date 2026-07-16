@@ -14,7 +14,7 @@ export interface ClientInfo { client: ZiraClient; mode: "node"; base: string; }
 // VITE_ZIRA_NODE_URL at build time (for example to a TLS domain like https://gateway.zira.network) to
 // override this, or change it in Settings at runtime (zira.nodeBase). Keep this in sync with the
 // Android cleartext allowlist (network_security_config.xml) and web/.env.example.
-export const DEFAULT_PUBLIC_GATEWAY = "http://157.173.106.50:8645";
+export const DEFAULT_PUBLIC_GATEWAY = "https://gateway.zira.network";
 
 // Resolve the default node/gateway base at call time (not module load), so platform globals that the
 // host injects (Capacitor's window.Capacitor, the desktop bridge) are reliably present. The Settings

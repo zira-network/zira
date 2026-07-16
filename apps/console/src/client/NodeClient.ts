@@ -29,9 +29,11 @@ export class FreeTierError extends Error {
 // The public ZIRA gateways (kept in sync with createClient.ts DEFAULT_PUBLIC_GATEWAY). When the Console
 // talks to a LOCAL embedded node that is still syncing, isolated, or briefly without a serving provider,
 // a field ask that comes back empty is retried against these always-on gateways so the user still gets an
-// answer instead of a "warming up" message. Mining and earning stay on the local node. Ordered: the main
-// gateway first, then the serving box as a second chance when the first is briefly unreachable.
-export const PUBLIC_GATEWAYS = ["http://157.173.106.50:8645", "http://164.68.97.111:8645"];
+// answer instead of a "warming up" message. Mining and earning stay on the local node.
+// The HTTPS name resolves to the healthy public read-gateway and works from BOTH the web app (no mixed-content
+// block) and the desktop app; the direct box3 gateway is a plain-http second chance for the desktop only.
+// (The old http box1:8645 target was the settler-busy master, which frequently hung; do not use it here.)
+export const PUBLIC_GATEWAYS = ["https://gateway.zira.network", "http://169.58.22.204:8646"];
 const PUBLIC_GATEWAY = PUBLIC_GATEWAYS[0]!;
 
 export class NodeClient implements ZiraClient {

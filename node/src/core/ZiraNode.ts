@@ -83,7 +83,7 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "2.6.3";
+const NODE_RELEASE_VERSION = "2.6.4";
 // Per-cycle coordination batch. Every funded+listed resonator is eligible; autonomousResonanceBatch picks
 // this many per 5-minute cycle by a DETERMINISTIC ZTI-WEIGHTED draw, so higher-trust resonators (anchors,
 // seeded 0.95/0.85/… by class) are driven most often and earn the most, while every other funded resonator
@@ -1399,11 +1399,15 @@ export class ZiraNode {
   // runField credits any miner vouched by enough masters in the converged Lock. No ledger tx is created, so
   // this is consensus-safe (the credit derives from converged observations, not divergent per-master txs).
   private verifiedMiners = new Map<string, number>();
-  // Push-vouched miners (this master only): peerId -> {address it asserted, when}. A miner pushes a signed
-  // liveness assertion over its own outbound connection; keying by peerId bounds it to one address per live
-  // connection (the same sybil property as the reverse probe) and lets a NAT'd miner stay vouched even when
-  // the master cannot probe it back. Consumed by freshVouchedMiners while the connection is still live.
+  // Push-vouched miners (this master only): address -> {address it asserted, when}. A miner pushes a signed
+  // liveness assertion; it is keyed by the SIGNED ADDRESS (verified against the miner's pubKey in serveLiveness),
+  // so it counts whether the miner reached the master directly OR a relay forwarded it for a NAT'd node that
+  // cannot hold a master link. The per-address signature is the sybil bound (a relay cannot invent a vouch).
+  // Consumed by freshVouchedMiners for its full freshness window.
   private pushVouch = new Map<string, { address: string; ts: number }>();
+  // Relay-forward dedupe: address -> last time we (a non-master relay) forwarded that miner's push to the
+  // masters. One forward per push interval per address keeps a busy relay from flooding the masters.
+  private pushForwardSeen = new Map<string, number>();
   // Which vouched miners passed the STORAGE chunk challenge this window (address -> last-verified ms). A
   // subset of verifiedMiners; used to give storage-servers the payout bonus. Settler-local, consensus-safe.
   private storageServingMiners = new Map<string, number>();
@@ -1482,11 +1486,11 @@ export class ZiraNode {
     for (const [a, ts] of this.verifiedMiners) if (now - ts <= ZiraNode.VOUCH_FRESH_MS) out.push(a);
     // Push-vouched miners: honour a fresh signed push for its full freshness window, regardless of whether the
     // connection happens to be up at THIS instant — that is the whole point, because a churning NAT'd link is
-    // rarely up at the exact payout tick. Keying by peerId already caps this at one address per connection (the
-    // node must have pushed over a real connection within the last PUSH_LIVENESS_MAX_AGE_MS, and must keep
-    // reconnecting to re-push), so there is no extra sybil surface beyond the reverse probe. Prune only on age.
-    for (const [peerId, v] of this.pushVouch) {
-      if (now - v.ts > PUSH_LIVENESS_MAX_AGE_MS) { this.pushVouch.delete(peerId); continue; }
+    // rarely up at the exact payout tick. Keyed by the SIGNED ADDRESS (each entry proven by the miner's own
+    // signature in serveLiveness), so a push counts whether it arrived directly or was relay-forwarded, with no
+    // extra sybil surface (a relay cannot invent a signature). Prune only on age.
+    for (const [addr, v] of this.pushVouch) {
+      if (now - v.ts > PUSH_LIVENESS_MAX_AGE_MS) { this.pushVouch.delete(addr); continue; }
       out.push(v.address);
     }
     return [...new Set(out)];
@@ -2337,11 +2341,26 @@ export class ZiraNode {
     // master ever having to probe it back. Verified by the miner's own signature + a fresh timestamp.
     if (msg.push === true && typeof msg.address === "string" && typeof msg.pubKey === "string" && typeof msg.sig === "string" && typeof msg.ts === "number") {
       const now = Date.now();
-      const isMaster = this.state.isGenesisMaster(this.identity.address) || (this.state.accounts.get(this.identity.address)?.isMaster ?? false);
-      if (isMaster && from && Math.abs(now - msg.ts) <= PUSH_LIVENESS_MAX_AGE_MS &&
-          /^zir1[0-9a-z]{6,}$/.test(msg.address) && msg.address !== this.identity.address && !this.state.isGenesisMaster(msg.address) &&
-          addressFromPubKey(msg.pubKey) === msg.address && edVerify("zira-live-push:" + msg.ts, msg.sig, msg.pubKey)) {
-        this.pushVouch.set(from, { address: msg.address, ts: now });
+      // The push is proven by the MINER's OWN signature, so it is valid no matter how it reached us. Verify it
+      // once, then either record it (if we are a master) or forward it to the masters (if we are a relay).
+      const validPush = Math.abs(now - msg.ts) <= PUSH_LIVENESS_MAX_AGE_MS &&
+        /^zir1[0-9a-z]{6,}$/.test(msg.address) && msg.address !== this.identity.address && !this.state.isGenesisMaster(msg.address) &&
+        addressFromPubKey(msg.pubKey) === msg.address && edVerify("zira-live-push:" + msg.ts, msg.sig, msg.pubKey);
+      if (validPush) {
+        const isMaster = this.state.isGenesisMaster(this.identity.address) || (this.state.accounts.get(this.identity.address)?.isMaster ?? false);
+        if (isMaster) {
+          // Bind by the SIGNED ADDRESS, not by the connection, so a push counts whether the miner reached us
+          // directly OR a relay forwarded it for a NAT node that cannot hold a master link. The signature binds
+          // one entry to the miner's own key, so a relay cannot fabricate a vouch (it has no miner key) and there
+          // is no extra sybil surface; a fake address with no earned standing is still paid ~nothing.
+          this.pushVouch.set(msg.address, { address: msg.address, ts: now });
+        } else {
+          // RELAY-FORWARDED VOUCH: a well-connected non-master (a public relay/gateway that home nodes can always
+          // reach) forwards the miner's own signed push to the masters, so a home miner behind NAT/CGNAT is
+          // vouched and paid with ZERO router config, just by attaching to a relay. Fork-safe: payouts still ride
+          // the settler's single signed batch_transfer applied identically by every node; the master re-verifies.
+          this.forwardPushVouch(msg.address, req, now);
+        }
       }
       yield enc.encode(JSON.stringify({ ok: true }));
       return;
@@ -2391,6 +2410,20 @@ export class ZiraNode {
       sig: edSign("zira-live-push:" + now, this.identity.privateKey),
     }));
     for (const peerId of targets) void this.net.request(peerId, LIVENESS_PROTOCOL, body, 8_000).catch(() => { /* best effort; retry next bucket */ });
+  }
+
+  /** Relay a miner's own signed liveness push to the masters. Called on a non-master relay/gateway when a home
+   *  node (that may only be able to reach this relay) pushes its liveness here. The body is forwarded UNCHANGED,
+   *  so the master verifies the miner's signature and binds the vouch to the miner's address — the relay adds no
+   *  trust and cannot fabricate a vouch. Deduped to one forward per push interval per address so it never floods
+   *  the masters. This is what lets a NAT/CGNAT miner earn automatically, with no port-forward or UPnP. */
+  private forwardPushVouch(address: string, body: Uint8Array, now: number): void {
+    const last = this.pushForwardSeen.get(address) ?? 0;
+    if (now - last < PUSH_LIVENESS_INTERVAL_MS - 2_000) return;   // at most once per push interval per miner
+    this.pushForwardSeen.set(address, now);
+    if (this.pushForwardSeen.size > 8_000) for (const [k, t] of this.pushForwardSeen) if (now - t > PUSH_LIVENESS_MAX_AGE_MS) this.pushForwardSeen.delete(k);
+    const masters = this.net.seedPeers?.() ?? [];
+    for (const peerId of masters.slice(0, 8)) void this.net.request(peerId, LIVENESS_PROTOCOL, body, 8_000).catch(() => { /* best effort */ });
   }
 
   /** Probe a directly-connected peer's liveness. Returns its verified ZIR address, or null if it did not
