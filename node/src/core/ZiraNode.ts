@@ -83,7 +83,7 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "2.6.4";
+const NODE_RELEASE_VERSION = "2.6.5";
 // Per-cycle coordination batch. Every funded+listed resonator is eligible; autonomousResonanceBatch picks
 // this many per 5-minute cycle by a DETERMINISTIC ZTI-WEIGHTED draw, so higher-trust resonators (anchors,
 // seeded 0.95/0.85/… by class) are driven most often and earn the most, while every other funded resonator
@@ -134,7 +134,14 @@ const AUTONOMOUS_COORDINATION_REWARD_UZIR = envInt("ZIRA_AUTONOMOUS_COORDINATION
 // among participants means more nodes dilute each share (so spinning up sybils just splits the same pool)
 // and bounds the settler's spend. One settler funds it, so the payout txs are deterministic and finality
 // holds. Answering coordination queries (the 77% split) still earns MORE, on top of this. Set 0 to disable.
-const FIELD_PARTICIPATION_MAX_PAYEES = envInt("ZIRA_FIELD_PARTICIPATION_MAX_PAYEES", 64);
+// Cap the payees in ONE signed batch. The consensus apply/validation path (parseBatchOutputs) rejects a
+// batch with >256 outputs, so this MUST stay under 256 or the whole payout is dropped and nobody earns.
+// It was 64, which silently starved the network the moment more than 64 miners were vouched at once: the
+// payee list is sorted by ADDRESS and sliced, so the excess (every address past the first 64 lexically)
+// earned zero regardless of work. Push-liveness relay-forwarding brought the whole NAT population online
+// at once and exposed this. 250 keeps every currently-vouched miner paid with headroom under the 256 wall;
+// if the active set ever approaches that, the fair fix is rotation, not a higher cap.
+const FIELD_PARTICIPATION_MAX_PAYEES = envInt("ZIRA_FIELD_PARTICIPATION_MAX_PAYEES", 250);
 // Contribution weighting for the field pool (v2.0.2). The pool is no longer split equally: the settler
 // weights each vouched miner by VERIFIABLE work it observed, so a stronger machine that serves storage and
 // answers more coordination queries earns a larger share, while a bare live node keeps a real baseline. This

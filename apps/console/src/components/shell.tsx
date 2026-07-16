@@ -187,7 +187,12 @@ function SidebarFooter() {
       Run by its users. Your keys, your node, your AI.
       {(() => {
         const nodeVer = formatNodeVersion(nodeVersion);
-        const mismatch = nodeVer && nodeVer !== APP_VERSION;   // surface a console/node version drift, otherwise show one clean ZIRA version
+        // The node reports a bare "2.6.4" while APP_VERSION carries a "v" prefix ("v2.6.4"), so compare with
+        // the prefix normalised or an IDENTICAL build reads as a false drift ("ZIRA v2.6.4 · node 2.6.4").
+        // Only a genuine, known version difference appends the node build; "unknown" (older nodes that do not
+        // report a version yet) is expected and stays hidden rather than shown as a drift.
+        const appVer = APP_VERSION.replace(/^v/i, "");
+        const mismatch = nodeVer !== "unknown" && nodeVer.replace(/^v/i, "") !== appVer;
         return <div className="mt-1.5 mono opacity-70">ZIRA {APP_VERSION}{mismatch ? ` · node ${nodeVer}` : ""}</div>;
       })()}
     </div>
