@@ -31,14 +31,14 @@ export class FreeTierError extends Error {
 // a field ask that comes back empty is retried against these always-on gateways so the user still gets an
 // answer instead of a "warming up" message. Mining and earning stay on the local node.
 // The HTTPS name resolves to the healthy public read-gateway and works from BOTH the web app (no mixed-content
-// block) and the desktop app; the direct box3 gateway is a plain-http second chance for the desktop only.
+// block) and the desktop app; the two plain-http gateways are second and third chances for the desktop/mobile.
 // (The old http box1:8645 target was the settler-busy master, which frequently hung; do not use it here.)
-export const PUBLIC_GATEWAYS = ["https://gateway.zira.network", "http://169.58.22.204:8646"];
-// Field-answer fallback also tries the well-connected serve relay (box2), where the answering miners are
-// peered, so a desktop-local node whose own field query timed out can still reach a real answer. Used ONLY
-// for asking the field, never for balances/history (a raw relay's ledger view can drift), so ledger
-// reconciliation stays on the canonical PUBLIC_GATEWAYS above.
-export const FIELD_GATEWAYS = [...PUBLIC_GATEWAYS, "http://164.68.97.111:8645"];
+// All three are dedicated read gateways (GATEWAY=1) that finalize to the same root, so the Explorer, balances,
+// and history stay available even if one gateway is down or slow: reads try them in order until one answers.
+export const PUBLIC_GATEWAYS = ["https://gateway.zira.network", "http://169.58.22.204:8646", "http://164.68.97.111:8645"];
+// Field-answer fallback is the same gateway set (box2 is where many answering miners are peered), so a
+// desktop-local node whose own field query timed out can still reach a real answer.
+export const FIELD_GATEWAYS = PUBLIC_GATEWAYS;
 const PUBLIC_GATEWAY = PUBLIC_GATEWAYS[0]!;
 
 export class NodeClient implements ZiraClient {
