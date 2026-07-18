@@ -14,4 +14,6 @@ contextBridge.exposeInMainWorld("zira", {
   resetAndRelaunch: () => ipcRenderer.invoke("zira:reset"),
   // Relaunch without wiping (used after importing a wallet, so the node reloads its new identity).
   relaunchApp: () => ipcRenderer.invoke("zira:relaunch"),
+  // Live machine telemetry for the Mine page (hardware names + CPU/RAM utilization). Desktop only.
+  hardware: () => ipcRenderer.invoke("zira:hardware"),
 });

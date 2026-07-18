@@ -7,7 +7,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
   MessageSquare, Wallet as WalletIcon, Bot, CircuitBoard, Network, Hexagon,
-  BookOpen, Settings as SettingsIcon, Crown, Radio, Wifi, WifiOff, Zap,
+  BookOpen, Settings as SettingsIcon, Crown, Radio, Wifi, WifiOff, Zap, Gem,
   Moon, Sun, Plus, PanelLeftClose, PanelLeftOpen, Menu, X,
 } from "lucide-react";
 import { ZiraMark } from "./brand";
@@ -102,7 +102,7 @@ function NavRow({ item, soon, collapsed, onNavigate }: { item: NavItem; soon: bo
 
 // The shared navigation body, rendered both in the desktop aside and the mobile drawer.
 function NavBody({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: () => void }) {
-  const { phase, isFounder, isStewardWallet } = useZira();
+  const { phase, isFounder, isStewardWallet, ownsAnchors } = useZira();
   const showSteward = isFounder || isStewardWallet;
   return (
     <nav className={cn("flex flex-1 flex-col gap-5 overflow-y-auto overflow-x-hidden py-2", collapsed ? "px-2" : "px-3")}>
@@ -110,6 +110,7 @@ function NavBody({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: (
         const visible = section.items.filter((item) => !(item.desktopOnly && !isDesktop()));
         if (visible.length === 0) return null;
         const withFounder = section.heading === "Account" && showSteward;
+        const withLattice = section.heading === "Network" && ownsAnchors;
         return (
           <div key={section.heading} className="flex flex-col gap-0.5">
             {collapsed
@@ -119,6 +120,16 @@ function NavBody({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: (
               const soon = !!item.disabled || (item.feature ? !featureEnabled(phase, item.feature) : false);
               return <NavRow key={item.to} item={item} soon={soon} collapsed={collapsed} onNavigate={onNavigate} />;
             })}
+            {withLattice && (
+              <NavLink to="/lattice" onClick={onNavigate} title={collapsed ? "Your Lattice" : undefined} aria-label={collapsed ? "Your Lattice" : undefined}
+                className={({ isActive }) => cn(
+                  "group flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors",
+                  collapsed && "justify-center px-0",
+                  isActive ? "bg-elevated font-medium text-text" : "text-muted hover:text-text hover:bg-elevated/60")}>
+                <Gem size={17} className="shrink-0 text-[var(--teal)]" />
+                {!collapsed && <span className="flex-1">Your Lattice</span>}
+              </NavLink>
+            )}
             {withFounder && (
               <NavLink to="/founder" onClick={onNavigate} title={collapsed ? "Steward" : undefined} aria-label={collapsed ? "Steward" : undefined}
                 className={({ isActive }) => cn(

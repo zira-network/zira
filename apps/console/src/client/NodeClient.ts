@@ -34,6 +34,11 @@ export class FreeTierError extends Error {
 // block) and the desktop app; the direct box3 gateway is a plain-http second chance for the desktop only.
 // (The old http box1:8645 target was the settler-busy master, which frequently hung; do not use it here.)
 export const PUBLIC_GATEWAYS = ["https://gateway.zira.network", "http://169.58.22.204:8646"];
+// Field-answer fallback also tries the well-connected serve relay (box2), where the answering miners are
+// peered, so a desktop-local node whose own field query timed out can still reach a real answer. Used ONLY
+// for asking the field, never for balances/history (a raw relay's ledger view can drift), so ledger
+// reconciliation stays on the canonical PUBLIC_GATEWAYS above.
+export const FIELD_GATEWAYS = [...PUBLIC_GATEWAYS, "http://164.68.97.111:8645"];
 const PUBLIC_GATEWAY = PUBLIC_GATEWAYS[0]!;
 
 export class NodeClient implements ZiraClient {
@@ -163,7 +168,7 @@ export class NodeClient implements ZiraClient {
       // once against the always-on public gateway so the user still gets a real field answer. Free ask (no
       // tip) since the fallback answers come from the gateway's field; mining/earning stay on the local node.
       if (this.fieldFallback && !PUBLIC_GATEWAYS.some((g) => this.base.startsWith(g)) && !args.signal?.aborted) {
-        for (const gateway of PUBLIC_GATEWAYS) {
+        for (const gateway of FIELD_GATEWAYS) {
           try {
             const gw = new NodeClient(gateway, false);
             return await gw.askField({ ...args, pay: false });

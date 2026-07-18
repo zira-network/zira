@@ -11,14 +11,14 @@ import { Card, Button, Input, Badge, useToast, EmptyState, Field, usePoll, PageH
 import { HardwarePanel } from "../components/HardwarePanel";
 import { HexField } from "../components/brand";
 import { NodeApi, type ModelRecommendation, type FieldModel, type MiningStatus, type Pricing } from "../lib/nodeApi";
-import { canonical, DOMAIN_META, PROTOCOL, type Domain, type HardwareProfile, type SignedTx, type Lock } from "@zira/protocol";
+import { canonical, DOMAIN_META, PROTOCOL, type Domain, type HardwareProfile, type SignedTx } from "@zira/protocol";
 import { formatZir, timeAgo } from "../lib/format";
 import { cn } from "../lib/cn";
 import { useZira } from "../store/useZira";
 import { loadReconciledHistory } from "../lib/history";
 import { useUnlock } from "../store/useUnlock";
 import { Wallet } from "../lib/keys";
-import { isDesktop } from "../lib/platform";
+import { isDesktop, getHardwareTelemetry, type HardwareTelemetry } from "../lib/platform";
 
 function formatBytes(n: number): string {
   if (!n || n < 1) return "0 B";
@@ -401,48 +401,6 @@ function BatteryPause({ miningEnabled, onPause }: { miningEnabled: boolean; onPa
   );
 }
 
-// Live field activity (spec §3.2): the terms/topics the field is converging on right now, from the Locks
-// the store already refreshes. Auto-updates with the store poll; confidence shown as 1 - cv (tighter
-// convergence = higher confidence). This is the activity the node helps seal as it serves.
-function LiveActivity({ locks }: { locks: Lock[] }) {
-  const sorted = [...locks].sort((a, b) => b.sealedAt - a.sealedAt);
-  const recent = sorted.slice(0, 8);
-  // Heartbeat freshness: if the newest seal is older than ~3 min the field is stale, so we drop the
-  // pulsing "live" affordance for an honest "idle" instead of animating on a stalled node.
-  const newest = sorted[0];
-  const fresh = !!newest && Date.now() - newest.sealedAt < 3 * 60 * 1000;
-  return (
-    <Card>
-      <div className="mb-2 flex items-center gap-2">
-        <Radio size={16} className="text-[var(--teal)]" /><h3 className="text-sm font-semibold">Live field activity</h3>
-        <span className="ml-auto inline-flex items-center gap-1 text-[11px] text-faint">
-          <span className={`inline-block h-1.5 w-1.5 rounded-full ${fresh ? "animate-pulse bg-[var(--teal)]" : "bg-[var(--text-faint)]"}`} /> {fresh ? "live" : newest ? "idle" : "waiting"}
-        </span>
-      </div>
-      {newest && <div className="mb-2 text-[11px] text-faint">Last sealed {timeAgo(newest.sealedAt)}</div>}
-      {recent.length === 0
-        ? <p className="text-xs text-faint">Waiting for the field to seal activity. Topics the network converges on appear here as they happen.</p>
-        : (
-          <div className="divide-y divide-hairline">
-            {recent.map((l) => {
-              const conf = Math.max(0, Math.min(1, 1 - l.cv));
-              return (
-                <div key={l.id} className="flex items-center justify-between gap-2 py-1.5 text-xs">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5"><Badge tone="indigo" className="text-[10px]">{DOMAIN_META[l.domain]?.label ?? l.domain}</Badge><span className="truncate text-text">{l.subject}</span></div>
-                    <div className="text-faint">{l.observationCount} observers · {timeAgo(l.sealedAt)}</div>
-                  </div>
-                  <span className="mono shrink-0 text-[var(--teal)]">{(conf * 100).toFixed(0)}%</span>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      <p className="mt-2 text-[11px] text-faint">Terms and topics the field is converging on right now. Your node helps seal these as it serves.</p>
-    </Card>
-  );
-}
-
 // Period earnings history (spec §3.3): totals + events over 1H/24H/7D/30D, computed client-side from the
 // address's signed tx history (coordination payouts, emission rewards, grants received). No backend change
 // needed; the ledger already records every earning as a signed, public transaction.
@@ -548,9 +506,60 @@ function HowYouEarn() {
   );
 }
 
+// Live machine telemetry (desktop only): hardware names + realtime CPU/RAM utilization from the Electron
+// main process (Node os module, no extra dependency). CPU% is the busy delta between polls. Power and
+// temperature need a native sensor module and are not shown; the panel degrades gracefully (renders nothing
+// when there is no desktop bridge, e.g. web/mobile).
+function MachineTelemetry() {
+  const [hw, setHw] = useState<HardwareTelemetry | null>(null);
+  useEffect(() => {
+    let live = true;
+    const tick = () => { const p = getHardwareTelemetry(); if (p) void p.then((h) => { if (live) setHw(h); }).catch(() => { /* optional */ }); };
+    tick();
+    const t = setInterval(tick, 2000);
+    return () => { live = false; clearInterval(t); };
+  }, []);
+  if (!hw) return null;
+  const bar = (pct: number) => (
+    <div className="h-1.5 overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--text-faint)_18%,transparent)]"><div className="h-full rounded-full bg-[var(--teal)] transition-[width] duration-500" style={{ width: Math.max(0, Math.min(100, pct)) + "%" }} /></div>
+  );
+  return (
+    <Card>
+      <div className="mb-1 flex items-center gap-2"><Cpu size={16} className="text-[var(--teal)]" /><h3 className="text-sm font-semibold">Your machine</h3></div>
+      <div className="text-xs text-muted">{hw.cpuModel} &middot; {hw.cpuCores} cores &middot; {hw.ramTotalGB.toFixed(0)} GB RAM &middot; {hw.platform}/{hw.arch}</div>
+      <div className="mt-0.5 text-xs text-muted">GPU: <span className="text-text">{hw.gpuModel && hw.gpuModel.trim() ? hw.gpuModel : "none detected (CPU mining)"}</span></div>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <div><div className="mb-1 flex justify-between text-[11px] text-faint"><span>CPU</span><span className="mono text-[var(--teal)]">{hw.cpuPct}%</span></div>{bar(hw.cpuPct)}</div>
+        <div><div className="mb-1 flex justify-between text-[11px] text-faint"><span>Memory</span><span className="mono">{hw.ramUsedGB.toFixed(1)} / {hw.ramTotalGB.toFixed(0)} GB</span></div>{bar(hw.ramPct)}</div>
+      </div>
+      <p className="mt-2 text-[11px] text-faint">Live utilization on this machine. Power and temperature need a native sensor module and are not shown here.</p>
+    </Card>
+  );
+}
+
+// External mining pool (dormant preview, aligned to pools.html). Today mining pays each miner directly to
+// their own wallet. A later release will let you point your mining at a pool: paste the pool's ZIR address
+// and the pool collects and distributes rewards by contribution, while your machine does the same work.
+function PoolSection() {
+  return (
+    <Card>
+      <div className="mb-2 flex items-center gap-2">
+        <Badge tone="neutral">Coming soon</Badge>
+        <h3 className="text-sm font-semibold">Mine in a pool</h3>
+      </div>
+      <p className="mb-3 text-xs text-muted">Today you mine directly and earn ZIR straight to your own wallet, no pool needed. Later you will be able to point your mining at a pool: paste a pool&apos;s ZIR address and the pool collects everyone&apos;s rewards and shares them out by contribution. Your machine keeps doing the same work; only where the reward lands changes.</p>
+      <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+        <Input placeholder="Pool ZIR address (zir1...)" disabled className="mono opacity-60" />
+        <Button variant="secondary" disabled title="Pool mining is coming in a later release">Connect to pool</Button>
+      </div>
+      <p className="mt-1 text-[11px] text-faint">Direct earning stays available and is the default. Pool mining is opt-in and arrives in a later release.</p>
+    </Card>
+  );
+}
+
 export function Mine() {
   const toast = useToast();
-  const { mode, isFounder, stats, balanceUZIR, hardware, nodeConfig, providerStatus, mining, localLaunchMiners, zti, address, locks, client,
+  const { mode, isFounder, stats, balanceUZIR, hardware, nodeConfig, providerStatus, mining, localLaunchMiners, zti, address, client,
     minerAddress, minerBalanceUZIR, nodeBehind, setMining, refreshStatus } = useZira();
   // Earnings shown here are read from the ledger (the authoritative source the wallet and Earnings history
   // use), not from provider inference counters, a coordination node earns emission/coordination payouts
@@ -886,6 +895,10 @@ export function Mine() {
 
       </Card>
 
+      {/* Your machine, always visible: hardware names (incl. GPU) + live CPU/RAM utilization. Kept out of the
+          collapsed details so a contributor immediately sees the hardware they are lending to the field. */}
+      <MachineTelemetry />
+
       {/* Field convergence: the 3-contributor earning gate, the single health panel that decides whether mining pays. */}
       <ConvergencePanel
         converged={convergedContributors}
@@ -896,9 +909,6 @@ export function Mine() {
         coordinationOnly={coordinationOnly}
         miningOn={Boolean(mining?.enabled)}
       />
-
-      {/* Live field activity: terms/topics the field is converging on right now. */}
-      <LiveActivity locks={locks} />
 
       {/* Answering visibility: the highest earning path, shown only when mining is on. */}
       {(mining?.enabled ?? false) && (
@@ -1139,6 +1149,9 @@ export function Mine() {
 
       {/* Honest, three-bullet explainer. */}
       <HowYouEarn />
+
+      {/* External mining pool: dormant preview of pool mining (paste a pool address in a later release). */}
+      <PoolSection />
 
       {/* Steward: models + assigned storage policy. Active launch authority adds models to the field. */}
       {isFounder && <FounderModels />}

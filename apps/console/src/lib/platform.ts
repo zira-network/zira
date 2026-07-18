@@ -1,7 +1,8 @@
 // apps/console/src/lib/platform.ts
 // Whether the Console is running inside the ZIRA desktop app. Mining (running a model on your CPU
 // or GPU) is desktop only, so these features are hidden on the web and on mobile.
-interface ZiraBridge { isDesktop: boolean; platform: string; version: string; resetAndRelaunch?: () => Promise<boolean>; resyncLedger?: () => Promise<boolean> }
+export interface HardwareTelemetry { cpuModel: string; cpuCores: number; cpuPct: number; gpuModel?: string; ramTotalGB: number; ramUsedGB: number; ramPct: number; platform: string; arch: string }
+interface ZiraBridge { isDesktop: boolean; platform: string; version: string; resetAndRelaunch?: () => Promise<boolean>; resyncLedger?: () => Promise<boolean>; hardware?: () => Promise<HardwareTelemetry> }
 
 export function isDesktop(): boolean {
   if (typeof window === "undefined") return false;
@@ -22,6 +23,13 @@ export function desktopResetAndRelaunch(): Promise<boolean> | null {
 // keeping the node identity + wallet + app storage intact. Returns null when not in the desktop app.
 export function desktopResyncLedger(): Promise<boolean> | null {
   const fn = (window as unknown as { zira?: ZiraBridge }).zira?.resyncLedger;
+  return typeof fn === "function" ? fn() : null;
+}
+
+// Desktop only: live machine telemetry (hardware names + CPU/RAM utilization) for the Mine page. Returns
+// null when not in the desktop app (web/mobile have no hardware bridge); the UI degrades gracefully.
+export function getHardwareTelemetry(): Promise<HardwareTelemetry> | null {
+  const fn = (window as unknown as { zira?: ZiraBridge }).zira?.hardware;
   return typeof fn === "function" ? fn() : null;
 }
 

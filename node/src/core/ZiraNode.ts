@@ -83,7 +83,7 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "2.6.5";
+const NODE_RELEASE_VERSION = "2.7.0";
 // Per-cycle coordination batch. Every funded+listed resonator is eligible; autonomousResonanceBatch picks
 // this many per 5-minute cycle by a DETERMINISTIC ZTI-WEIGHTED draw, so higher-trust resonators (anchors,
 // seeded 0.95/0.85/… by class) are driven most often and earn the most, while every other funded resonator
@@ -149,18 +149,25 @@ const FIELD_PARTICIPATION_MAX_PAYEES = envInt("ZIRA_FIELD_PARTICIPATION_MAX_PAYE
 // byte-identically — consensus-safe (like the union payee choice). All values are floats in "weight units":
 //   weight = BASE + (storage-serving ? STORAGE_BONUS) + min(ANSWER_CAP, answerCredits*ANSWER_UNIT)
 //                 + min(ZTI_CAP, zti*ZTI_UNIT), clamped to [BASE, CEILING].
-const FIELD_WEIGHT_BASE = Number(process.env.ZIRA_FIELD_WEIGHT_BASE ?? 1);
+// BASE is deliberately a small floor: a node that is merely live/coordinating (no model, no storage) earns
+// only a sliver, so "just being on" is never a meaningful income. The real earnings come from HARDWARE ENERGY
+// spent on the field: answering with a model and serving verified storage. This is the intended economics
+// ("mining off or idle = tiny; running the AI/storage = the bulk"). Fully settler-computed, so tuning these
+// changes payout AMOUNTS only and can never diverge the state root.
+const FIELD_WEIGHT_BASE = Number(process.env.ZIRA_FIELD_WEIGHT_BASE ?? 0.15);
 const FIELD_WEIGHT_STORAGE_BONUS = Number(process.env.ZIRA_FIELD_WEIGHT_STORAGE_BONUS ?? 0.5);
 // Bigger verified storage earns more: a per-GiB bonus (only for miners that PASSED the chunk challenge, so a
 // self-reported size cannot be gamed), capped so a huge disk cannot dominate the pool.
 const FIELD_WEIGHT_STORAGE_GIB_UNIT = Number(process.env.ZIRA_FIELD_WEIGHT_STORAGE_GIB_UNIT ?? 0.05);
 const FIELD_WEIGHT_STORAGE_GIB_CAP = Number(process.env.ZIRA_FIELD_WEIGHT_STORAGE_GIB_CAP ?? 2);
+// Answering the field with a running model is the highest-energy work, so it is the dominant weight component:
+// a node actually doing AI inference earns many multiples of a bare live node.
 const FIELD_WEIGHT_ANSWER_UNIT = Number(process.env.ZIRA_FIELD_WEIGHT_ANSWER_UNIT ?? 0.5);
-const FIELD_WEIGHT_ANSWER_CAP = Number(process.env.ZIRA_FIELD_WEIGHT_ANSWER_CAP ?? 4);
+const FIELD_WEIGHT_ANSWER_CAP = Number(process.env.ZIRA_FIELD_WEIGHT_ANSWER_CAP ?? 6);
 const FIELD_WEIGHT_ZTI_CAP = Number(process.env.ZIRA_FIELD_WEIGHT_ZTI_CAP ?? 1);
-// Wider range (was 6) so a strong, hard-working machine can earn many times a bare live node's share, while
-// the BASE floor keeps a small honest miner from ever going to zero.
-const FIELD_WEIGHT_CEILING = Number(process.env.ZIRA_FIELD_WEIGHT_CEILING ?? 8.5);
+// Wide range so a strong, hard-working machine earns ~60x a bare live node's share; the small BASE floor keeps
+// an honest coordinating miner from ever going to exactly zero, but real hardware work is what pays.
+const FIELD_WEIGHT_CEILING = Number(process.env.ZIRA_FIELD_WEIGHT_CEILING ?? 10);
 // Recency decay applied to a miner's accumulated coordination-answer credits once per paid cycle, so recent
 // work dominates and stale credits fade (a rolling recency-weighted answer count).
 const FIELD_ANSWER_DECAY = Number(process.env.ZIRA_FIELD_ANSWER_DECAY ?? 0.8);
@@ -1967,14 +1974,35 @@ export class ZiraNode {
   // A charge older than this is no longer paid (the query has aged out of the answer window); bounds settler work.
   private static REAL_USER_SETTLE_WINDOW_MS = Number(process.env.ZIRA_REAL_USER_SETTLE_WINDOW_MS ?? 30 * 60_000);
 
-  private autonomousResonanceEligible(): Resonator[] {
+  /** Whether the signed-anchor earning gate is live now (activation epoch reached). Dormant (act<=0) =>
+   *  false, so every anchor resonator earns exactly as today (byte-identical). Env-overridable
+   *  (ZIRA_SIGNED_ANCHOR_EPOCH) for operational arming, matching the other activation gates. */
+  signedAnchorEarningActive(now = Date.now()): boolean {
+    const env = Number(process.env.ZIRA_SIGNED_ANCHOR_EPOCH);
+    const act = Number.isFinite(env) && env > 0 ? Math.floor(env) : PROTOCOL.SIGNED_ANCHOR_EARNING_ACTIVATION_EPOCH;
+    return act > 0 && epochOf(now) >= act;
+  }
+  /** True if this resonator is a steward-held (unsigned) anchor placeholder — an "anchor-<seat>" resonator
+   *  still owned by the anchor steward, i.e. not yet assigned to a real user. Seat ownership is
+   *  root-committed, so this is deterministic on every node. */
+  isUnsignedAnchorResonator(r: Resonator): boolean {
+    return r.id.startsWith("anchor-") && r.owner === this.soft.anchorStewardAddress;
+  }
+
+  private autonomousResonanceEligible(now = Date.now()): Resonator[] {
     // Every funded, listed, resonance-enabled resonator is eligible — NOT just the 12 alphabetically-first
     // (the old `.slice(0, 12)` sorted by id starved every user-created resonator and ~500 anchors, so only
     // anchor-A-001..012 ever earned). Ordered by ZTI desc (deterministic id tiebreak) so if the safety cap
     // ever bites it keeps the highest-trust resonators; the per-cycle ZTI-weighted draw in
     // autonomousResonanceBatch does the actual prioritization.
+    // Signed-anchor gate (dormant until armed): once live, an anchor resonator earns only when its seat is
+    // SIGNED to a real owner (owner != the anchor steward). Seat ownership is root-committed, so signed vs
+    // steward-placeholder is deterministic on every node; earning still flows through the same single
+    // settler-signed batch_transfer. While dormant this filter is a no-op (byte-identical to today).
+    const gateSigned = this.signedAnchorEarningActive(now);
     return [...this.soft.resonators.values()]
       .filter((r) => r.listed && r.resonanceEnabled && r.status !== "paused" && (r.balanceUZIR ?? 0) > 0)
+      .filter((r) => !gateSigned || !this.isUnsignedAnchorResonator(r))
       .sort((a, b) => (b.zti ?? 0) - (a.zti ?? 0) || a.id.localeCompare(b.id))
       .slice(0, AUTONOMOUS_RESONANCE_ELIGIBLE_CAP);
   }
@@ -2803,6 +2831,13 @@ export class ZiraNode {
     return PRICING.QUERY_TIER_MULT[queryTier(chars)];
   }
 
+  /** Free-tier cost weight of a query by its work tier (quick 1 / standard 2 / deep 4). ALWAYS on (local
+   *  rate-limit policy, not consensus, never touches the state root): a heavier question consumes more of the
+   *  free allowance, so the free tier cannot fund unlimited deep work and stays fair across askers. */
+  queryFreeCost(q: QueryMsg): number {
+    return PRICING.QUERY_TIER_MULT[queryTier(queryComplexityChars(q.question, q.history))];
+  }
+
   /** The network coordination wallet an asker funds a paid query into (the settler reads charges back from it). */
   queryChargeWallet(): Address { return settlementWalletsFor(this.genesis.network).network; }
 
@@ -3010,6 +3045,19 @@ export class ZiraNode {
 
   // ---- views ----
 
+  // Smoothed activeNodes for the stats DISPLAY only (never used in payout/emission/state root; peerCount is
+  // used only for connectivity + resync guards, verified fork-safe). The raw libp2p peer count jitters as
+  // connections open/close, which made the explorer's "machines" figure jump; report the MEDIAN of recent
+  // samples so the displayed field size stays stable and transient spikes/drops are ignored.
+  private recentActiveNodes: number[] = [];
+  private smoothActiveNodes(raw: number): number {
+    const buf = this.recentActiveNodes;
+    buf.push(raw);
+    if (buf.length > 24) buf.shift();
+    const sorted = [...buf].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)] ?? raw;
+  }
+
   stats(): NetworkStats & { version: string; peers: number; finalizedEpoch: number; stateRoot: string; pool: { txs: number; observations: number }; models: number; mastersCount: number; isFounder: boolean; founderAddress: string; founderAddresses: string[] } {
     const now = Date.now();
     const accounts = [...this.state.accounts.values()];
@@ -3023,7 +3071,7 @@ export class ZiraNode {
       network: this.genesis.network,
       phase: "live",
       providersOnline: this.soft.onlineProviders(now).length,
-      activeNodes: this.net.peerCount() + 1,
+      activeNodes: this.smoothActiveNodes(this.net.peerCount() + 1),
       avgZti: Number(avgZti.toFixed(4)),
       locksPerMinute: this.state.recentLocks(200).filter((l) => now - l.sealedAt < 60000).length,
       circulatingUZIR: issued - this.state.supply.burned,

@@ -31,6 +31,8 @@ export function WalletPage() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [showBackup, setShowBackup] = useState(false);
+  // History depth: start recent, deepen toward all-time on demand ("Show more").
+  const [historyLimit, setHistoryLimit] = useState(80);
 
   async function loadHistory() {
     if (!client || !address) { setHistory([]); return; }
@@ -39,7 +41,7 @@ export function WalletPage() {
     try {
       // Local node first, reconciled against the public gateways when empty or when the node is behind the
       // mesh, so an imported/older wallet or a lagging home miner still shows its full earning history.
-      const txs = await loadReconciledHistory(client, address, 80, nodeBehind);
+      const txs = await loadReconciledHistory(client, address, historyLimit, nodeBehind);
       setHistory(txs);
     } catch (e) {
       setHistoryError(e instanceof Error ? e.message : "Could not load wallet history.");
@@ -51,7 +53,7 @@ export function WalletPage() {
   useEffect(() => {
     void loadHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, address, balanceUZIR, nodeBehind]);
+  }, [client, address, balanceUZIR, nodeBehind, historyLimit]);
 
   if (!hasWallet) {
     return (
@@ -83,7 +85,7 @@ export function WalletPage() {
               <button onClick={() => { navigator.clipboard.writeText(address ?? ""); toast.push("Address copied"); }}><Copy size={13} className="text-muted hover:text-text" /></button>
             </div>
             <p className="text-xs text-muted">This is the wallet your node mines into. Its key stays on your machine and never enters the browser, so there is nothing to unlock here. Mining and coordination earnings arrive at this address directly.</p>
-            <p className="mt-2 text-xs text-faint">To back it up, save the file <span className="mono">identity.json</span> in your ZIRA data folder. Anyone with that file controls this wallet.</p>
+            <NodeWalletBackup />
             <NodeWalletImport />
           </Card>
         ) : (
@@ -109,7 +111,7 @@ export function WalletPage() {
 
       {showBackup && !nodeWallet && <BackupPanel onClose={() => setShowBackup(false)} />}
       {!nodeWallet && <ImportWalletCard />}
-      <TxHistory history={history} address={address} loading={historyLoading} error={historyError} onRefresh={loadHistory} />
+      <TxHistory history={history} address={address} loading={historyLoading} error={historyError} onRefresh={loadHistory} canLoadMore={history.length >= historyLimit} onLoadMore={() => setHistoryLimit((n) => n + 200)} />
     </div>
   );
 }
@@ -271,6 +273,43 @@ function SendForm() {
   );
 }
 
+// Back up the node's own wallet key. The private key lives in identity.json on this machine; this reveals it
+// (via the loopback-only /wallet/export route) so the user can copy it somewhere safe, with the same warning
+// as the browser-wallet backup. Nothing is sent anywhere; the reveal is local and behind an explicit click.
+function NodeWalletBackup() {
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [priv, setPriv] = useState("");
+  async function reveal() {
+    setBusy(true);
+    try {
+      const w = await NodeApi.walletExport();
+      setPriv(w.privateKey);
+      setOpen(true);
+    } catch (e) { toast.push(e instanceof Error ? e.message : "Could not read the node key.", "danger"); }
+    finally { setBusy(false); }
+  }
+  function close() { setOpen(false); setPriv(""); }
+  return (
+    <div className="mt-3">
+      {!open ? (
+        <Button variant="ghost" onClick={reveal} disabled={busy}><Download size={14} /> {busy ? "Reading key…" : "Back up node wallet"}</Button>
+      ) : (
+        <div className="rounded-lg border border-[color-mix(in_srgb,var(--warn)_30%,transparent)] bg-[color-mix(in_srgb,var(--warn)_6%,transparent)] p-3">
+          <div className="mb-2 flex items-center gap-2 text-[var(--warn)]"><AlertTriangle size={15} /><span className="text-sm font-semibold">Back up your node key, carefully</span></div>
+          <p className="mb-2 text-xs text-muted">Anyone with this key controls this node&apos;s wallet and its earnings. If you lose it, no one can recover it. Never paste it into a website or share it. Write it down and keep it somewhere safe. It is also saved as <span className="mono">identity.json</span> in your ZIRA data folder.</p>
+          <div className="mono break-all rounded-lg border border-hairline bg-base p-2 text-xs">{priv}</div>
+          <div className="mt-2 flex gap-2">
+            <Button variant="secondary" onClick={() => { navigator.clipboard.writeText(priv); toast.push("Node key copied. Store it somewhere safe."); }}>Copy key</Button>
+            <Button variant="ghost" onClick={close}>Hide</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Import a different wallet as this node's mining identity. Writes the key to the node (loopback-only)
 // and restarts the app so the node reloads it, after which the node mines into the imported wallet.
 function NodeWalletImport() {
@@ -388,7 +427,7 @@ function ImportWalletCard() {
   );
 }
 
-function TxHistory({ history, address, loading, error, onRefresh }: { history: SignedTx[]; address: string | null; loading: boolean; error: string; onRefresh: () => void }) {
+function TxHistory({ history, address, loading, error, onRefresh, canLoadMore, onLoadMore }: { history: SignedTx[]; address: string | null; loading: boolean; error: string; onRefresh: () => void; canLoadMore: boolean; onLoadMore: () => void }) {
   const directionFor = (tx: SignedTx) => {
     if (tx.to === address || tx.kind === "reward" || tx.kind === "reserve_grant") return "in";
     if (tx.from === address && tx.to !== address) return "out";
@@ -471,6 +510,11 @@ function TxHistory({ history, address, loading, error, onRefresh }: { history: S
               </div>
             </div>
           );})}
+        </div>
+      )}
+      {canLoadMore && !loading && (
+        <div className="mt-3 text-center">
+          <Button variant="ghost" onClick={onLoadMore}>Show more history</Button>
         </div>
       )}
     </Card>

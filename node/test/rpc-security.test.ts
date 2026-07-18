@@ -44,6 +44,8 @@ test("gateway mode: public read + public query succeed, sensitive route blocked 
     wipeAndExit: () => { wiped = true; },
     stats: () => ({ ok: true, peers: 0 }),
     publishQuery: (qq: any) => { publishedQuery = qq; },
+    queryFreeCost: () => 1,
+    realUserPayoutActive: () => false,
     models: { miningEnabled: () => false },
   };
   const port = 18646;

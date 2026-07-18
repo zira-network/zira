@@ -15,8 +15,9 @@ function makeService(): ModelService {
   const dir = mkdtempSync(join(tmpdir(), "zira-switch-"));
   const identity = keypairFromPrivate("1a".repeat(32));
   // Minimal net stub: setMining/announceLocal only call net.handle (in init, which we never call) and
-  // the announce callback. We pass a no-op announce and a net whose handle is a no-op.
-  const net = { handle: () => {} } as any;
+  // the announce callback. peers()/peerCount() are here so the replication loop enabling mining kicks off
+  // sees no peers and stays a no-op (otherwise it throws "net.peers is not a function" during teardown).
+  const net = { handle: () => {}, peers: () => [], peerCount: () => 0 } as any;
   return new ModelService(dir, net, identity, identity.address, () => {});
 }
 

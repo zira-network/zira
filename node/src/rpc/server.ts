@@ -59,12 +59,19 @@ function queryQuota(address: string, limit: number, windowMs: number): { limit: 
   if (!r || now - r.windowStart > windowMs) return { limit, used: 0, remaining: limit, resetMs: 0, windowMs };
   return { limit, used: r.count, remaining: Math.max(0, limit - r.count), resetMs: Math.max(0, windowMs - (now - r.windowStart)), windowMs };
 }
-function consumeQuery(address: string, limit: number, windowMs: number): { ok: boolean; remaining: number; resetMs: number } {
+// `cost` is the query's work-tier weight (quick 1 / standard 2 / deep 4): a heavier question consumes more
+// of the free allowance, so free-cost depends on the task. Defaults to 1 (existing behavior).
+function consumeQuery(address: string, limit: number, windowMs: number, cost = 1): { ok: boolean; remaining: number; resetMs: number } {
   const now = Date.now();
+  const c = Math.max(1, Math.floor(cost));
   const r = queryRates.get(address);
-  if (!r || now - r.windowStart > windowMs) { queryRates.set(address, { count: 1, windowStart: now }); return { ok: true, remaining: limit - 1, resetMs: windowMs }; }
-  if (r.count >= limit) return { ok: false, remaining: 0, resetMs: windowMs - (now - r.windowStart) };
-  r.count++;
+  if (!r || now - r.windowStart > windowMs) {
+    if (c > limit) return { ok: false, remaining: Math.max(0, limit), resetMs: windowMs };
+    queryRates.set(address, { count: c, windowStart: now });
+    return { ok: true, remaining: limit - c, resetMs: windowMs };
+  }
+  if (r.count + c > limit) return { ok: false, remaining: Math.max(0, limit - r.count), resetMs: windowMs - (now - r.windowStart) };
+  r.count += c;
   return { ok: true, remaining: limit - r.count, resetMs: windowMs - (now - r.windowStart) };
 }
 
@@ -616,10 +623,12 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
       if (!contributing && fqLimit <= 0) {
         return json(res, { ok: false, freeTierEnded: true, limit: 0, reason: "the free tier has ended. fund a wallet to ask with ZIR, or use your own machine (Machine tier)" }, 402);
       }
-      const rl = contributing ? null : consumeQuery(clientIp(req), fqLimit, fqWindow);
-      if (rl && !rl.ok) return json(res, { ok: false, reason: "free tier reached: too many free questions for now", retryInMs: rl.resetMs, limit: fqLimit, windowMs: fqWindow }, 429);
+      // Free-cost by task: a heavier question consumes more of the free allowance (quick 1 / standard 2 / deep 4).
+      const cost = node.queryFreeCost(query);
+      const rl = contributing ? null : consumeQuery(clientIp(req), fqLimit, fqWindow, cost);
+      if (rl && !rl.ok) return json(res, { ok: false, reason: "free tier reached: too many free questions for now", retryInMs: rl.resetMs, limit: fqLimit, windowMs: fqWindow, cost }, 429);
       node.publishQuery(query);
-      return json(res, { ok: true, freeTier: contributing ? { contributor: true, unlimited: true, remaining: -1 } : { limit: fqLimit, remaining: rl!.remaining, resetMs: rl!.resetMs } });
+      return json(res, { ok: true, freeTier: contributing ? { contributor: true, unlimited: true, remaining: -1 } : { limit: fqLimit, remaining: rl!.remaining, resetMs: rl!.resetMs, cost } });
     }
     case "GET /query/quota": {
       if (node.models.miningEnabled()) return json(res, { limit: -1, used: 0, remaining: -1, resetMs: 0, windowMs: 0, contributor: true, unlimited: true });

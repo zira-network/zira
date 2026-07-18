@@ -327,3 +327,35 @@ option {
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
   .animate-breathe { animation: none; }
 }
+
+/* Anchor class glyphs (mirrors zira-field/anchors.html). Each class animates with its signature motif; the
+   reduced-motion block above already neutralizes these for users who ask for less motion. */
+.anchor-glyph circle, .anchor-glyph polygon, .anchor-glyph line { transform-box: fill-box; transform-origin: center; }
+.anchor-glyph-tile { transition: transform .35s ease, box-shadow .35s ease; }
+@keyframes anRadar { 0% { opacity: .65; transform: scale(.68); } 70%, 100% { opacity: 0; transform: scale(1.18); } }
+@keyframes anBlink { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+@keyframes anCore  { 0%, 100% { opacity: .7; transform: scale(1); } 50% { opacity: 1; transform: scale(1.22); } }
+@keyframes anSpin  { to { transform: rotate(360deg); } }
+.anchor-glyph[data-anchor-class="A"] circle:nth-of-type(1) { animation: anRadar 3.4s ease-out infinite; }
+.anchor-glyph[data-anchor-class="A"] circle:nth-of-type(2) { animation: anRadar 3.4s ease-out infinite 1.15s; }
+.anchor-glyph[data-anchor-class="A"] circle:nth-of-type(3) { animation: anCore 3.4s ease-in-out infinite; }
+.anchor-glyph[data-anchor-class="B"] circle:nth-of-type(1) { animation: anBlink 2.6s ease-in-out infinite 0s; }
+.anchor-glyph[data-anchor-class="B"] circle:nth-of-type(2) { animation: anBlink 2.6s ease-in-out infinite .32s; }
+.anchor-glyph[data-anchor-class="B"] circle:nth-of-type(3) { animation: anBlink 2.6s ease-in-out infinite .64s; }
+.anchor-glyph[data-anchor-class="C"] circle:nth-of-type(n) { animation: anBlink 3s ease-in-out infinite; }
+.anchor-glyph[data-anchor-class="C"] circle:nth-of-type(2) { animation-delay: .5s; }
+.anchor-glyph[data-anchor-class="C"] circle:nth-of-type(3) { animation-delay: 1s; }
+.anchor-glyph[data-anchor-class="C"] circle:nth-of-type(4) { animation-delay: 1.5s; }
+.anchor-glyph[data-anchor-class="C"] circle:nth-of-type(5) { animation-delay: 2s; }
+.anchor-glyph[data-anchor-class="C"] circle:nth-of-type(6) { animation-delay: 2.5s; }
+.anchor-glyph[data-anchor-class="D"] circle { animation: anBlink 2.8s ease-in-out infinite; }
+.anchor-glyph[data-anchor-class="D"] circle:nth-of-type(2) { animation-delay: .15s; }
+.anchor-glyph[data-anchor-class="D"] circle:nth-of-type(3) { animation-delay: .3s; }
+.anchor-glyph[data-anchor-class="D"] circle:nth-of-type(5) { animation-delay: .3s; }
+.anchor-glyph[data-anchor-class="D"] circle:nth-of-type(6) { animation-delay: .45s; }
+.anchor-glyph[data-anchor-class="D"] circle:nth-of-type(8) { animation-delay: .45s; }
+.anchor-glyph[data-anchor-class="D"] circle:nth-of-type(9) { animation-delay: .6s; }
+.anchor-glyph[data-anchor-class="E"] circle:nth-of-type(1) { animation: anBlink 2.4s ease-in-out infinite 0s; }
+.anchor-glyph[data-anchor-class="E"] circle:nth-of-type(2) { animation: anBlink 2.4s ease-in-out infinite 1.2s; }
+.anchor-glyph[data-anchor-class="F"] polygon { animation: anSpin 26s linear infinite; }
+.anchor-glyph[data-anchor-class="F"] circle { animation: anCore 3.2s ease-in-out infinite; }

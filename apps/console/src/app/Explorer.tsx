@@ -4,6 +4,7 @@
 // same public data an exchange or indexer reads. Every panel shows live data or an honest empty state.
 import { useEffect, useState, type ReactNode } from "react";
 import { Copy, ChevronDown, ChevronRight } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { PROTOCOL, TOTAL_ANCHOR_SEATS, type Lock, type SignedTx } from "@zira/protocol";
 import {
   Card, Badge, Meter, Select, Button, Input, PageHeader,
@@ -214,10 +215,11 @@ function TxExplorer() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [open, setOpen] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
+  const [sp] = useSearchParams();
+  const [query, setQuery] = useState(sp.get("q") ?? "");
   const [kind, setKind] = useState("all");
   // address filter: show only events touching this address (as sender or recipient).
-  const [addr, setAddr] = useState("");
+  const [addr, setAddr] = useState(sp.get("addr") ?? "");
   const [page, setPage] = useState(0);
   const slow = useSlowHint(loading);
 

@@ -94,6 +94,9 @@ interface ZiraState {
   // regardless of whether the running node currently holds that steward key.
   isStewardWallet: boolean;
   stewardKind: StewardKind;
+  // true when the active wallet holds >= 1 anchor seat. Reveals the separate "Your Lattice" owner space
+  // and its nav entry; false hides them. Refreshed (throttled) from the owned-only /anchors/mine endpoint.
+  ownsAnchors: boolean;
   // true when steward ACTIONS are gated server-side: the active wallet is a steward wallet but the node
   // is not running with that steward key, so signed steward routes would 403. The panel stays visible
   // (read-only) with an inline note when this is true.
@@ -157,6 +160,9 @@ const NET_VIEW_TTL_MS = 20_000;
 let netViewAt = 0;
 let netViewAddr = "";
 let netView: { balanceUZIR: number; emittedUZIR: number } | null = null;
+// Throttle the owned-anchors reveal check (ownership changes rarely; the endpoint is owned-only/small).
+let ownsAnchorsAt = 0;
+let ownsAnchorsAddr = "";
 
 export const useZira = create<ZiraState>((set, get) => ({
   client: null,
@@ -182,6 +188,7 @@ export const useZira = create<ZiraState>((set, get) => ({
   isFounder: false,
   isStewardWallet: false,
   stewardKind: "none",
+  ownsAnchors: false,
   stewardActionsGated: false,
   providerOn: false,
   hardware: null,
@@ -312,6 +319,16 @@ export const useZira = create<ZiraState>((set, get) => ({
       // Anchor event status gates the contribute section on EVERY client (web/auto users on the gateway
       // included), so it is fetched here in refresh() rather than the node-only refreshStatus.
       try { patch.anchorEvent = await NodeApi.getAnchorEvent(); } catch { /* anchor event status optional */ }
+      // Reveal the separate "Your Lattice" owner space only when this wallet holds a seat. Owned-only
+      // endpoint, throttled ~30s (ownership changes rarely). Cleared immediately when there is no wallet.
+      if (!address) { patch.ownsAnchors = false; }
+      else {
+        const nowA = Date.now();
+        if (ownsAnchorsAddr !== address) { ownsAnchorsAddr = address; ownsAnchorsAt = 0; }
+        if (nowA - ownsAnchorsAt > 30_000) {
+          try { const mine = await NodeApi.myAnchors(address); patch.ownsAnchors = mine.length > 0; ownsAnchorsAt = nowA; } catch { /* optional */ }
+        }
+      }
       set(patch);
     } catch {
       // keep last good values

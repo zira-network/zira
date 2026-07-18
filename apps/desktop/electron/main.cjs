@@ -14,6 +14,7 @@ const { spawn } = require("node:child_process");
 const path = require("node:path");
 const http = require("node:http");
 const fs = require("node:fs");
+const os = require("node:os");
 
 // The app runs its OWN node on its own ports, so it never collides with a separately-running mesh on
 // the default ports (8645/9645/9646). If a mesh is found there, the app bootstraps to it and joins the
@@ -326,6 +327,60 @@ ipcMain.handle("zira:relaunch", async () => {
   app.relaunch();
   app.exit(0);
   return true;
+});
+
+// Machine telemetry for the Mine page: hardware names + live CPU/RAM utilization from Node's os module (no
+// extra dependency). Power/temperature need a native sensor module and are NOT exposed here, so the UI shows
+// what is available and degrades gracefully. CPU% is sampled as the busy delta between successive calls.
+let _prevCpu = null;
+function _cpuPct() {
+  const cpus = os.cpus() || [];
+  let idle = 0, total = 0;
+  for (const c of cpus) { for (const k in c.times) total += c.times[k]; idle += c.times.idle; }
+  if (!_prevCpu) { _prevCpu = { idle, total }; return 0; }
+  const dIdle = idle - _prevCpu.idle, dTotal = total - _prevCpu.total;
+  _prevCpu = { idle, total };
+  return dTotal > 0 ? Math.max(0, Math.min(100, Math.round((1 - dIdle / dTotal) * 100))) : 0;
+}
+// GPU name, detected once and cached (it does not change during a session). Any vendor: PowerShell CIM on
+// Windows (NVIDIA/AMD/Intel alike), system_profiler on macOS, lspci on Linux. Best-effort, never throws.
+let _gpuName = null; // null = not yet detected, "" = detected none
+function _detectGpu() {
+  if (_gpuName !== null) return _gpuName;
+  const { execSync } = require("node:child_process");
+  const run = (cmd, timeout) => { try { return execSync(cmd, { timeout, encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true }).trim(); } catch { return ""; } };
+  let name = "";
+  try {
+    if (process.platform === "win32") {
+      const out = run('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "(Get-CimInstance Win32_VideoController | Where-Object { $_.Name } | Select-Object -First 1 -ExpandProperty Name)"', 8000);
+      name = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0] || "";
+    } else if (process.platform === "darwin") {
+      const out = run("system_profiler SPDisplaysDataType 2>/dev/null", 6000);
+      const m = out.match(/Chipset Model:\s*(.+)/);
+      name = m ? m[1].trim() : "";
+    } else {
+      const out = run('lspci 2>/dev/null | grep -i "vga\\|3d\\|display"', 2500);
+      const line = out.split(/\r?\n/).filter(Boolean)[0] || "";
+      name = line.includes(":") ? line.slice(line.lastIndexOf(":") + 1).trim() : line.trim();
+    }
+  } catch { name = ""; }
+  _gpuName = name;
+  return _gpuName;
+}
+ipcMain.handle("zira:hardware", () => {
+  const cpus = os.cpus() || [];
+  const totalMem = os.totalmem(), freeMem = os.freemem();
+  return {
+    cpuModel: cpus[0] && cpus[0].model ? String(cpus[0].model).trim() : "CPU",
+    cpuCores: cpus.length,
+    cpuPct: _cpuPct(),
+    gpuModel: _detectGpu(),
+    ramTotalGB: totalMem / 1e9,
+    ramUsedGB: (totalMem - freeMem) / 1e9,
+    ramPct: totalMem ? Math.round(((totalMem - freeMem) / totalMem) * 100) : 0,
+    platform: process.platform,
+    arch: process.arch,
+  };
 });
 
 // The application menu bar is intentionally off (Menu.setApplicationMenu(null) above). Copy/paste and

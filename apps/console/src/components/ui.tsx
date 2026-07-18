@@ -3,7 +3,7 @@
 import {
   createContext, useContext, useState, useCallback, useEffect, useRef,
   type ReactNode, type ButtonHTMLAttributes, type InputHTMLAttributes,
-  type TextareaHTMLAttributes, type SelectHTMLAttributes,
+  type TextareaHTMLAttributes, type SelectHTMLAttributes, type CSSProperties,
 } from "react";
 import { X } from "lucide-react";
 import { cn } from "../lib/cn";
@@ -22,8 +22,8 @@ export function Button({ variant = "secondary", className, children, ...props }:
 }
 
 // ---- Card ----
-export function Card({ className, children, onClick }: { className?: string; children: ReactNode; onClick?: () => void }) {
-  return <div onClick={onClick} className={cn("relative overflow-hidden rounded-xl border border-hairline bg-surface p-5 text-text elevate", onClick && "lift cursor-pointer", className)}><div className="relative z-[1]">{children}</div></div>;
+export function Card({ className, children, onClick, style }: { className?: string; children: ReactNode; onClick?: () => void; style?: CSSProperties }) {
+  return <div onClick={onClick} style={style} className={cn("relative overflow-hidden rounded-xl border border-hairline bg-surface p-5 text-text elevate", onClick && "lift cursor-pointer", className)}><div className="relative z-[1]">{children}</div></div>;
 }
 
 // ---- Field: a labelled form row with an optional hint ----

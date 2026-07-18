@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ChevronLeft, ChevronRight, CircuitBoard, Info, Search, Star, X } from "lucide-react";
 import {
-  DOMAINS, DOMAIN_META, PROTOCOL, ANCHOR_CLASSES, ANCHOR_CLASS_ZTI,
+  DOMAINS, DOMAIN_META, ANCHOR_CLASSES, ANCHOR_CLASS_ZTI,
   type AnchorClass, type Listing, type Domain, type Task, type TaskStatus,
 } from "@zira/protocol";
 import { Card, Button, Input, Select, Badge, Meter, Modal, Textarea, useToast, EmptyState, LoadingState, ErrorState, useSlowHint, PageHeader } from "../components/ui";
@@ -16,6 +16,7 @@ import { makeSignedTx, zirToUzir } from "../lib/tx";
 import { formatZir, ztiLabel, shortAddress, timeAgo } from "../lib/format";
 import { featureEnabled } from "../lib/phase";
 import { NodeApi, type Pricing } from "../lib/nodeApi";
+import { AnchorGlyph, anchorClassColor } from "../components/anchorClass";
 
 type Sort = "zti" | "price" | "jobs" | "recent" | "domainZti";
 type Kind = "all" | "anchor" | "network";
@@ -121,6 +122,9 @@ export function Marketplace() {
     const term = q.trim().toLowerCase();
     return list.filter((l) => {
       const ai = anchorInfo(l.resonatorId);
+      // Discover shows every assigned anchor resonator coordinating the field, whether it is still held by
+      // the steward reserve or already signed to an owner. The signed/unsigned distinction governs earning
+      // and ownership (Lattice), not visibility, so the directory reflects the whole active core.
       if (kind === "anchor" && !ai) return false;
       if (kind === "network" && (ai || (address && l.owner === address))) return false;
       if (term && !(`${l.name} ${l.purpose}`.toLowerCase().includes(term))) return false;
@@ -128,7 +132,7 @@ export function Marketplace() {
     });
   }, [list, kind, q, address]);
 
-  // Honest top-of-page metrics over the full loaded directory.
+  // Honest top-of-page metric: every anchor resonator in the directory, matching what shows.
   const anchorCount = useMemo(() => list.filter((l) => anchorInfo(l.resonatorId)).length, [list]);
   const topZti = useMemo(() => list.reduce((m, l) => Math.max(m, l.zti), 0), [list]);
 
@@ -261,13 +265,17 @@ export function Marketplace() {
             // When a domain filter is active, show that domain's specific trust beside the overall meter.
             const domainZti = domain ? l.ztiByDomain[domain] : undefined;
             return (
-              <Card key={l.resonatorId} className="lift cursor-pointer" onClick={() => setPicked(l)}>
+              <Card key={l.resonatorId} className="lift cursor-pointer" onClick={() => setPicked(l)}
+                style={ai ? { borderColor: `color-mix(in srgb, ${anchorClassColor(ai.cls)} 24%, var(--border))` } : undefined}>
                 <div className="flex items-start justify-between gap-2">
-                  <span className="min-w-0 font-semibold leading-tight">{l.name}</span>
+                  <div className="flex min-w-0 items-center gap-2">
+                    {ai && <AnchorGlyph cls={ai.cls} size={22} boxed />}
+                    <span className="min-w-0 font-semibold leading-tight">{l.name}</span>
+                  </div>
                   <span className="shrink-0 mono text-sm text-[var(--teal)]">{formatZir(l.priceUZIR)} ZIR</span>
                 </div>
                 <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-faint">
-                  {ai && <Badge tone="teal" className="text-[10px]">Anchor {ai.cls} · {ai.seatId}</Badge>}
+                  {ai && <span className="text-[10px] font-medium" style={{ color: anchorClassColor(ai.cls) }}>Anchor {ai.cls} · {ai.seatId}</span>}
                   {address && l.owner === address && <Badge tone="indigo" className="text-[10px]">yours</Badge>}
                   <span className="inline-flex items-center gap-1"><Star size={11} className="text-[var(--teal)]" /> {ztiLabel(l.zti)}</span>
                   <span>by {shortAddress(l.owner)}</span>

@@ -134,7 +134,7 @@ export const PROTOCOL = {
   // Cost to CREATE (stand up) a new Resonator: the minimum ZIR the owner must fund the Resonator's agent
   // wallet with at creation, so it has a real operating float to learn and coordinate from day one, and
   // so standing up a Resonator carries a meaningful, non-trivial commitment (anti-spam for the Discover
-  // directory). This raises the prior effective floor (20 ZIR, console-only) to a meaningful 1,000 ZIR
+  // directory). This raises the prior effective floor (20 ZIR, console-only) to a meaningful 100 ZIR
   // and makes it a canonical protocol constant enforced by the node. It is NOT a fee/burn and mints no
   // ZIR: it is the owner's own ZIR moved into their own Resonator's wallet (withdrawable later), so
   // supply, emission, and the genesis hash are all unchanged. Sized so a Resonator is a funded agent with
@@ -171,6 +171,15 @@ export const PROTOCOL = {
   REAL_USER_QUERY_PAYOUT_ACTIVATION_EPOCH: 0,
   REAL_USER_QUERY_CONVERGENCE: 2,      // >= this many converged answers earns the full budget
   REAL_USER_LONE_ANSWER_FACTOR: 0.4,   // a single answerer earns this fraction of the budget (no convergence bonus)
+
+  // Signed-anchor earning gate. Once armed (this value > 0 AND the current epoch has reached it), only
+  // owner-SIGNED anchor seats (assigned to a real user, i.e. the anchor resonator's owner is not the anchor
+  // steward) run autonomous coordination and earn; steward-held placeholder seats do not. Anchor ownership
+  // is root-committed (the seat `owner` leaf in computeStateRoot), so the signed/unsigned split is
+  // deterministic on every node, and earning still flows through the SAME single settler-signed
+  // batch_transfer, so it is fork-safe. Discover hides unsigned anchors under the same predicate. 0 =
+  // dormant (every anchor resonator earns exactly as today, byte-identical). Set to a chosen epoch to arm.
+  SIGNED_ANCHOR_EARNING_ACTIVATION_EPOCH: 0,
 
   // Storage-weighted emission. Hosting the field's authorized model weights is real, costly work, so a
   // contributor that serves more model data earns a bounded bonus on its emission split. The bonus is a
@@ -308,14 +317,17 @@ export function adaptiveTaskPriceUZIR(ctx: {
 }
 
 // ----- Emission schedule -----
-// CANONICAL LIVE CURVE: the network emits via `perRoundReward` in por/rewards.ts, a smooth
-// fraction-of-remaining taper over the 59% earned pool (reward = max(floor, FRACTION x remaining) x
-// demand), scaled by live coordination demand. Being a fraction of what REMAINS, it decays slowly and
-// pays out over decades with no cliff, and idle periods conserve the pool; a small floor keeps a
-// perpetual tail until the earned cap is reached, after which miners are sustained by coordination
-// settlement (redistribution of real spending, not new minting). The geometric-halving numbers BELOW are
-// a formal reference approximation only and are NOT wired into runField; the fraction taper is the source
-// of truth. (Kept for documentation and supply-audit cross-checks; do not compute live emission from it.)
+// CANONICAL LIVE CURVE (single source of truth): the network emits via `perRoundReward` in
+// por/rewards.ts, a smooth fraction-of-remaining taper over the 59% earned pool
+// (reward = max(floor, ROUND_EMISSION_FRACTION x remaining) x demand). Calibrated for a ~10-YEAR
+// half-life at the 5s round cadence, so it starts at ~186 ZIR per round at genesis, decays slowly, and
+// tails off for decades with a 0.001 ZIR (1,000 uZIR) floor, never crossing the earned cap; after the cap
+// miners are sustained by coordination settlement (redistribution of real spending, not new minting).
+// Those live figures (~186 ZIR initial, ~10-year half-life, 0.001 ZIR floor) are the ONLY ones the
+// whitepaper and site should cite.
+// The EMISSION block BELOW is a DEAD, illustrative geometric-halving approximation with NO callers and a
+// deliberately different shape (4-year halving, 50,000/epoch, 1 ZIR floor). It is NOT wired into runField
+// and does NOT match the live curve. Do not compute emission from it and do not cite its numbers.
 export const EMISSION = {
   /** Total earned supply: 59% of 28.7B ZIR, in µZIR. */
   TOTAL_EARNED_UZIR: 16_933_000_000_000_000n,
@@ -324,9 +336,9 @@ export const EMISSION = {
    * Geometric decay: reward halves every HALVING_EPOCHS.
    * epoch_reward(n) = max( INITIAL >> floor(n / HALVING_EPOCHS), MINIMUM )
    */
-  INITIAL_EPOCH_REWARD_UZIR: 50_000_000_000n, // 50,000 ZIR/epoch at genesis
-  HALVING_EPOCHS: 2_102_400,                  // ~4 years at 1 epoch/min
-  MINIMUM_EPOCH_REWARD_UZIR: 1_000_000n,      // 1 ZIR floor
+  INITIAL_EPOCH_REWARD_UZIR: 50_000_000_000n, // illustrative only; live genesis reward is ~186 ZIR/round
+  HALVING_EPOCHS: 2_102_400,                  // illustrative ~4yr; live curve half-life is ~10 years
+  MINIMUM_EPOCH_REWARD_UZIR: 1_000_000n,      // illustrative 1 ZIR; live floor is 0.001 ZIR (1,000 uZIR)
 
   /**
    * Three way split per epoch:

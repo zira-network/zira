@@ -74,16 +74,21 @@ test("a fresh push stays vouched for its window but is pruned once it ages out",
   assert.ok(!fresh(master, now + maxAge + 5_000).includes(miner.address), "pruned once the push ages out");
 });
 
-test("one connection vouches exactly one address (a re-push on the same peer id replaces, does not accumulate)", async () => {
+test("a push binds by SIGNED ADDRESS, not by connection: one link can relay several signed miners, and a re-push of the same address does not accumulate", async () => {
   const master = nodeFor(masters[0]!, "sybil");
   const a = generateKeypair(), b = generateKeypair();
   const now = Date.now();
+  // Two DIFFERENT validly-signed miners arriving over the SAME connection (the relay-forward / NAT case): each
+  // carries its own miner signature, so both are vouched. The sybil bound is earned standing + the per-address
+  // signature, NOT one-address-per-connection, so a public relay can carry many home miners on a single link.
   await deliver(master, pushBytes(a, now), "peerA");
-  await deliver(master, pushBytes(b, now + 1), "peerA"); // same connection, different claimed address
+  await deliver(master, pushBytes(b, now + 1), "peerA");
   const v = fresh(master, now + 2);
-  assert.ok(!v.includes(a.address), "the first address is replaced");
-  assert.ok(v.includes(b.address), "the connection now vouches only its latest address");
-  assert.equal(v.filter((x) => x === a.address || x === b.address).length, 1, "one connection => one vouched address");
+  assert.ok(v.includes(a.address) && v.includes(b.address), "both distinct signed miners are vouched over one connection");
+  // A re-push of the SAME address only refreshes it (the vouch map is keyed by signed address) — never duplicates.
+  await deliver(master, pushBytes(a, now + 3), "peerA");
+  const v2 = fresh(master, now + 4);
+  assert.equal(v2.filter((x) => x === a.address).length, 1, "a re-push of the same address does not accumulate a duplicate");
 });
 
 test("distinct connections each vouch their own miner", async () => {

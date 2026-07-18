@@ -17,6 +17,7 @@ import { ResonatorDetail } from "./app/ResonatorDetail";
 import { Marketplace } from "./app/Marketplace";
 import { Explorer } from "./app/Explorer";
 import { Anchors } from "./app/Anchors";
+import { Lattice } from "./app/Lattice";
 import { Founder } from "./app/Founder";
 import { Learn } from "./app/Learn";
 import { SettingsPage } from "./app/Settings";
@@ -54,6 +55,7 @@ export function App() {
           <Route path="/marketplace" element={<Marketplace />} />
           <Route path="/explorer" element={<Explorer />} />
           <Route path="/anchors" element={<Anchors />} />
+          <Route path="/lattice" element={<Lattice />} />
           <Route path="/founder" element={<Founder />} />
           <Route path="/learn" element={<Learn />} />
           <Route path="/settings" element={<SettingsPage />} />

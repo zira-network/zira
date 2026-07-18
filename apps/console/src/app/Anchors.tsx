@@ -1,5 +1,6 @@
 // apps/console/src/app/Anchors.tsx
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { ANCHOR_CLASSES, TOTAL_ANCHOR_SEATS, PROTOCOL, MAINNET_ANCHOR_STEWARD, type Anchor, type AnchorClass } from "@zira/protocol";
 import QRCode from "qrcode";
 import { Card, Badge, Button, Modal, Input, useToast, useSlowHint } from "../components/ui";
@@ -10,6 +11,7 @@ import { cn } from "../lib/cn";
 import { payUsdt } from "../lib/usdtPay";
 import { makeSignedTx } from "../lib/tx";
 import { NodeApi } from "../lib/nodeApi";
+import { AnchorGlyph, ANCHOR_CLASS_VISUAL } from "../components/anchorClass";
 
 // A seat is still AVAILABLE to contribute for while the steward holds it (the steward assigns it to a
 // contributor after their payment confirms). A seat counts as ASSIGNED only once it leaves the steward
@@ -33,9 +35,9 @@ function PayQr({ addr }: { addr: string }) {
   return <img src={src} width={168} height={168} alt="Receiving address QR" className="rounded-lg border border-hairline bg-white p-1" />;
 }
 
-// Ink palette: a single teal hue fading to slate-grey encodes class rank (A highest -> F base) without a
-// rainbow, so the seat map stays monochrome and on-brand. Readable on both the light and dark anchor stage.
-const CLASS_COLOR: Record<string, string> = { A: "#0d9488", B: "#2b8c84", C: "#44827d", D: "#556070", E: "#6b7280", F: "#9aa3b2" };
+// Class palette, matched to the anchors web page (zira-field/anchors.html) so the app and site read as one
+// system: Genesis gold, Meridian amber, Nexus teal, Lattice green, Sentinel blue, Foundation slate.
+const CLASS_COLOR: Record<string, string> = { A: "#D4A820", B: "#F08030", C: "#3ECFC0", D: "#18C080", E: "#4D94F7", F: "#8296B5" };
 const CLASS_CODES = Object.keys(ANCHOR_CLASSES) as AnchorClass[];
 const CLASS_RAILS: Record<AnchorClass, number> = { A: 62, B: 86, C: 112, D: 140, E: 166, F: 190 };
 // USDT contribution per class for the anchor event (the public class ladder). Receiving addresses are
@@ -149,10 +151,15 @@ export function Anchors() {
           <ClassLegend anchors={anchors} totalStakeUZIR={totalStakeUZIR} />
         </div>
       </div>
-      <OwnedSeats seats={owned} busy={busy} onRefresh={load} onTransfer={(seatId, to) => signAnchorTx("anchor_transfer", { seatId, to }, NodeApi.submitAnchorTransfer)}
-        onBatchTransfer={(seatIds, to) => signAnchorTx("anchor_position_transfer", { seatIds, to }, NodeApi.submitAnchorPositionTransfer)}
-        onSetContributions={(seatIds, open) => signAnchorTx("anchor_set_contributions", { seatIds, open }, NodeApi.submitAnchorSetContributions)}
-        onActivate={(seatId) => signAnchorTx("anchor_activate", { seatId }, NodeApi.submitAnchorActivate)} />
+      {owned.length > 0 && (
+        <Link to="/lattice" className="flex items-center justify-between gap-3 rounded-xl border border-[color-mix(in_srgb,var(--teal)_35%,transparent)] bg-[color-mix(in_srgb,var(--teal)_6%,transparent)] p-4 transition-colors hover:border-[var(--teal)]">
+          <div>
+            <div className="text-sm font-semibold text-text">You hold {owned.length} seat{owned.length === 1 ? "" : "s"} in the lattice.</div>
+            <div className="text-xs text-muted">Open Your Lattice to manage your seats, vesting, standing, and transfers.</div>
+          </div>
+          <span className="shrink-0 text-sm text-[var(--teal)]">Open Your Lattice &rarr;</span>
+        </Link>
+      )}
       {picked && <SeatDetail anchor={picked} onClose={() => setPicked(null)} />}
     </div>
   );
@@ -168,15 +175,22 @@ function AnchorEventContribute({ anchors, address }: { anchors: Anchor[]; addres
   const [picked, setPicked] = useState<AnchorClass>("F");
   const [qty, setQty] = useState(1);
   const [net, setNet] = useState<(typeof USDT_NETWORKS)[number]>("Ethereum");
-  // Available = seats the steward still holds in this class (assignable to a contributor). Until the anchors
-  // list has loaded, fall back to the full class size so the contribute controls are not dead on first paint.
-  const seatsLeft = (code: AnchorClass) => anchors.length === 0
-    ? ANCHOR_CLASSES[code].seats
-    : anchors.filter((a) => a.classCode === code && isStewardHeld(a)).length;
+  // Availability = seats the steward has UNLOCKED for contribution (steward-held AND contributionsOpen). By
+  // default every unsigned seat is LOCKED; the steward opens specific seats in batches, and only those are
+  // offered here. Signed (assigned) seats never appear. Nothing is available until a batch is opened.
+  const seatsLeft = (code: AnchorClass) => anchors.filter((a) => a.classCode === code && isStewardHeld(a) && a.contributionsOpen).length;
   const left = seatsLeft(picked);
+  const totalAvailable = CLASS_CODES.reduce((s, c) => s + seatsLeft(c), 0);
   const [paying, setPaying] = useState(false);
   const total = CLASS_USDT[picked] * Math.max(1, qty);
   const addr = net === "TRON TRC-20" ? anchorEvent.tron : anchorEvent.evm;
+
+  // Keep the picked class on one that actually has open seats, so the contribute controls are never stuck on
+  // a locked class while another class has an open batch.
+  useEffect(() => {
+    if (seatsLeft(picked) === 0) { const first = CLASS_CODES.find((c) => seatsLeft(c) > 0); if (first) setPicked(first); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anchors]);
 
   async function contribute() {
     if (!address) { toast.push("Create or unlock a ZIR wallet first, so your seat can be assigned to it.", "warn"); return; }
@@ -202,6 +216,7 @@ function AnchorEventContribute({ anchors, address }: { anchors: Anchor[]; addres
     <Card className="border-[color-mix(in_srgb,var(--teal)_35%,transparent)]">
       <div className="mb-2 flex items-center gap-2"><Badge tone="teal">Anchor event live</Badge><h3 className="text-sm font-semibold">Contribute to secure an anchor position</h3></div>
       <p className="mb-3 text-xs text-muted">Acquiring an anchor seat is a contribution toward the network&apos;s coordination infrastructure. The reserve-backed ZIR allocation vests over one year to your ZIR address; it is a network parameter, not a token sale. Pick a class and quantity, choose a network, then connect a wallet. ZIRA constructs the exact USDT transfer and you confirm it in your wallet. The steward reviews each confirmed payment before assigning the seat.</p>
+      {totalAvailable === 0 && <div className="mb-3 rounded-lg border border-hairline bg-base p-3 text-center text-xs text-muted">No anchor seats are open for contribution right now. The steward opens seats in batches; please check back soon.</div>}
       <div className="grid gap-2 sm:grid-cols-2">
         {CLASS_CODES.map((code) => {
           const c = ANCHOR_CLASSES[code];
@@ -323,7 +338,62 @@ function ClassLegend({ anchors, totalStakeUZIR }: { anchors: Anchor[]; totalStak
   );
 }
 
-function OwnedSeats({ seats, busy, onRefresh, onTransfer, onBatchTransfer, onSetContributions, onActivate }: {
+// "Your lattice": the premium owner summary, shown only when the wallet holds seats. Leads with what the
+// owner actually holds (aggregate allocation, vested-so-far, top standing, class spread), a vesting bar,
+// and an honest active-now vs coming-soon split, so ownership reads as a place in the network, not a table.
+export function YourLattice({ seats }: { seats: Anchor[] }) {
+  const alloc = seats.reduce((s, a) => s + a.zirReserveUZIR, 0);
+  const vested = seats.reduce((s, a) => s + a.vestedUZIR, 0);
+  const pct = alloc > 0 ? Math.min(100, Math.round((vested / alloc) * 100)) : 0;
+  const standing = seats.reduce((m, a) => Math.max(m, a.zti ?? 0), 0);
+  const classes = CLASS_CODES.filter((c) => seats.some((a) => a.classCode === c));
+  const zir = (u: number) => formatNum(u / PROTOCOL.UZIR_PER_ZIR, 0);
+  return (
+    <Card className="field-hero">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <Badge tone="teal">Your lattice</Badge>
+          <h3 className="title-glow mt-2 text-xl font-semibold tracking-tight">You hold {seats.length} seat{seats.length === 1 ? "" : "s"} in the lattice.</h3>
+          <p className="mt-1 max-w-xl text-sm text-muted">A permanent place in the network&apos;s core. Your allocation vests to you over the year, and more of what a seat does turns on as the network activates it.</p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {classes.map((c) => (
+              <span key={c} className="flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] text-muted"
+                style={{ borderColor: `color-mix(in srgb, ${CLASS_COLOR[c]} 34%, var(--border))`, background: `color-mix(in srgb, ${CLASS_COLOR[c]} 8%, transparent)` }}>
+                <AnchorGlyph cls={c} size={18} />
+                <span><b className="font-semibold text-text">{ANCHOR_CLASSES[c].name}</b> · {seats.filter((a) => a.classCode === c).length}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+        <div className="grid grid-cols-3 gap-2 text-center text-xs">
+          <div className="rounded-lg border border-hairline bg-base p-2"><div className="mono text-sm text-[var(--teal)]">{zir(alloc)}</div><div className="text-faint">ZIR allocation</div></div>
+          <div className="rounded-lg border border-hairline bg-base p-2"><div className="mono text-sm text-[var(--teal)]">{zir(vested)}</div><div className="text-faint">vested so far</div></div>
+          <div className="rounded-lg border border-hairline bg-base p-2"><div className="mono text-sm text-[var(--teal)]">{standing.toFixed(2)}</div><div className="text-faint">top standing</div></div>
+        </div>
+      </div>
+      <div className="mt-4">
+        <div className="mb-1 flex items-center justify-between text-[11px] text-faint"><span>Vesting across your seats, over one year</span><span className="mono text-muted">{pct}%</span></div>
+        <div className="h-2 overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--text-faint)_18%,transparent)]"><div className="h-full rounded-full bg-[var(--teal)] transition-[width] duration-700" style={{ width: pct + "%" }} /></div>
+      </div>
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <div className="rounded-lg border border-hairline bg-base/70 p-3">
+          <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-[var(--teal)]">Active now</div>
+          <div className="flex flex-wrap gap-1.5">
+            {["Ownership", "One-year vesting", "Standing", "Transferable"].map((t) => <span key={t} className="rounded-full border border-[color-mix(in_srgb,var(--teal)_30%,var(--border))] bg-[color-mix(in_srgb,var(--teal)_6%,transparent)] px-2 py-0.5 text-[11px] text-muted">{t}</span>)}
+          </div>
+        </div>
+        <div className="rounded-lg border border-hairline bg-base/70 p-3">
+          <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-faint">Coming soon</div>
+          <div className="flex flex-wrap gap-1.5">
+            {["Routing revenue", "Resonator-pool share", "Governance"].map((t) => <span key={t} className="rounded-full border border-hairline bg-base px-2 py-0.5 text-[11px] text-faint">{t}</span>)}
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+export function OwnedSeats({ seats, busy, onRefresh, onTransfer, onBatchTransfer, onSetContributions, onActivate }: {
   seats: Anchor[]; busy: boolean; onRefresh: () => Promise<void>;
   onTransfer: (seatId: string, to: string) => Promise<void>;
   onBatchTransfer: (seatIds: string[], to: string) => Promise<void>;
@@ -354,22 +424,29 @@ function OwnedSeats({ seats, busy, onRefresh, onTransfer, onBatchTransfer, onSet
               position carries its class/ZTI/weight and its ZIR allocation; vesting follows the new owner. */}
           <div className="mb-3 rounded-xl border border-hairline bg-base/70 p-3">
             <div className="mb-2 flex items-center justify-between">
-              <span className="text-xs font-medium text-muted">Batch transfer positions</span>
+              <span className="text-xs font-medium text-muted">Batch actions</span>
               <span className="mono text-[11px] text-faint">{selectedIds.length} selected</span>
             </div>
             <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
               <Input placeholder="Transfer selected to zir1..." value={batchTo} onChange={(e) => setBatchTo(e.target.value)} className="mono" />
               <Button variant="primary" disabled={busy || selectedIds.length === 0 || !batchTo.startsWith("zir1")} onClick={() => void doBatch()}>Transfer {selectedIds.length || ""} position{selectedIds.length === 1 ? "" : "s"}</Button>
             </div>
-            <p className="mt-1 text-[11px] text-faint">Tick the seats below, enter one destination, and move them all in a single signed operation. Each position&apos;s remaining one-year vesting follows the new owner.</p>
+            <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-hairline pt-2">
+              <span className="text-[11px] text-faint">Contribution</span>
+              <Button variant="primary" disabled={busy || selectedIds.length === 0} onClick={() => void onSetContributions(selectedIds, true)}>Open {selectedIds.length || ""} for contribution</Button>
+              <Button variant="ghost" disabled={busy || selectedIds.length === 0} onClick={() => void onSetContributions(selectedIds, false)}>Close</Button>
+            </div>
+            <p className="mt-1 text-[11px] text-faint">Tick the seats below, then transfer them to one address, or open/close a batch for contribution, in a single signed operation. Opening a steward-held seat makes it available for a contributor to acquire; a position&apos;s remaining one-year vesting follows any transfer.</p>
           </div>
           <div className="grid gap-3 md:grid-cols-2">
             {seats.map((a) => (
-              <div key={a.id} className="rounded-xl border border-hairline bg-base p-3 text-sm">
+              <div key={a.id} className="rounded-xl border bg-base p-3 text-sm"
+                style={{ borderColor: `color-mix(in srgb, ${CLASS_COLOR[a.classCode]} 26%, var(--border))` }}>
                 <div className="flex items-center justify-between">
                   <label className="flex items-center gap-2 font-semibold">
                     <input type="checkbox" checked={Boolean(selected[a.id])} onChange={() => toggle(a.id)} className="accent-[var(--teal)]" />
-                    {a.id} · {a.className ?? a.classCode}
+                    <AnchorGlyph cls={a.classCode} size={26} boxed />
+                    <span>{a.id}<span className="ml-1 text-[11px] font-normal text-faint">{ANCHOR_CLASS_VISUAL[a.classCode]?.name ?? a.className}</span></span>
                   </label>
                   <Badge tone="teal">held</Badge>
                 </div>
@@ -378,16 +455,20 @@ function OwnedSeats({ seats, busy, onRefresh, onTransfer, onBatchTransfer, onSet
                   <span className="text-faint">Allocation <span className="mono text-muted">{formatNum(a.zirReserveUZIR / PROTOCOL.UZIR_PER_ZIR, 0)} ZIR</span></span>
                   <span className="text-faint">Vested <span className="mono text-[var(--teal)]">{formatNum(a.vestedUZIR / PROTOCOL.UZIR_PER_ZIR, 0)} ZIR</span></span>
                 </div>
+                <div className="mt-2">
+                  <div className="h-1.5 overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--text-faint)_18%,transparent)]"><div className="h-full rounded-full bg-[var(--teal)] transition-[width] duration-700" style={{ width: (a.zirReserveUZIR > 0 ? Math.min(100, Math.round((a.vestedUZIR / a.zirReserveUZIR) * 100)) : 0) + "%" }} /></div>
+                  <div className="mt-1 flex justify-between text-[10px] text-faint"><span>{a.zirReserveUZIR > 0 ? Math.min(100, Math.round((a.vestedUZIR / a.zirReserveUZIR) * 100)) : 0}% vested over one year</span><span>{ANCHOR_CLASSES[a.classCode].role.split(":")[0]}</span></div>
+                </div>
                 <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto]">
                   <Input placeholder="Transfer to zir1..." value={transferTo[a.id] ?? ""} onChange={(e) => setTransferTo({ ...transferTo, [a.id]: e.target.value })} className="mono" />
                   <Button disabled={busy || !(transferTo[a.id] ?? "").startsWith("zir1")} onClick={() => onTransfer(a.id, transferTo[a.id] ?? "")}>Transfer</Button>
                 </div>
                 <p className="mt-1 text-[11px] text-faint">Transferring a position moves its class, ZTI, weight, and remaining one-year vesting to the new owner in one signed operation.</p>
                 <div className="mt-3 flex items-center justify-between rounded-lg border border-hairline bg-base/70 px-2.5 py-2">
-                  <span className="text-[11px] text-faint">User contributions {a.contributionsOpen ? <span className="text-[var(--teal)]">open</span> : <span className="text-muted">closed</span>}</span>
+                  <span className="text-[11px] text-faint">{a.owner === MAINNET_ANCHOR_STEWARD ? "Open for acquisition" : "User contributions"} {a.contributionsOpen ? <span className="text-[var(--teal)]">open</span> : <span className="text-muted">closed</span>}</span>
                   <Button variant={a.contributionsOpen ? "ghost" : "primary"} disabled={busy} onClick={() => void onSetContributions([a.id], !a.contributionsOpen)}>{a.contributionsOpen ? "Close" : "Open"}</Button>
                 </div>
-                <p className="mt-1 text-[11px] text-faint">Open a position to let other participants contribute machines and storage under it. You can close it any time.</p>
+                <p className="mt-1 text-[11px] text-faint">{a.owner === MAINNET_ANCHOR_STEWARD ? "Open a steward-held seat to make it available for a contributor to acquire in the contribution flow. Closed seats are not offered." : "Open a position to let other participants contribute machines and storage under it. You can close it any time."}</p>
                 <Button variant="ghost" className="mt-2 w-full" disabled onClick={() => onActivate(a.id)}>Earning activates in a later phase</Button>
               </div>
             ))}
