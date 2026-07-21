@@ -33,10 +33,15 @@
   --accent-soft: rgba(12, 125, 114, 0.08);
   --accent-ring: rgba(12, 125, 114, 0.32);
 
-  /* Teal stays the positive/success tone (aligned to the accent). Decorative tones are ink-greys so the
-     UI is monochrome; only warn/danger carry real color, muted. */
+  /* The brand's two canonical colors (the logo mark): a teal and an indigo. Referenced by decorative accents
+     so the app reads as the brand, not generic. Tuned per theme for contrast below. */
+  --brand-teal: #3ecfc0;
+  --brand-indigo: #6b8ce8;
+
+  /* Teal stays the positive/success tone (aligned to the accent). Indigo is the SECOND brand accent (darkened
+     here for AA on a light surface); other decorative tones stay ink-grey so color reads as meaningful. */
   --teal: #0c7d72;
-  --indigo: #3f3f46;
+  --indigo: #4457c9;
   --violet: #52525b;
   --rose: #6b7280;
   --mist: #0a0a0a;
@@ -84,7 +89,7 @@
   --accent-ring: rgba(45, 212, 191, 0.36);
 
   --teal: #2dd4bf;
-  --indigo: #d4d4d8;
+  --indigo: #8aa0f2;
   --violet: #a1a1aa;
   --rose: #c4c4cc;
   --mist: #fafafa;

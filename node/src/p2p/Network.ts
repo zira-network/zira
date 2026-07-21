@@ -25,6 +25,10 @@ export interface ZiraNetwork {
   onPeerConnect(cb: (peerId: string) => void): void;
   /** Dial a peer by multiaddr at runtime (used to connect to a node a user pasted in). */
   dial(multiaddr: string): Promise<void>;
+  /** Ensure a live connection to a peer by its id (dialing by id resolves relay/DHT addresses), so a
+   *  subsequent request() has a connection to reuse. Best-effort; returns true if connected afterwards.
+   *  Optional so non-libp2p (test) networks need not implement it. */
+  ensureConnected?(peerId: string, timeoutMs?: number): Promise<boolean>;
 
   multiaddrs(): string[];
   peerId(): string;

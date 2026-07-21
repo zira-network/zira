@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { freemem, totalmem, cpus } from "node:os";
 import http from "node:http";
 import { spawn, type ChildProcess } from "node:child_process";
-import { canonical, sign as edSign, verify as edVerify, addressFromPubKey, defaultDomainsForModelType, modelServesDomain, preferredModelTypeForDomain, type Domain, type ModelType, type Keypair, type Address } from "@zira/protocol";
+import { canonical, sign as edSign, verify as edVerify, addressFromPubKey, hashHex, defaultDomainsForModelType, modelServesDomain, preferredModelTypeForDomain, type Domain, type ModelType, type Keypair, type Address } from "@zira/protocol";
 import type { ZiraNetwork } from "../p2p/Network.js";
 import { ModelStore } from "./ModelStore.js";
 import { Inference } from "./Inference.js";
@@ -202,6 +202,31 @@ export class ModelService {
       for (let i = 0; i < mine.length; i++) if (got[i] !== mine[i]) return false;
       return true;
     } catch { return false; }
+  }
+
+  /**
+   * PUSH storage proof (NAT-proof analogue of the reverse chunk challenge). Deterministically pick a chunk from
+   * `salt` (the caller binds `salt` to the consensus finalized root, so the index is unpredictable ahead of time
+   * and a peer cannot pre-store only a few chunks), read it, and return its hash. The prover (a miner) and the
+   * verifier (a master) each run this against their OWN copy: identical hashes prove they hold the same bytes.
+   * Returns null if this node does not hold the model. Best-effort; a read error yields null.
+   */
+  storageProof(modelId: string, salt: string): { index: number; hash: string } | null {
+    if (!this.store.hasValidGguf(modelId)) return null;
+    const meta = this.store.meta(modelId);
+    if (!meta || meta.chunkCount <= 0) return null;
+    try {
+      const index = parseInt(hashHex(salt).slice(0, 12), 16) % meta.chunkCount;
+      const chunkHash = hashHex(new Uint8Array(this.store.readChunk(modelId, index)));
+      return { index, hash: hashHex(salt + ":" + chunkHash) };
+    } catch { return null; }
+  }
+
+  /** Verify a pushed storage proof against our own copy of the model. True only if we hold the model and the
+   *  prover's hash matches the one we compute for the same salt (so they hold the same bytes). */
+  verifyStorageProof(modelId: string, salt: string, hash: string): boolean {
+    const p = this.storageProof(modelId, salt);
+    return !!p && !!hash && p.hash === hash;
   }
 
   private trackLocal(meta: ModelMeta, founderPubKey: string, manifestSig: string): RegistryEntry {

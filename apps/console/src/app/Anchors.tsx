@@ -12,6 +12,7 @@ import { payUsdt } from "../lib/usdtPay";
 import { makeSignedTx } from "../lib/tx";
 import { NodeApi } from "../lib/nodeApi";
 import { AnchorGlyph, ANCHOR_CLASS_VISUAL } from "../components/anchorClass";
+import { AnchorRings } from "../components/AnchorRings";
 
 // A seat is still AVAILABLE to contribute for while the steward holds it (the steward assigns it to a
 // contributor after their payment confirms). A seat counts as ASSIGNED only once it leaves the steward
@@ -148,6 +149,7 @@ export function Anchors() {
             : <Lattice anchors={anchors} onPick={setPicked} />}
         </Card>
         <div className="space-y-4">
+          <Card><AnchorRings anchors={anchors} /></Card>
           <ClassLegend anchors={anchors} totalStakeUZIR={totalStakeUZIR} />
         </div>
       </div>

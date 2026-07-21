@@ -1,7 +1,7 @@
 {
   "name": "@zira/desktop",
   "private": true,
-  "version": "2.7.0",
+  "version": "2.9.0",
   "author": "ZIRA",
   "description": "ZIRA desktop app. Runs a full ZIRA Core node (with mining) and the Console in one window.",
   "main": "electron/main.cjs",
@@ -13,6 +13,9 @@
     "dist:linux": "electron-builder --linux",
     "dist:mac": "electron-builder --mac"
   },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
   "devDependencies": {
     "electron": "31.7.7",
     "electron-builder": "^24.13.3"
@@ -21,6 +24,13 @@
     "appId": "network.zira.desktop",
     "productName": "ZIRA",
     "asar": false,
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "zira-network",
+        "repo": "zira"
+      }
+    ],
     "files": [
       "electron/**/*"
     ],

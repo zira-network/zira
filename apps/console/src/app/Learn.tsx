@@ -81,7 +81,7 @@ const SECTIONS: Section[] = [
       "Resonators are AI agents you create, fund, and give a personality. They spend only within the limits you set, learn from checked results, and can earn by doing real work for others.",
     ],
     takeaway: "Mining is useful work, not wasted puzzles.",
-    links: [{ label: "Open Resonators", to: "/resonators" }, ...(isDesktop() ? [{ label: "Run a node in Mine", to: "/mine" }] : [])],
+    links: [{ label: "See your node on the Dashboard", to: "/dashboard" }, { label: "Open Resonators", to: "/resonators" }, ...(isDesktop() ? [{ label: "Run a node in Mine", to: "/mine" }] : [])],
   },
   {
     id: "how-coordination-works",

@@ -248,6 +248,21 @@ else {
     createWindow();
     app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
+    // Auto-update (packaged builds only): check GitHub releases on start (after a short delay so it never
+    // competes with node startup) and every 6h; download in the background and install on quit. Uses a native
+    // notification, no custom UI. Best-effort: any failure (offline, no feed) is swallowed. Opt out with
+    // ZIRA_NO_AUTOUPDATE=1. This is what lets future releases actually reach installed users.
+    if (app.isPackaged && process.env.ZIRA_NO_AUTOUPDATE !== "1") {
+      try {
+        const { autoUpdater } = require("electron-updater");
+        autoUpdater.autoDownload = true;
+        autoUpdater.autoInstallOnAppQuit = true;
+        const check = () => { autoUpdater.checkForUpdatesAndNotify().catch((e) => console.error("autoUpdate check failed", e && e.message)); };
+        setTimeout(check, 30_000);
+        setInterval(check, 6 * 60 * 60 * 1000).unref?.();
+      } catch (e) { console.error("autoUpdater unavailable", e && e.message); }
+    }
+
     if (process.env.ZIRA_RESET === "1") { try { await fullReset(); } catch (e) { console.error("reset failed", e); } }
 
     // 2) Discover a co-located mesh and bootstrap to it, then start our OWN node on our OWN ports.

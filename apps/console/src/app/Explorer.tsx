@@ -5,7 +5,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Copy, ChevronDown, ChevronRight } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
-import { PROTOCOL, TOTAL_ANCHOR_SEATS, type Lock, type SignedTx } from "@zira/protocol";
+import { PROTOCOL, TOTAL_ANCHOR_SEATS, MAINNET_ANCHOR_STEWARD, type SignedTx } from "@zira/protocol";
 import {
   Card, Badge, Meter, Select, Button, Input, PageHeader,
   EmptyState, LoadingState, ErrorState, useSlowHint, usePoll, useToast,
@@ -47,7 +47,7 @@ function Metric({ label, value, sub, tone }: { label: string; value: ReactNode; 
 }
 
 export function Explorer() {
-  const { locks, mode } = useZira();
+  const { mode } = useZira();
 
   return (
     <div className="mx-auto max-w-6xl space-y-4 p-5">
@@ -63,7 +63,6 @@ export function Explorer() {
       </div>
       <AddressLookup />
       <TxExplorer />
-      <LockFeed locks={locks} />
     </div>
   );
 }
@@ -443,7 +442,18 @@ function ProvidersPanel() {
   };
   usePoll(load, 8000, []);
 
-  const rows = (providers ?? []).slice().sort((a, b) => b.zti - a.zti).slice(0, 8);
+  // Dedupe by address (a node can heartbeat under more than one pubKey/session; keep its strongest entry)
+  // then sort by zti with a stable address tiebreak so equal-zti providers do not reshuffle every poll.
+  const deduped = Array.from(
+    (providers ?? []).reduce((m, p) => {
+      const prev = m.get(p.address);
+      if (!prev || p.zti > prev.zti) m.set(p.address, p);
+      return m;
+    }, new Map<string, ProviderView>()).values(),
+  );
+  const rows = deduped
+    .sort((a, b) => b.zti - a.zti || a.address.localeCompare(b.address))
+    .slice(0, 8);
 
   return (
     <Card>
@@ -452,7 +462,7 @@ function ProvidersPanel() {
           <h3 className="text-sm font-semibold">Serving providers</h3>
           <p className="text-[11px] text-faint">Nodes lending a model to answer the field right now.</p>
         </div>
-        {providers !== null && <Badge tone={rows.length > 0 ? "teal" : "neutral"}>{providers.length} online</Badge>}
+        {providers !== null && <Badge tone={rows.length > 0 ? "teal" : "neutral"}>{deduped.length} online</Badge>}
       </div>
       {providers === null && !error ? <LoadingState slow={slow} /> : error && providers === null ? (
         <ErrorState message={error} onRetry={load} />
@@ -498,8 +508,12 @@ function AnchorsPanel() {
   usePoll(load, 30000, []);
 
   const total = summary?.total ?? TOTAL_ANCHOR_SEATS;
-  const assigned = (summary?.classes ?? []).reduce((n, c) => n + c.taken, 0);
-  const listed = (summary?.classes ?? []).reduce((n, c) => n + c.listed, 0);
+  // Real seat state, matching the site + the Anchors page: every seat is owned at genesis (mostly by the
+  // anchor reserve), so a raw "assigned = has an owner" reads as 512/512 and hides the truth. Instead show
+  // seats HELD by a distinct owner vs those the steward has OPENED for a new early adopter to claim.
+  const seats = summary?.seats ?? [];
+  const held = seats.filter((a) => a.owner && a.owner !== MAINNET_ANCHOR_STEWARD).length;
+  const open = seats.filter((a) => a.owner === MAINNET_ANCHOR_STEWARD && a.contributionsOpen).length;
 
   return (
     <Card>
@@ -516,8 +530,8 @@ function AnchorsPanel() {
         <>
           <div className="mb-3 grid grid-cols-3 gap-2">
             <Metric label="Seats" value={String(total)} />
-            <Metric label="Assigned" value={String(assigned)} tone="teal" />
-            <Metric label="Listed" value={String(listed)} />
+            <Metric label="Held" value={String(held)} tone="teal" sub="by an owner" />
+            <Metric label="Open" value={String(open)} sub="to claim" />
           </div>
           <div className="space-y-1.5">
             {(summary?.classes ?? []).map((c) => (
@@ -535,29 +549,4 @@ function AnchorsPanel() {
   );
 }
 
-function LockFeed({ locks }: { locks: Lock[] }) {
-  return (
-    <Card>
-      <h3 className="mb-2 text-sm font-semibold">Recent Locks</h3>
-      {locks.length === 0 ? (
-        <EmptyState title="No Locks yet" hint="As signed observations arrive, the field seals trust-weighted agreements here." />
-      ) : (
-        <div className="divide-y divide-hairline">
-          {locks.map((l) => (
-            <div key={l.id} className="flex items-center justify-between py-2 text-sm">
-              <div>
-                <span className="font-medium">{l.subject}</span> <Badge tone="indigo" className="ml-1 text-[10px]">{l.domain}</Badge>
-                <div className="text-[11px] text-faint">cv {formatNum(l.cv, 3)}, {l.observationCount} obs, {timeAgo(l.sealedAt)}</div>
-              </div>
-              <div className="flex items-center gap-3">
-                <div className="w-20"><Meter value={l.supportingTrust} /></div>
-                <span className="mono text-[var(--teal)]">{formatNum(l.resonantValue, 4)}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </Card>
-  );
-}
 

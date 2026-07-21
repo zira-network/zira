@@ -523,6 +523,24 @@ export class Libp2pNetwork implements ZiraNetwork {
     await this.node.dial(multiaddr(addr), { signal: AbortSignal.timeout(Number(process.env.ZIRA_DIAL_TIMEOUT_MS ?? 30_000)) });
   }
 
+  /**
+   * Ensure there is a live connection to `peerIdStr`, dialing BY peer id if none exists. Dialing by peer id
+   * lets libp2p resolve the peer's addresses from the peerstore and the DHT, which includes a circuit-relay
+   * `/p2p-circuit` reservation a NAT/CGNAT peer advertised, so we can open a (possibly relayed) connection to
+   * a miner we are not directly connected to. `request()` then reuses that connection for the reverse chunk /
+   * liveness challenge. Best-effort and bounded: returns true only if a connection exists afterwards. This is
+   * a master-side reachability aid; it changes nothing a client observes and only affects which miners a
+   * master can probe and therefore vouch (which rides the settler's signed payout, applied identically).
+   */
+  async ensureConnected(peerIdStr: string, timeoutMs = 8_000): Promise<boolean> {
+    if (!this.node) return false;
+    if (this.node.getConnections().some((c) => c.remotePeer.toString() === peerIdStr)) return true;
+    try {
+      await this.node.dial(peerIdFromString(peerIdStr), { signal: AbortSignal.timeout(timeoutMs) });
+    } catch { /* unreachable (no addr / relay slot / handshake): caller treats as not-connected */ }
+    return this.node.getConnections().some((c) => c.remotePeer.toString() === peerIdStr);
+  }
+
   multiaddrs(): string[] { return this.node ? this.node.getMultiaddrs().map((m) => m.toString()) : []; }
   peerId(): string { return this.node ? this.node.peerId.toString() : ""; }
   peerCount(): number { return this.node ? this.node.getConnections().length : 0; }

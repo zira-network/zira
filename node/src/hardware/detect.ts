@@ -137,10 +137,18 @@ export async function detectHardware(): Promise<HardwareProfile> {
     }
   } catch { /* best effort, leave nulls */ }
 
-  gpus.sort((a, b) => (b.vramMb ?? 0) - (a.vramMb ?? 0));
+  // Prefer the GPU with the largest KNOWN VRAM; tie-break toward a discrete card. nvidia-smi reports real VRAM,
+  // but AMD/Intel VRAM (driver AdapterRAM) is often 0/capped, which previously left non-Nvidia GPUs at 0 layers
+  // = CPU-only ("only Nvidia can mine"). See the discrete fallback below.
+  gpus.sort((a, b) => ((b.vramMb ?? 0) - (a.vramMb ?? 0)) || ((b.kind === "discrete" ? 1 : 0) - (a.kind === "discrete" ? 1 : 0)));
   const best = gpus[0];
   const gpuName = best?.name ?? null;
-  const gpuVramMb = best?.vramMb ?? null;
+  // A DISCRETE GPU that reported no usable VRAM is still a real accelerator (AMD/Intel via Vulkan, Apple via
+  // Metal). Give it a conservative default so it gets GPU layers instead of being pushed to CPU; the engine
+  // (Inference.load) auto-picks the backend and falls back to CPU if the offload does not actually fit, so this
+  // never bricks a machine. Integrated GPUs stay null (share system RAM, weak). Override: ZIRA_GPU_DEFAULT_VRAM_MB.
+  const DISCRETE_DEFAULT_VRAM_MB = Number(process.env.ZIRA_GPU_DEFAULT_VRAM_MB ?? 6144);
+  const gpuVramMb = best?.vramMb ?? (best?.kind === "discrete" ? DISCRETE_DEFAULT_VRAM_MB : null);
   // Heuristic: use the machine assertively by default; users can reduce this in Console if needed.
   const recommendedGpuLayers = gpuVramMb ? Math.min(Math.floor(gpuVramMb / 384), 100) : 0;
   const recommendedThreads = Math.max(2, cpuCores);

@@ -93,21 +93,27 @@ export function Meter({ value, label, className }: { value: number; label?: stri
 // ---- Modal ----
 export function Modal({ open, onClose, title, children, wide }: { open: boolean; onClose: () => void; title?: string; children: ReactNode; wide?: boolean }) {
   const dialogRef = useRef<HTMLDivElement>(null);
+  // Keep the latest onClose in a ref so the focus effect can depend ONLY on `open`. Callers pass a fresh
+  // inline arrow every render; if the effect depended on `onClose` it would re-run on every keystroke and
+  // its rAF would yank focus from the field you are typing in back to the dialog container, dismissing the
+  // mobile keyboard after a single character. Reading onClose from a ref fixes that without staleness.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   // Close on Escape, and move focus INTO the dialog on open / restore it to the trigger on close (standard
   // dialog behaviour, so keyboard + screen-reader users land in the dialog and return where they were). The
-  // effect is declared before the early return so hooks order is stable; it only binds while open.
+  // effect is declared before the early return so hooks order is stable; it only runs on the open/close edge.
   useEffect(() => {
     if (!open) return;
     const prevFocus = document.activeElement as HTMLElement | null;
     const raf = requestAnimationFrame(() => dialogRef.current?.focus());
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onCloseRef.current(); };
     window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("keydown", onKey);
       cancelAnimationFrame(raf);
       prevFocus?.focus?.();
     };
-  }, [open, onClose]);
+  }, [open]);
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px] fade-in-up" onClick={onClose}
@@ -225,7 +231,10 @@ export function PageHeader({ title, description, breadcrumbs, action, badge }: {
       {breadcrumbs && breadcrumbs.length > 0 && <Breadcrumbs items={breadcrumbs} />}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div className="min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5">
+            {/* Brand accent: the two logo colors (teal -> indigo) as a quiet rule before every page title, so
+                the corporate identity reads consistently on every screen without per-page work. */}
+            <span aria-hidden className="h-5 w-[3px] shrink-0 rounded-full" style={{ background: "linear-gradient(180deg, var(--brand-teal), var(--brand-indigo))" }} />
             <h2 className="text-xl font-semibold tracking-tight text-text">{title}</h2>
             {badge}
           </div>

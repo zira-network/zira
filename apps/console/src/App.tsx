@@ -11,6 +11,8 @@ import { useGlobalShortcuts } from "./lib/shortcuts";
 
 import { Console } from "./app/Console";
 import { Mine } from "./app/Mine";
+import { Dashboard } from "./app/Dashboard";
+import { Images } from "./app/Images";
 import { WalletPage } from "./app/Wallet";
 import { Resonators } from "./app/Resonators";
 import { ResonatorDetail } from "./app/ResonatorDetail";
@@ -48,6 +50,8 @@ export function App() {
       <AppFrame>
         <Routes>
           <Route path="/" element={<Console />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/images" element={<Images />} />
           <Route path="/mine" element={<Mine />} />
           <Route path="/wallet" element={<WalletPage />} />
           <Route path="/resonators" element={<Resonators />} />

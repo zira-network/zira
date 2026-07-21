@@ -208,6 +208,13 @@ export const NodeApi = {
   setMining: (patch: MiningPatch) => rpcPost<StatusInfo>("/status", { mining: patch }),
   refreshHardware: () => rpcPost<StatusInfo>("/hardware/refresh", {}),
 
+  // Text-to-image (2.9.0, dormant unless the node has ZIRA_IMAGE_ENABLE=1). Submit returns { disabled: true }
+  // while the feature is off, which the Images page shows as "coming soon".
+  imageSubmit: (body: { prompt: string; modelId: string; seed?: number; params?: { width?: number; height?: number; steps?: number; cfg?: number; negativePrompt?: string }; asker?: string }) =>
+    rpcPost<{ jobId?: string; paramsHash?: string; priceUZIR?: number; disabled?: boolean; reason?: string; error?: string }>("/image/submit", body),
+  imageResult: (id: string) =>
+    rpcGet<{ found: boolean; jobId?: string; settled?: boolean; providers?: string[]; canonicalHash?: string | null; commitments?: number }>(`/image/result?id=${encodeURIComponent(id)}`),
+
   // What this address earned by ANSWERING the field (coordination payouts), derived on-chain by the node.
   answererEarnings: (address: string) => rpcGet<{ address: string; earnedUZIR: number; payouts: number }>(`/answerers/mine?address=${encodeURIComponent(address)}`),
 

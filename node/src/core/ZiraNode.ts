@@ -13,7 +13,7 @@ import {
   NETWORK_RESONATOR_SPECS, MAINNET_NETWORK_RESONATOR_OWNER, type NetworkResonatorSpec,
   anchorResonatorSpec, anchorResonatorOperatingFloatUZIR, type AnchorResonatorSpec, type Anchor,
   settleCoordination, addressFromPubKey, verify as edVerify,
-  convergenceAdjustedBudget, queryComplexityChars, queryTier, PRICING, type Address,
+  convergenceAdjustedBudget, queryComplexityChars, queryTier, PRICING, imagePriceUZIR, type Address,
 } from "@zira/protocol";
 import { settlementWalletsFor, treasuryWalletsFor } from "../genesis-docs.js";
 import { launchModelsFor } from "../launch-models.js";
@@ -24,6 +24,7 @@ import { SoftState } from "./SoftState.js";
 import { Checkpoints } from "./Checkpoints.js";
 import { Store } from "./Store.js";
 import { ModelService } from "../models/ModelService.js";
+import { ImageCoordinator } from "../image/ImageCoordinator.js";
 import type { MiningConfig } from "../models/types.js";
 import { FounderServices } from "./FounderServices.js";
 import { InferenceProvider } from "../provider/InferenceProvider.js";
@@ -83,7 +84,7 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "2.7.0";
+const NODE_RELEASE_VERSION = "2.9.0";
 // Per-cycle coordination batch. Every funded+listed resonator is eligible; autonomousResonanceBatch picks
 // this many per 5-minute cycle by a DETERMINISTIC ZTI-WEIGHTED draw, so higher-trust resonators (anchors,
 // seeded 0.95/0.85/… by class) are driven most often and earn the most, while every other funded resonator
@@ -188,6 +189,18 @@ const PUSH_LIVENESS_MAX_AGE_MS = envMs("ZIRA_PUSH_LIVENESS_MAX_AGE_MS", 90_000);
 // unreasonable number of best-effort streams each interval. Only masters record the push, so extra targets are
 // harmless no-ops.
 const PUSH_LIVENESS_MAX_TARGETS = Number(process.env.ZIRA_PUSH_LIVENESS_MAX_TARGETS ?? 32);
+// Push-storage (NAT-proof storage vouch, Regime B): a miner rides its liveness push with a storage proof over a
+// chunk selected by a recent FINALIZED ROOT, so a symmetric-CGNAT miner the master cannot reverse-dial can still
+// prove it serves the model. The master accepts a proof whose root finalized within this window (unpredictable
+// far ahead, so a miner cannot pre-store only a few chunks). Off with ZIRA_PUSH_STORAGE=0. Fork-safe: it only
+// sets storageServingMiners (settler-local payout weight), exactly like the reverse probe.
+const PUSH_STORAGE_ROOT_MAX_AGE_MS = envMs("ZIRA_PUSH_STORAGE_ROOT_MAX_AGE_MS", 150_000);
+/** Deterministic salt for a push-storage proof, identical on the prover (miner) and verifier (master): it binds
+ *  the challenged chunk to the model, a recent finalized ROOT (unpredictable ahead), and the miner's ADDRESS (so
+ *  a proof cannot be replayed for a different miner). */
+function storageProofSalt(modelId: string, root: string, address: string): string {
+  return hashHex(`zira-storage:${modelId}:${root}:${address}`);
+}
 // A follower keeps this many recent per-epoch local roots to self-check against finalized consensus roots.
 const LOCAL_ROOT_HISTORY = 512;
 // How many recent per-root FINALIZED-consistent snapshots to retain for serving fast-sync. Only needs to
@@ -386,6 +399,9 @@ export class ZiraNode {
   readonly soft = new SoftState();
   readonly checkpoints: Checkpoints;
   readonly models: ModelService;
+  // Text-to-image job coordination (2.9.0 Track A). Dormant unless ZIRA_IMAGE_ENABLE=1; holds only soft,
+  // bounded in-memory job state and settles via the fork-safe perceptual agreement. No consensus effect.
+  readonly imageCoordinator = new ImageCoordinator();
   hardware: HardwareProfile | null = null;
   readonly opts: Required<ZiraNodeOptions>;
   founderServices: FounderServices | null = null;
@@ -1376,11 +1392,17 @@ export class ZiraNode {
       this.lastReapAt = now; this.reapTasks(now);
       // Skip ALL settler payout/coordination/filler issuance while paused (ops recovery: pure-emission-only
       // advancement walks a diverged fleet past a stuck fork). Reaping tasks above is safe (no balance txs).
-      if (!this.settlerPaused) { this.coordinateAutonomousResonance(now); this.settleRealUserCoordination(now); this.settleFieldParticipation(now); this.unstickSettlerNonce(now); }
+      if (!this.settlerPaused) { this.coordinateAutonomousResonance(now); this.settleRealUserCoordination(now); this.settleFieldParticipation(now); this.settleImagePayouts(now); this.unstickSettlerNonce(now); }
     }
     // Field heartbeat: contributing (mining/storage) nodes attest participation so PoR Locks form and the
     // round emission flows to them (storage-weighted). Self-throttled to FIELD_HEARTBEAT_INTERVAL_MS.
     this.contributeFieldHeartbeat(now);
+    // Track recent finalized roots so a master can verify a pushed storage proof bound to a fresh consensus root.
+    const fr = this.checkpoints.lastFinalizedRoot;
+    if (fr && fr !== "00") {
+      this.recentFinalizedRoots.set(fr, now);
+      if (this.recentFinalizedRoots.size > 64) for (const [r, ts] of this.recentFinalizedRoots) if (now - ts > PUSH_STORAGE_ROOT_MAX_AGE_MS) this.recentFinalizedRoots.delete(r);
+    }
     void this.contributePushLiveness(now);   // push liveness to masters over our own connection (NAT-proof vouch)
     // Storage proof: a master that holds the model periodically probes peers serving it and attests the ones
     // that prove they hold the bytes (a random-chunk probe), so genuine storage/serving miners earn the
@@ -1425,6 +1447,13 @@ export class ZiraNode {
   // Which vouched miners passed the STORAGE chunk challenge this window (address -> last-verified ms). A
   // subset of verifiedMiners; used to give storage-servers the payout bonus. Settler-local, consensus-safe.
   private storageServingMiners = new Map<string, number>();
+  // Connect-then-probe cooldown (peerId -> last pre-dial ms): a master dials a model-serving miner it is not
+  // connected to (resolving its relay/DHT addresses) so the reverse chunk challenge has a connection to ride,
+  // reaching NAT/CGNAT miners on their current client. Cooldown so a peer that just failed is not re-hammered.
+  private preDialCooldown = new Map<string, number>();
+  // Recent FINALIZED roots (root -> ts) a master accepts in a pushed storage proof, so the challenged chunk is
+  // bound to an unpredictable-ahead consensus value. Recorded each tick, pruned to PUSH_STORAGE_ROOT_MAX_AGE_MS.
+  private recentFinalizedRoots = new Map<string, number>();
   // Recency-weighted count of accepted coordination answers the settler has settled per miner (address ->
   // credits). Grows in settleAutonomousCoordination, decays once per paid cycle, persisted in
   // settler-progress.json so weighting is restart-stable. Feeds the "answers more -> earns more" weight.
@@ -1476,13 +1505,29 @@ export class ZiraNode {
       if (modelId) {
         const servers = this.models.peersServing(modelId).slice(0, probeCap);
         let si = 0;
+        // Connect-then-probe: the reverse chunk challenge needs a live connection to ride, but a NAT/CGNAT
+        // miner may not be directly connected to us. Dial it BY peer id first (resolves its relay/DHT
+        // addresses, including a circuit-relay reservation) so verifyPeerStorage can reach it. Master-side only,
+        // bounded, with a per-peer cooldown so a peer that just failed is not re-dialed every round. Toggle off
+        // with ZIRA_PROBE_PREDIAL=0. Client-compatible: miners serve chunks on their current build unchanged.
+        const preDial = (process.env.ZIRA_PROBE_PREDIAL ?? "1") !== "0";
+        const preDialCooldownMs = Number(process.env.ZIRA_PROBE_PREDIAL_COOLDOWN_MS ?? 60_000);
+        const preDialTimeoutMs = Number(process.env.ZIRA_PROBE_PREDIAL_TIMEOUT_MS ?? 8_000);
         const storeWorker = async (): Promise<void> => {
           while (si < servers.length) {
             const { peerId, address } = servers[si++]!;
-            try { if (await this.models.verifyPeerStorage(peerId, modelId)) { this.verifiedMiners.set(address, now); this.storageServingMiners.set(address, now); stored++; } }
+            try {
+              if (preDial && this.net.ensureConnected) {
+                const last = this.preDialCooldown.get(peerId) ?? 0;
+                if (now - last >= preDialCooldownMs) { this.preDialCooldown.set(peerId, now); await this.net.ensureConnected(peerId, preDialTimeoutMs); }
+              }
+              if (await this.models.verifyPeerStorage(peerId, modelId)) { this.verifiedMiners.set(address, now); this.storageServingMiners.set(address, now); stored++; }
+            }
             catch { /* unreachable peer: skip */ }
           }
         };
+        // prune stale cooldown entries so the map stays bounded
+        for (const [p, ts] of this.preDialCooldown) if (now - ts > 600_000) this.preDialCooldown.delete(p);
         await Promise.all(Array.from({ length: Math.min(probeConc, servers.length) }, () => storeWorker()));
       }
       // prune stale entries so the vouch set stays current and bounded
@@ -1645,6 +1690,45 @@ export class ZiraNode {
       // A rejected payout would otherwise retry silently forever — surface WHY so it can be fixed.
       this.lastParticipationDeferLog = bucket;
       log.warn(`field participation payout REJECTED (${payees.length} payees, bucket ${bucket}): ${res.reason ?? "no reason"}`);
+    }
+  }
+
+  // Image jobs already paid (in-memory; the coordinator's jobs are in-memory + TTL-bounded, so on restart there
+  // are no settled jobs to re-pay and no persisted watermark is needed).
+  private paidImageJobIds = new Set<string>();
+  /**
+   * Text-to-image settlement payout (2.9.0 Track A). STRICT NO-OP while image serving is dormant (the first line
+   * returns unless ZIRA_IMAGE_ENABLE=1), so this can never affect the live field payout. When armed, the active
+   * settler pays the providers whose outputs perceptually agreed (imageAgreementOutcome, already fork-safe) via
+   * the SAME single signed batch_transfer the field payout uses (kind batch_transfer, memo {o: outputs}), applied
+   * byte-identically by every node. Isolated from settleFieldParticipation and fully try/caught so a fault here
+   * can never throw into the settler tick or the critical field payout.
+   */
+  private settleImagePayouts(now: number): void {
+    try {
+      if (!this.imageCoordinator.isEnabled()) return;              // dormant: strict no-op
+      if (!this.isNetworkSettler()) return;                        // only the active settler pays
+      const pricePerJob = imagePriceUZIR(undefined, undefined);    // per-job budget (dormant pricing = query base)
+      const { payouts, paidJobIds } = this.imageCoordinator.drainSettledPayouts(pricePerJob, this.paidImageJobIds);
+      if (payouts.size === 0) return;
+      const outputs = [...payouts.entries()]
+        .filter(([a, amt]) => /^zir1[0-9a-z]{6,}$/.test(a) && amt > 0 && a !== this.identity.address && !this.state.isGenesisMaster(a))
+        .sort((x, y) => (x[0] < y[0] ? -1 : 1))
+        .map(([a, amt]) => [a, amt] as [string, number]);
+      if (outputs.length === 0) { paidJobIds.forEach((id) => this.paidImageJobIds.add(id)); return; } // nothing payable; still mark settled
+      const total = outputs.reduce((s, [, amt]) => s + amt, 0);
+      const funder = this.identity.address;
+      if (this.state.provisionalBalance(funder) < total + PROTOCOL.BASE_FEE_UZIR) return; // defer; do NOT mark paid
+      const tx = signTx({
+        network: this.genesis.network, from: funder, fromPubKey: this.identity.publicKey,
+        to: funder, amountUZIR: total, feeUZIR: PROTOCOL.BASE_FEE_UZIR,
+        nonce: this.state.provisionalNonce(funder), kind: "batch_transfer",
+        parents: [], timestamp: now, memo: JSON.stringify({ o: outputs }),
+      }, this.identity.privateKey);
+      const res = this.submitTx(tx);
+      if (res.accepted) { paidJobIds.forEach((id) => this.paidImageJobIds.add(id)); log.info(`image coordination payout: ${outputs.length} provider(s), ${total} uZIR in ONE batch`); }
+    } catch (e) {
+      log.warn(`image payout skipped: ${(e as Error).message}`); // never throw into the settler tick
     }
   }
 
@@ -2232,7 +2316,7 @@ export class ZiraNode {
     // root, so computeStateRoot(head) != finalizedRoot and every fast-sync attempt was rejected (ROOT
     // MISMATCH) — fresh nodes then fell back to genesis replay and ran with wrong local balances. Deep-copied
     // (JSON round-trip) so later balance mutations to the live account objects never corrupt a cached root.
-    this.finalizedSnapByRoot.set(root, JSON.parse(JSON.stringify(this.state.snapshot())));
+    this.finalizedSnapByRoot.set(root, { epoch, snap: JSON.parse(JSON.stringify(this.state.snapshot())) });
     if (this.finalizedSnapByRoot.size > FINALIZED_SNAP_HISTORY) {
       const oldest = this.finalizedSnapByRoot.keys().next().value as string | undefined;
       if (oldest !== undefined) this.finalizedSnapByRoot.delete(oldest);
@@ -2332,7 +2416,12 @@ export class ZiraNode {
   private fastSynced = false;
   private fastSyncStarted = false;
   private fastSyncFailedAttempts = 0;
-  private static FAST_SYNC_MAX_ATTEMPTS = 12;
+  // Each attempt queries up to 5 connected peers and adopts the first snapshot that verifies. 12 was too few
+  // during a partial rollout / mixed-serving mesh: if only a minority of reachable seeds serve a consistent
+  // finalized snapshot (e.g. mid-deploy, or under finality-lag bursts), a joiner can burn 12 rounds without
+  // ever querying a good one and then fall back to a slow genesis replay. A larger budget keeps it retrying
+  // long enough to reach a healthy seed; still bounded so a genuinely incompatible network degrades eventually.
+  private static FAST_SYNC_MAX_ATTEMPTS = 60;
   private startedFresh = false;
   // Finality watchdog (auto-resync). If finalizedEpoch freezes while the chain clock keeps moving, the node
   // re-adopts a current, verified peer snapshot, the same self-heal a fresh node uses on join. Conservative
@@ -2350,7 +2439,7 @@ export class ZiraNode {
   // root -> deep-copied state snapshot taken when the applied state hashed to that root. serveSnapshot()
   // serves the entry for lastFinalizedRoot so the served state matches the finalized checkpoint it is paired
   // with (see voteCheckpoints). Bounded by FINALIZED_SNAP_HISTORY.
-  private finalizedSnapByRoot = new Map<string, object>();
+  private finalizedSnapByRoot = new Map<string, { epoch: number; snap: object }>();
   private divergentFinalizedStreak = 0;
   private lastDivergenceCheckedEpoch = -1;
   private lastDivergenceResyncAt = 0;
@@ -2368,7 +2457,7 @@ export class ZiraNode {
    * the master can confirm we are a real, directly-reachable, participating peer (the baseline coordination
    * work that earns even without holding model bytes). */
   private async *serveLiveness(req: Uint8Array, from: string): AsyncIterable<Uint8Array> {
-    let msg: { nonce?: unknown; push?: unknown; address?: unknown; pubKey?: unknown; ts?: unknown; sig?: unknown } = {};
+    let msg: { nonce?: unknown; push?: unknown; address?: unknown; pubKey?: unknown; ts?: unknown; sig?: unknown; storage?: { modelId?: unknown; root?: unknown; hash?: unknown } } = {};
     try { msg = JSON.parse(dec.decode(req)) as typeof msg; } catch { /* empty */ }
     // PUSH: a miner proactively asserts liveness over its OWN outbound connection (churn/NAT-resilient). Only a
     // MASTER records it, binding the pushed address to THIS connection's peer id — one address per live
@@ -2389,6 +2478,16 @@ export class ZiraNode {
           // one entry to the miner's own key, so a relay cannot fabricate a vouch (it has no miner key) and there
           // is no extra sybil surface; a fake address with no earned standing is still paid ~nothing.
           this.pushVouch.set(msg.address, { address: msg.address, ts: now });
+          // Push-storage: if the miner rode a storage proof for a model we hold, verify it against a recent
+          // finalized root (unpredictable ahead, so not pre-storable) and vouch it as storage-serving. This is the
+          // NAT-proof analogue of the reverse chunk challenge; it only sets storageServingMiners (settler-local
+          // payout weight), so it is fork-safe exactly like the reverse probe.
+          const s = msg.storage;
+          if (s && typeof s.modelId === "string" && typeof s.root === "string" && typeof s.hash === "string" &&
+              (now - (this.recentFinalizedRoots.get(s.root) ?? 0)) <= PUSH_STORAGE_ROOT_MAX_AGE_MS &&
+              this.models.verifyStorageProof(s.modelId, storageProofSalt(s.modelId, s.root, msg.address), s.hash)) {
+            this.storageServingMiners.set(msg.address, now);
+          }
         } else {
           // RELAY-FORWARDED VOUCH: a well-connected non-master (a public relay/gateway that home nodes can always
           // reach) forwards the miner's own signed push to the masters, so a home miner behind NAT/CGNAT is
@@ -2440,9 +2539,22 @@ export class ZiraNode {
     const seeded = this.net.seedPeers?.() ?? [];
     const targets = [...new Set([...seeded, ...this.net.peers()])].slice(0, PUSH_LIVENESS_MAX_TARGETS);
     if (!targets.length) return;
+    // Ride the push with a STORAGE proof when we hold a model + storage is on: pick a chunk by a recent finalized
+    // root and prove we hold it. Lets a symmetric-CGNAT miner (that a master cannot reverse-dial) still earn the
+    // storage tier. Off with ZIRA_PUSH_STORAGE=0.
+    let storage: { modelId: string; root: string; hash: string } | undefined;
+    if (process.env.ZIRA_PUSH_STORAGE !== "0" && this.models.storageState().enabled) {
+      const modelId = this.models.localHeldModelId();
+      const root = this.checkpoints.lastFinalizedRoot;
+      if (modelId && root && root !== "00") {
+        const proof = this.models.storageProof(modelId, storageProofSalt(modelId, root, this.identity.address));
+        if (proof) storage = { modelId, root, hash: proof.hash };
+      }
+    }
     const body = enc.encode(JSON.stringify({
       push: true, address: this.identity.address, pubKey: this.identity.publicKey, ts: now,
       sig: edSign("zira-live-push:" + now, this.identity.privateKey),
+      ...(storage ? { storage } : {}),
     }));
     for (const peerId of targets) void this.net.request(peerId, LIVENESS_PROTOCOL, body, 8_000).catch(() => { /* best effort; retry next bucket */ });
   }
@@ -2486,16 +2598,32 @@ export class ZiraNode {
   /** Serve our finalized state snapshot to a joining peer, with the finalized checkpoint it sits on. */
   private async *serveSnapshot(): AsyncIterable<Uint8Array> {
     const finRoot = this.checkpoints.lastFinalizedRoot;
-    // Serve the snapshot whose root == the finalized root, NOT the drifting head. If the finalized snapshot
-    // is not cached (e.g. finality lag briefly exceeded FINALIZED_SNAP_HISTORY, or right after boot), fall
-    // back to the head snapshot — the joiner's verifier simply rejects it and retries the next peer, exactly
-    // as before, so this is never worse than the old behaviour and normally strictly correct.
-    const finalizedSnap = this.finalizedSnapByRoot.get(finRoot) ?? this.state.snapshot();
+    const finEpoch = this.checkpoints.lastFinalizedEpoch;
+    // Serve a CONSISTENT (accounts, finalizedRoot, votes) triple — the snapshot whose accounts hash to the
+    // advertised finalized root, with that root's finalizing votes — NEVER the drifting head paired with a
+    // lagged finalized root (which every joiner rightly rejects, so fast-sync would never converge).
+    //
+    // The exact current finalized root is often NOT cached: with single-finalizer finality, only the LEADER's
+    // root is finalized, and a FOLLOWER master caches its own per-epoch head roots, which equal the leader's
+    // finalized root only on epochs where it converged — plus a multi-minute finality lag can exceed the
+    // cache window entirely. Observed 2026-07-21: fresh nodes stalled at genesis because every served snapshot
+    // was head-with-a-stale-root. So on a miss, walk the cache most-recent-first and serve the newest entry we
+    // can PROVE finalized (its (epoch,root) still has finalizing votes). That is a slightly older but fully
+    // verifiable checkpoint the joiner adopts, then forward-applies the tail to catch up. Head remains the
+    // last-resort only when nothing verifiable is cached (joiner rejects it, exactly as before — never worse).
+    let serveRoot = finRoot, serveEpoch = finEpoch;
+    let entry = this.finalizedSnapByRoot.get(finRoot);
+    if (!entry) {
+      for (const [r, e] of [...this.finalizedSnapByRoot.entries()].reverse()) {
+        if (this.checkpoints.finalizingVotes(e.epoch, r).length > 0) { entry = e; serveRoot = r; serveEpoch = e.epoch; break; }
+      }
+    }
+    const snapshot = entry ? entry.snap : this.state.snapshot();
     yield enc.encode(JSON.stringify({
-      snapshot: finalizedSnap,
-      finalizedEpoch: this.checkpoints.lastFinalizedEpoch,
-      finalizedRoot: finRoot,
-      votes: this.checkpoints.finalizingVotes(this.checkpoints.lastFinalizedEpoch, finRoot),
+      snapshot,
+      finalizedEpoch: serveEpoch,
+      finalizedRoot: serveRoot,
+      votes: this.checkpoints.finalizingVotes(serveEpoch, serveRoot),
     }));
   }
 
@@ -2535,33 +2663,41 @@ export class ZiraNode {
         } catch { /* try the next peer */ }
       }
       if (got.length === 0) return; // no snapshot yet; a later peer connect retries (see finally)
-      // most advanced first
+      // Try EVERY candidate, most-advanced first, and adopt the FIRST that verifies — not only the single
+      // most-advanced one. A snapshot fails verifyFastSyncSnapshot exactly when the serving peer's live state
+      // has raced a few epochs past its own finalized root (finality jitter / catch-up) — a per-PEER transient.
+      // Checking only got[0] threw away a whole round whenever that one peer happened to be racing, even when
+      // another peer in the same batch was serving a clean finalized snapshot; a fresh join then stalled at
+      // genesis across many rounds (observed 2026-07-21: 9 straight failed rounds while masters served fine).
+      // Iterating mirrors attemptResyncOnDivergence and stays consensus-neutral: every candidate passes the
+      // identical >=67%-master, genesis-anchored checkpoint gate before it can be adopted.
       got.sort((a, b) => (b.finalizedEpoch ?? -1) - (a.finalizedEpoch ?? -1));
-      const best = got[0]!;
-      if (!best.snapshot || !Array.isArray(best.snapshot.accounts) || best.snapshot.accounts.length === 0) return;
-      if (!this.verifyFastSyncSnapshot(best)) {
-        // Do NOT give up after one failed verification. A snapshot fails exactly this check whenever the
-        // serving peer's live state has moved past its finalized root (finality jitter, catch-up windows) —
-        // a TRANSIENT condition. Giving up permanently ("replaying from genesis") stranded joining nodes at
-        // epoch -1 forever (the mainnet clock is hundreds of millions of epochs ahead of genesis), which
-        // users saw as a stuck 0 balance. Retry on later peer connects, bounded so a genuinely
-        // incompatible network still degrades to the old behavior instead of retrying forever.
+      let adopted: Snap | null = null;
+      for (const cand of got) {
+        if (!cand.snapshot || !Array.isArray(cand.snapshot.accounts) || cand.snapshot.accounts.length === 0) continue;
+        if (!this.verifyFastSyncSnapshot(cand)) continue; // this peer raced its root; try the next candidate
+        adopted = cand;
+        break;
+      }
+      if (!adopted) {
+        // No candidate in this batch verified. Do NOT give up permanently — retry on later peer connects,
+        // bounded so a genuinely incompatible network still degrades to genesis replay instead of looping forever.
         this.fastSyncFailedAttempts++;
         if (this.fastSyncFailedAttempts >= ZiraNode.FAST_SYNC_MAX_ATTEMPTS) {
           log.warn(`fast-sync: snapshot verification failed ${this.fastSyncFailedAttempts} times; replaying from genesis`);
           this.fastSynced = true;
           return;
         }
-        log.warn(`fast-sync: snapshot failed checkpoint verification (attempt ${this.fastSyncFailedAttempts} of ${ZiraNode.FAST_SYNC_MAX_ATTEMPTS}); retrying on the next peer`);
+        log.warn(`fast-sync: no candidate of ${got.length} peer snapshot(s) verified (attempt ${this.fastSyncFailedAttempts} of ${ZiraNode.FAST_SYNC_MAX_ATTEMPTS}); retrying on the next peer`);
         return; // finally() re-arms fastSyncStarted so a later peer connect retries
       }
       // Adopt the snapshot AND arm the fast-sync convergence floor: any backfilled event already covered
       // by the adopted epoch is dropped and never reprocessed, so the joiner converges exactly to the mesh
       // state root instead of carrying a small offset from re-running the field over events the snapshot
       // already counted. Events strictly after the adopted epoch are still applied forward as normal.
-      const dropped = this.state.adoptFastSyncSnapshot(best.snapshot);
+      const dropped = this.state.adoptFastSyncSnapshot(adopted.snapshot);
       this.fastSynced = true;
-      log.info(`fast synced to epoch ${this.state.lastProcessedEpoch}, finalized ${best.finalizedEpoch} verified against master checkpoint; floor armed, dropped ${dropped.txs} txs/${dropped.observations} obs already in snapshot; validating from here`);
+      log.info(`fast synced to epoch ${this.state.lastProcessedEpoch}, finalized ${adopted.finalizedEpoch} verified against master checkpoint; floor armed, dropped ${dropped.txs} txs/${dropped.observations} obs already in snapshot; validating from here`);
     } finally {
       // If we did not actually adopt (no snapshot available yet), release the guard so a later peer
       // connect can retry the negotiation. Once adopted, fastSynced stays true and this is a no-op.

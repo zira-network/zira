@@ -7,7 +7,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
   MessageSquare, Wallet as WalletIcon, Bot, CircuitBoard, Network, Hexagon,
-  BookOpen, Settings as SettingsIcon, Crown, Radio, Wifi, WifiOff, Zap, Gem,
+  BookOpen, Settings as SettingsIcon, Crown, Radio, Wifi, WifiOff, Zap, Gem, Gauge, Image as ImageIcon,
   Moon, Sun, Plus, PanelLeftClose, PanelLeftOpen, Menu, X,
 } from "lucide-react";
 import { ZiraMark } from "./brand";
@@ -40,11 +40,18 @@ type NavSection = { heading: string; items: NavItem[] };
 // Nav grouped into calm sections for clearer organization. All routes preserved.
 const NAV_SECTIONS: NavSection[] = [
   {
+    heading: "Overview",
+    items: [
+      { to: "/dashboard", label: "Dashboard", icon: Gauge, feature: null, desktopOnly: false },
+    ],
+  },
+  {
     heading: "Use",
     items: [
       { to: "/", label: "Console", icon: MessageSquare, end: true, desktopOnly: false },
-      { to: "/resonators", label: "Resonators", icon: Bot, feature: "resonators" as const, desktopOnly: false },
+      { to: "/images", label: "Images", icon: ImageIcon, feature: null, desktopOnly: false },
       { to: "/marketplace", label: "Discover", icon: CircuitBoard, feature: "marketplace" as const, desktopOnly: false },
+      { to: "/resonators", label: "Resonators", icon: Bot, feature: "resonators" as const, desktopOnly: false },
     ],
   },
   {
@@ -384,7 +391,7 @@ function TopBar({ title }: { title: string }) {
 
 const TITLES: Record<string, string> = {
   "/": "Console", "/wallet": "Wallet", "/resonators": "Resonators", "/marketplace": "Discover",
-  "/explorer": "Explorer", "/anchors": "Anchors", "/learn": "Learn", "/settings": "Settings",
+  "/dashboard": "Dashboard", "/images": "Images", "/explorer": "Explorer", "/anchors": "Anchors", "/learn": "Learn", "/settings": "Settings",
   "/founder": "Steward", "/styleguide": "Styleguide",
 };
 

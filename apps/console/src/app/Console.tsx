@@ -274,14 +274,15 @@ export function Console() {
   type ComputeTier = "free" | "zir" | "machine";
   const [computeTier, setComputeTier] = useState<ComputeTier>(() => {
     const saved = localStorage.getItem("zira.console.computeTier") as ComputeTier | null;
-    return saved === "machine" && !isLocalNode() ? "free" : (saved ?? "free");
+    // Default is ZIR (pay the miners who answer) when the Console opens. Machine is "coming soon", so any
+    // stored "machine" preference maps back to ZIR.
+    return saved === "machine" ? "zir" : (saved ?? "zir");
   });
   useEffect(() => { localStorage.setItem("zira.console.computeTier", computeTier); }, [computeTier]);
   const useLocalInference = computeTier === "machine";
   function setTier(t: ComputeTier) {
+    if (t === "machine") return; // Machine tier is coming soon; not selectable yet.
     setComputeTier(t);
-    // Machine tier runs on your own hardware, so make sure own-task inference is on.
-    if (t === "machine" && mode === "node" && mining && !mining.ownTaskInference) void setUseMachine(true);
   }
   const [coordinationProfile, setCoordinationProfile] = useState<CoordinationProfile>(() => (localStorage.getItem("zira.console.coordinationProfile") as CoordinationProfile) || "balanced");
   const { simpleMode } = useUi();
@@ -966,11 +967,10 @@ export function Console() {
               <button role="tab" aria-selected={computeTier === "zir"} onClick={() => setTier("zir")} title="The network answers; you pay the miners who answer in ZIR." className={`relative z-[1] inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-all ${computeTier === "zir" ? "bg-[color-mix(in_srgb,var(--teal)_15%,transparent)] text-[var(--teal)] shadow-[0_1px_0_color-mix(in_srgb,var(--teal)_22%,transparent)]" : "text-faint hover:text-text"}`}>
                 <Coins size={12} /> ZIR
               </button>
-              {isLocalNode() && (
-                <button role="tab" aria-selected={computeTier === "machine"} onClick={() => setTier("machine")} title="Your own computer answers. Private, costs and earns no ZIR." className={`relative z-[1] inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-all ${computeTier === "machine" ? "bg-[color-mix(in_srgb,var(--indigo)_15%,transparent)] text-[var(--indigo)] shadow-[0_1px_0_color-mix(in_srgb,var(--indigo)_22%,transparent)]" : "text-faint hover:text-text"}`}>
-                  <Cpu size={12} /> Machine
-                </button>
-              )}
+              <button role="tab" aria-disabled title="Your own computer answers, coming soon." disabled className="relative z-[1] inline-flex cursor-not-allowed items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-faint opacity-60">
+                <Cpu size={12} /> Machine
+                <span className="ml-0.5 rounded-full border border-hairline px-1.5 py-px text-[9px] uppercase tracking-wide text-faint">soon</span>
+              </button>
             </div>
             <span className="hidden min-w-0 max-w-xl truncate text-xs text-faint xl:inline">{(answerMode === "local" ? "Work in a folder on your computer. " : "") + (computeTier === "free" ? "The network answers, within your free allowance. Signed receipt included." : computeTier === "zir" ? "The network answers; you pay the miners who answer in ZIR (unlock a wallet first)." : "Your own computer answers. Private, costs and earns no ZIR (that is Mining, a separate switch).")}</span>
           </div>

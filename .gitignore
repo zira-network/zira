@@ -61,3 +61,4 @@ dist-*/
 *.tmp/
 .cache/
 apps/desktop/llama-bundle/
+apps/desktop/sd-bundle/

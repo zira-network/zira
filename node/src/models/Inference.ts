@@ -33,11 +33,27 @@ export class Inference {
     const mod: any = await import("node-llama-cpp" as string).catch(() => null);
     if (!mod) throw new Error("inference engine not installed. Run: pnpm add node-llama-cpp (desktop miners only).");
     await this.unload();
-    this.llama = await mod.getLlama();
-    this.model = await this.llama.loadModel({ modelPath, gpuLayers: opts.gpuLayers });
+    // Cross-vendor GPU: "auto" picks the best backend AVAILABLE in the bundled engine (CUDA on Nvidia, Vulkan
+    // on AMD/Intel, Metal on Apple) and otherwise CPU, so mining is not Nvidia-only. Override with
+    // ZIRA_GPU_BACKEND=cuda|vulkan|metal|false (false = force CPU).
+    const pref = process.env.ZIRA_GPU_BACKEND;
+    const gpu = pref === "false" ? false : (pref || "auto");
+    this.llama = await mod.getLlama({ gpu }).catch(async () => mod.getLlama({ gpu: false }));
+    let gpuLayers = opts.gpuLayers;
+    try {
+      this.model = await this.llama.loadModel({ modelPath, gpuLayers });
+    } catch (e) {
+      // GPU offload failed (backend unsupported here / not enough VRAM). Fall back to CPU so the node still
+      // mines instead of being excluded. Better a slower miner than a machine that cannot participate.
+      if (gpuLayers > 0) {
+        log.warn(`GPU offload failed (${(e as Error).message.slice(0, 90)}); retrying on CPU`);
+        gpuLayers = 0;
+        this.model = await this.llama.loadModel({ modelPath, gpuLayers: 0 });
+      } else throw e;
+    }
     this.context = await this.model.createContext({ threads: opts.threads, sequences: 4 });
     this.loadedId = modelId;
-    log.info(`inference engine loaded model ${modelId.slice(0, 12)} gpuLayers=${opts.gpuLayers} threads=${opts.threads}`);
+    log.info(`inference engine loaded model ${modelId.slice(0, 12)} backend=${this.llama?.gpu ?? "?"} gpuLayers=${gpuLayers} threads=${opts.threads}`);
   }
 
   async generate(system: string, messages: { role: "user" | "assistant"; content: string }[]): Promise<string> {

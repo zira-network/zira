@@ -9,7 +9,7 @@ import { join, normalize, extname } from "node:path";
 import { connect } from "node:net";
 import { WebSocketServer, WebSocket } from "ws";
 import {
-  ANCHOR_CLASSES, TOTAL_ANCHOR_SEATS, PROTOCOL, DOMAIN_META, addressFromPubKey, type Domain, type QueryFusion,
+  ANCHOR_CLASSES, TOTAL_ANCHOR_SEATS, MAINNET_ANCHOR_STEWARD, PROTOCOL, DOMAIN_META, addressFromPubKey, imagePriceUZIR, type Domain, type QueryFusion,
 } from "@zira/protocol";
 import type { BootstrapSeedCandidate, ZiraNode } from "../core/ZiraNode.js";
 import type { AnswerMsg } from "../core/types.js";
@@ -407,6 +407,8 @@ const PUBLIC_GET_ROUTES = new Set<string>([
   // events status (read), own-task STATUS read (does not run inference), governance/objects reads
   "/events/status", "/own-task/status",
   "/governance/proposals", "/objects", "/agreements", "/recommendations",
+  // text-to-image (2.9.0, dormant unless ZIRA_IMAGE_ENABLE=1): poll a submitted image job's status/result.
+  "/image/result",
 ]);
 // Public POST submits: already IP-rate-limited (F5) and consensus-validated; safe for anonymous web/mobile
 // clients. These are the ask/observe/answer paths plus signed-tx submission (a tx must carry a valid
@@ -423,6 +425,8 @@ const PUBLIC_POST_ROUTES = new Set<string>([
   "/anchors/event",
   // publishing soft-state resonators/tasks is signed + validated like the field gossip it mirrors.
   "/resonator", "/task",
+  // text-to-image (2.9.0, dormant unless ZIRA_IMAGE_ENABLE=1): submit an image job; ingest a provider commitment.
+  "/image/submit", "/image/commit",
 ]);
 
 async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: ServerResponse, q: URLSearchParams, opts: RpcOptions): Promise<void> {
@@ -594,6 +598,31 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
     //      on-chain coordination payouts. Globally available on any node incl. the read gateway. ----
     case "GET /answerers": return json(res, node.answererLeaderboard(Number(q.get("limit") ?? 50), Number(q.get("scan") ?? 5000)));
     case "GET /answerers/mine": return json(res, node.answererEarnings(q.get("address") ?? "", Number(q.get("scan") ?? 5000)));
+
+    // ---- text-to-image (2.9.0 Track A, DORMANT unless ZIRA_IMAGE_ENABLE=1) ----
+    case "POST /image/submit": { const b = await body(req);
+      if (!node.imageCoordinator.isEnabled()) return json(res, { disabled: true, reason: "image generation is not enabled on this node" });
+      const job = node.imageCoordinator.openJob(
+        { prompt: String(b.prompt ?? ""), params: b.params, modelId: String(b.modelId ?? ""), seed: (Number(b.seed) || 0) | 0, asker: String(b.asker ?? "") },
+        Date.now());
+      if (!job) return json(res, { error: "could not open image job (disabled or at capacity)" }, 400);
+      return json(res, { jobId: job.jobId, paramsHash: job.paramsHash, priceUZIR: imagePriceUZIR(job.params) });
+    }
+    case "GET /image/result": {
+      const job = node.imageCoordinator.getJob(q.get("id") ?? q.get("jobId") ?? "");
+      if (!job) return json(res, { found: false });
+      return json(res, { found: true, jobId: job.jobId, settled: !!job.settlement?.agreed,
+        providers: job.settlement?.agreeingProviders ?? [], canonicalHash: job.settlement?.canonicalHash ?? null,
+        commitments: job.commitments.length });
+    }
+    case "POST /image/commit": { const b = await body(req);
+      if (!node.imageCoordinator.isEnabled()) return json(res, { disabled: true });
+      const c = b.commitment ?? b;
+      const settle = node.imageCoordinator.addCommitment(String(b.jobId ?? c.jobId ?? ""),
+        { provider: String(c.provider ?? ""), pHash: String(c.pHash ?? ""), seed: (Number(c.seed) || 0) | 0, modelId: String(c.modelId ?? ""), paramsHash: String(c.paramsHash ?? "") },
+        Date.now());
+      return json(res, { ok: true, settled: !!settle?.agreed, providers: settle?.agreeingProviders ?? [] });
+    }
 
     // ---- providers + query fusion ----
     case "GET /providers": return json(res, providers(node));
@@ -879,7 +908,12 @@ function anchorSeats(node: ZiraNode, q: URLSearchParams) {
     const classSeats = seats.filter((a) => a.classCode === code);
     const taken = classSeats.filter((a) => a.owner).length;
     const listed = classSeats.filter((a) => a.status === "listed").length;
-    return { class: code, name: c.name, total: c.seats, taken, listed, available: c.seats - taken };
+    // Real seat state for clients: every seat is owned at genesis (mostly by the anchor reserve), so
+    // "taken" is always the class total and hides the truth. `held` = owned by a distinct owner (a signed
+    // early holder); `open` = still reserve-held AND the steward has opened it for a new adopter to claim.
+    const held = classSeats.filter((a) => a.owner && a.owner !== MAINNET_ANCHOR_STEWARD).length;
+    const open = classSeats.filter((a) => a.owner === MAINNET_ANCHOR_STEWARD && a.contributionsOpen).length;
+    return { class: code, name: c.name, total: c.seats, taken, listed, available: c.seats - taken, held, open };
   });
   void TOTAL_ANCHOR_SEATS;
   return { total: seats.length, classes: byClass, seats };
