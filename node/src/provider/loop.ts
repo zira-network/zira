@@ -85,10 +85,28 @@ export function startMiner(node: ZiraNode, identity: Keypair, cfg: MinerConfig):
 
   const annIv = setInterval(announce, 30_000);
   const pollIv = setInterval(() => void tick(), 2500);
+  // Serve-baseline retry (opt-in, self-guarded no-op otherwise): keep trying to fetch + serve the baseline
+  // model until this node can answer, so a node that booted before peers were reachable still comes up serving.
+  const baseIv = setInterval(() => { if (!node.models.canServe()) void node.models.reconcileServeBaseline(); }, 30_000);
+  // Full-utilization keepalive (STRICTLY opt-in via ZIRA_FULL_UTILIZATION): when there are no in-flight queries
+  // for several checks, run one short throwaway warmup generation (result DISCARDED, never published, never
+  // settled) so the accelerator stays warm. Cheap and fork-safe; the interval is not even created when off.
+  const fullUtilization = process.env.ZIRA_FULL_UTILIZATION === "1" || process.env.ZIRA_FULL_UTILIZATION?.toLowerCase() === "true";
+  const KEEPALIVE_IDLE_CHECKS = 4;   // consecutive idle checks (~20s) before warming
+  let idleChecks = 0;
+  let keepaliveRunning = false;
+  const kaIv = fullUtilization ? setInterval(() => {
+    if (stopped || keepaliveRunning) return;
+    if (!node.models.canServe() || inFlight.size > 0) { idleChecks = 0; return; }
+    if (++idleChecks < KEEPALIVE_IDLE_CHECKS) return;
+    idleChecks = 0;
+    keepaliveRunning = true;
+    void node.models.warmupKeepalive().finally(() => { keepaliveRunning = false; });
+  }, 5000) : null;
   // Keep the serve-health probe fresh (probeServable self-throttles to ~5 min); announce() only advertises
   // this node once it has PROVEN it can generate, so a broken model/endpoint never becomes a phantom provider.
   const probeIv = setInterval(() => { void node.models.probeServable(Date.now()); }, 60_000);
   void node.models.probeServable(Date.now()).then((ok) => { if (ok) announce(); });
   log.info(`miner ready, serving [${cfg.domains.join(", ")}] when mining is on`);
-  return () => { stopped = true; clearInterval(annIv); clearInterval(pollIv); clearInterval(probeIv); };
+  return () => { stopped = true; clearInterval(annIv); clearInterval(pollIv); clearInterval(probeIv); clearInterval(baseIv); if (kaIv) clearInterval(kaIv); };
 }

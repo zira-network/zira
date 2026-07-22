@@ -11,7 +11,9 @@ import { cn } from "../lib/cn";
 // ---- Button ----
 type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
 export function Button({ variant = "secondary", className, children, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }) {
-  const base = "inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-all duration-[var(--dur)] ease-[var(--ease)] disabled:opacity-40 disabled:cursor-not-allowed focus:outline-none active:scale-[0.99]";
+  // focus:outline-none removes the default browser outline; a focus-visible accent ring restores a clearly
+  // visible KEYBOARD focus indicator (the bare outline-none previously left buttons with no focus ring at all).
+  const base = "inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-all duration-[var(--dur)] ease-[var(--ease)] disabled:opacity-40 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-base)] active:scale-[0.99]";
   const styles: Record<ButtonVariant, string> = {
     primary: "font-semibold text-[var(--accent-contrast)] bg-[var(--accent)] hover:bg-[color-mix(in_srgb,var(--accent)_90%,black)] shadow-[var(--shadow-1)] hover:shadow-[var(--shadow-2)]",
     secondary: "bg-surface text-text border border-hairline-strong hover:bg-elevated hover:border-[var(--border-strong)]",
@@ -23,7 +25,7 @@ export function Button({ variant = "secondary", className, children, ...props }:
 
 // ---- Card ----
 export function Card({ className, children, onClick, style }: { className?: string; children: ReactNode; onClick?: () => void; style?: CSSProperties }) {
-  return <div onClick={onClick} style={style} className={cn("relative overflow-hidden rounded-xl border border-hairline bg-surface p-5 text-text elevate", onClick && "lift cursor-pointer", className)}><div className="relative z-[1]">{children}</div></div>;
+  return <div onClick={onClick} style={style} className={cn("relative overflow-hidden rounded-xl border border-hairline bg-[var(--bg-panel)] glass-blur p-5 text-text elevate", onClick && "lift cursor-pointer", className)}><div className="relative z-[1]">{children}</div></div>;
 }
 
 // ---- Field: a labelled form row with an optional hint ----
@@ -185,7 +187,7 @@ export function EmptyState({ title, hint, children, action }: { title: string; h
   return (
     <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
       {children}
-      <div className="text-base font-semibold text-text">{title}</div>
+      <div className="text-[1rem] font-semibold text-text">{title}</div>
       {hint && <div className="max-w-sm text-sm leading-relaxed text-muted">{hint}</div>}
       {action && <div className="mt-1">{action}</div>}
     </div>

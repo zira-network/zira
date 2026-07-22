@@ -28,7 +28,7 @@ function Stat({ label, value, tone }: { label: string; value: ReactNode; tone?: 
   return (
     <div className="rounded-lg border border-hairline bg-base p-2">
       <div className={cn("mono text-lg font-semibold", tone === "teal" ? "text-[var(--teal)]" : "text-text")}>{value}</div>
-      <div className="text-[11px] text-faint">{label}</div>
+      <div className="text-[11px] uppercase tracking-wide text-faint">{label}</div>
     </div>
   );
 }
@@ -99,12 +99,12 @@ function ResetZiraCard() {
       {isDesktop() && (
         <div className="mb-4 border-b border-hairline pb-4">
           <h3 className="mb-1 flex items-center gap-2 text-sm font-semibold text-text"><RotateCcw size={15} /> Re-sync ledger</h3>
-          <p className="mb-2 text-xs text-muted">Stuck on “Syncing”, or your balance looks wrong compared to the network? This rebuilds only your local ledger and fetches a fresh, verified copy from the network. <span className="text-text">Your wallet and settings are kept</span> — this is the safe fix, try it first.</p>
+          <p className="mb-2 text-xs text-muted">Stuck on “Syncing”, or your balance looks wrong compared to the network? This rebuilds only your local ledger and fetches a fresh, verified copy from the network. <span className="text-text">Your wallet and settings are kept</span>. This is the safe fix, try it first.</p>
           <Button variant="secondary" onClick={resyncLedger} disabled={resyncing}>{resyncing ? "Re-syncing…" : "Re-sync ledger (keeps wallet)"}</Button>
         </div>
       )}
       <h3 className="mb-1 flex items-center gap-2 text-sm font-semibold text-[var(--danger)]"><RotateCcw size={15} /> Delete wallet & reset</h3>
-      <p className="mb-2 text-xs text-muted">This wipes everything and rebuilds from genesis: your wallet, settings, and chats on this device, and your node's whole ledger{isDesktop() ? ", plus the downloaded model cache. The app restarts itself clean (the model re-downloads on next use)." : " (all past transactions)."} <span className="text-[var(--danger)]">Back up your private key first</span> — this deletes it. If you only have a sync problem, use “Re-sync ledger” above instead.</p>
+      <p className="mb-2 text-xs text-muted">This wipes everything and rebuilds from genesis: your wallet, settings, and chats on this device, and your node's whole ledger{isDesktop() ? ", plus the downloaded model cache. The app restarts itself clean (the model re-downloads on next use)." : " (all past transactions)."} <span className="text-[var(--danger)]">Back up your private key first</span>. This deletes it. If you only have a sync problem, use “Re-sync ledger” above instead.</p>
       <Button variant="danger" onClick={() => setWipeOpen(true)}>Delete wallet and reset</Button>
       <Modal open={wipeOpen} onClose={closeWipe} title="Reset ZIRA and start fresh">
         <div className="space-y-4">
@@ -224,7 +224,7 @@ function Appearance() {
           <SubHead>Preview</SubHead>
           <div className="rounded-lg border border-hairline bg-base p-4">
             <div className="mb-1 flex items-center gap-2">
-              <h4 className="text-base font-semibold text-text">Sample heading</h4>
+              <h4 className="text-[1rem] font-semibold text-text">Sample heading</h4>
               <Badge tone="teal">live</Badge>
             </div>
             <p className="text-sm text-muted">This text reflects your theme, density, and font size. <span className="mono">1,234.56 ZIR</span></p>

@@ -23,10 +23,13 @@ export function AnchorRings({ anchors, size = 240 }: { anchors: Anchor[]; size?:
   });
 
   const totals = perClass.reduce((acc, c) => ({ held: acc.held + c.held, open: acc.open + c.open, total: acc.total + c.total }), { held: 0, open: 0, total: 0 });
+  const reserve = totals.total - totals.held - totals.open;
 
   return (
     <div className="flex flex-col items-center">
-      <svg viewBox={`0 0 ${size} ${size}`} width={size} height={size} role="img" aria-label="Anchor classes as concentric rings" className="max-w-full">
+      <svg viewBox={`0 0 ${size} ${size}`} width={size} height={size} role="img" focusable="false"
+        aria-label={`Anchor seats across six classes: ${totals.total} total, ${totals.held} held by owners, ${totals.open} open to claim, ${reserve} in reserve.`}
+        className="max-w-full">
         {perClass.map(({ code, color, r, total, held, open }) => {
           const c = 2 * Math.PI * r;
           const heldLen = total > 0 ? (held / total) * c : 0;

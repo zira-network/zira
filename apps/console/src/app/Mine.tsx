@@ -10,6 +10,7 @@ import { Cpu, Radio, ShieldCheck, Server, CheckCircle2, Sparkles, Boxes, Link2, 
 import { Card, Button, Input, Badge, useToast, EmptyState, Field, usePoll, PageHeader, Meter, Spinner, ErrorState } from "../components/ui";
 import { HardwarePanel } from "../components/HardwarePanel";
 import { HexField } from "../components/brand";
+import { ResonanceField } from "../components/ResonanceField";
 import { NodeApi, type ModelRecommendation, type FieldModel, type MiningStatus, type Pricing } from "../lib/nodeApi";
 import { canonical, DOMAIN_META, PROTOCOL, type Domain, type HardwareProfile, type SignedTx } from "@zira/protocol";
 import { formatZir, timeAgo } from "../lib/format";
@@ -230,7 +231,7 @@ function DemandPanel({ pricing, error, loading, onRetry }: { pricing: Pricing | 
           <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <div className="text-xs text-faint">Current answer price</div>
-              <div className="mono text-3xl gradient-text leading-tight">{pricing ? formatZir(pricing.queryUZIR) : "..."}<span className="ml-1 text-base text-faint">ZIR</span></div>
+              <div className="mono text-3xl gradient-text leading-tight">{pricing ? formatZir(pricing.queryUZIR) : "..."}<span className="ml-1 text-[1rem] text-faint">ZIR</span></div>
               <div className="mt-0.5 text-[11px] text-faint">{pricing ? `${mult.toFixed(2)}x the floor price` : "reading the field"}</div>
             </div>
             <div className="grid grid-cols-2 gap-3 text-center">
@@ -823,16 +824,29 @@ export function Mine() {
       />
 
       <TierHeader label="Your participation" hint="State, hardware, convergence, and earnings" />
-      <Card className="field-hero">
-        <div>
-          <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--teal)]"><Sparkles size={14} /> ZIRA field</div>
-          <h2 className="title-glow mt-1 text-xl font-semibold text-text">Earn ZIR by lending your machine to the network</h2>
-          <p className="mt-1 text-sm text-muted">Mining puts your machine to work helping the network answer questions. You don&apos;t need an AI model or spare storage to start. Running a model and sharing storage are separate, optional add-ons.</p>
-        </div>
-        <div className="mt-4 grid gap-2 text-xs sm:grid-cols-3">
-          <div className="rounded-lg border border-hairline bg-surface/70 p-3"><div className="flex items-center gap-1 font-medium text-text"><Radio size={13} /> Coordination</div><div className="mt-1 text-faint">{peers} peers, {providersOnline} providers, {locksPerMinute} locks/min</div></div>
-          <div className="rounded-lg border border-hairline bg-surface/70 p-3"><div className="flex items-center gap-1 font-medium text-text"><Boxes size={13} /> Models (optional)</div><div className="mt-1 text-faint">{knownModels.length} known, {knownModels.filter((m) => m.ready).length} ready, {mining?.enabled && (usingEndpoint || mining?.loadedModel) ? "serving here" : "not serving here"}</div></div>
-          <div className="rounded-lg border border-hairline bg-surface/70 p-3"><div className="flex items-center gap-1 font-medium text-text"><Link2 size={13} /> Storage (optional)</div><div className="mt-1 text-faint">{mining?.storageEnabled ? `on, ${formatBytes(mining?.storageUsedBytes ?? 0)} cached` : "off"}, workspace tasks {mining?.enabled && mining?.localTaskPermission ? "allowed" : "off"}</div></div>
+      {/* Resonance hero: this node as a light in the field. It brightens with real coordination (providers +
+          locks) and is "live" only when mining is on and actually serving. */}
+      <Card className="overflow-hidden !p-0">
+        <div className="brand-rule" />
+        <div className="grid items-center gap-4 p-5 md:grid-cols-[260px_minmax(0,1fr)]">
+          <div className="order-1 flex flex-col items-center justify-center">
+            <ResonanceField
+              size={248}
+              live={!!mining?.enabled}
+              intensity={Math.max(0, Math.min(1, providersOnline / 8 * 0.5 + Math.min(locksPerMinute, 12) / 12 * 0.3 + (mining?.serving ? 0.2 : 0)))}
+            />
+            <div className="mt-3 text-center text-[11px] uppercase tracking-[0.16em] text-faint">{mining?.serving ? "serving the field" : mining?.enabled ? "coordinating" : "idle"}</div>
+          </div>
+          <div className="order-2">
+            <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.16em] text-[var(--teal)]"><Sparkles size={13} /> Your node in the field</div>
+            <h2 className="mt-1 text-xl font-semibold text-text">Lend this machine to the network and earn ZIR</h2>
+            <p className="mt-1 text-sm text-muted">{state.detail}</p>
+            <div className="mt-4 grid grid-cols-3 gap-2">
+              <div className="rounded-lg border border-hairline bg-[var(--bg-panel)] p-3"><div className="flex items-center gap-1 text-[11px] font-medium text-text"><Radio size={12} /> Coordination</div><div className="mono mt-1 text-sm text-text">{providersOnline}<span className="text-faint text-xs"> providers</span></div><div className="text-[11px] text-faint">{peers} peers · {locksPerMinute}/min</div></div>
+              <div className="rounded-lg border border-hairline bg-[var(--bg-panel)] p-3"><div className="flex items-center gap-1 text-[11px] font-medium text-text"><TrendingUp size={12} /> Earned today</div><div className="mono mt-1 text-sm text-[var(--teal)]">{formatZir(earned24hUZIR)}<span className="text-faint text-xs"> ZIR</span></div></div>
+              <div className="rounded-lg border border-hairline bg-[var(--bg-panel)] p-3"><div className="flex items-center gap-1 text-[11px] font-medium text-text"><ShieldCheck size={12} /> Trust</div><div className="mono mt-1 text-sm text-[var(--indigo)]">{typeof zti === "number" ? zti.toFixed(2) : "-"}</div><div className="text-[11px] text-faint">ZTI</div></div>
+            </div>
+          </div>
         </div>
       </Card>
 

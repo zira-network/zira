@@ -14,6 +14,7 @@ import { useZira } from "../store/useZira";
 import { formatNum, formatZir, shortAddress, shortHash, timeAgo } from "../lib/format";
 import { loadReconciledHistory } from "../lib/history";
 import { NodeApi, type ExtendedStats, type SupplyInfo, type ProviderView, type AnchorSeatSummary } from "../lib/nodeApi";
+import { NeonDial } from "../components/viz";
 
 // ---- local helpers (kept in this file; not promoted to ui.tsx) ----
 
@@ -159,6 +160,11 @@ function NetworkAndSupply({ showHealth }: { showHealth: boolean }) {
 
           {/* Supply breakdown with a stacked share bar */}
           <div>
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
+              <div className="flex shrink-0 justify-center sm:block">
+                <NeonDial value={emissionPct} size={104} label={`${(emissionPct * 100).toFixed(1)}%`} sub="emitted" />
+              </div>
+              <div className="min-w-0 flex-1">
             <div className="mb-1 flex items-center justify-between text-[11px] text-faint">
               <span>Supply of {formatZir(maxSupply)} ZIR max</span>
               <span className="mono">{(emissionPct * 100).toFixed(2)}% of earned cap emitted</span>
@@ -172,6 +178,8 @@ function NetworkAndSupply({ showHealth }: { showHealth: boolean }) {
               <span><span className="inline-block h-2 w-2 rounded-full bg-[var(--teal)] align-middle" /> emitted</span>
               <span><span className="inline-block h-2 w-2 rounded-full bg-[var(--accent)] align-middle" /> reserve</span>
               <span><span className="inline-block h-2 w-2 rounded-full bg-[var(--danger)] align-middle" /> burned</span>
+            </div>
+              </div>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
               <Metric label="Circulating" value={`${formatZir(circulating)} ZIR`} />

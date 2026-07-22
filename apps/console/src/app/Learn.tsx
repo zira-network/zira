@@ -8,7 +8,8 @@ import {
   Sparkles, Network, Cpu, GitMerge, Layers, Coins, Compass, ShieldAlert,
   AlertTriangle, Search, ArrowRight, MessageSquare, Bot, Zap, Hexagon, BookOpen,
 } from "lucide-react";
-import { Badge, Card, Input, Meter, PageHeader } from "../components/ui";
+import { Badge, Card, Input, PageHeader } from "../components/ui";
+import { NeonDial } from "../components/viz";
 import { HexField } from "../components/brand";
 import { useUi } from "../store/useUi";
 import { useZira } from "../store/useZira";
@@ -212,7 +213,7 @@ function IconChip({ icon: Icon }: { icon: typeof Sparkles }) {
 function StatTile({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border border-hairline bg-base p-3">
-      <div className="mono text-base text-text">{value}</div>
+      <div className="mono text-[1rem] text-text">{value}</div>
       <div className="mt-0.5 text-[11px] leading-tight text-faint">{label}</div>
     </div>
   );
@@ -380,13 +381,13 @@ export function Learn() {
 
                   {/* The honest-status section: live network snapshot. */}
                   {isRiskSection && stats && (
-                    <div className="mt-4 space-y-3">
-                      <div className="grid grid-cols-3 gap-3">
+                    <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-center">
+                      <NeonDial value={myZti} size={96} label={myZti.toFixed(2)} sub="network ZTI" />
+                      <div className="grid flex-1 grid-cols-3 gap-3">
                         <StatTile label="Reachable nodes" value={peers != null ? formatNum(peers, 0) : "-"} />
                         <StatTile label="Providers online" value={providers != null ? formatNum(providers, 0) : "-"} />
                         <StatTile label="Avg trust (ZTI)" value={avgZti != null ? avgZti.toFixed(2) : "-"} />
                       </div>
-                      <Meter value={myZti} label="Network trust sample" />
                     </div>
                   )}
 

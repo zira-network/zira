@@ -6,6 +6,7 @@ import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import { Bell, Check, Trash2, X, ChevronRight } from "lucide-react";
 import { cn } from "../lib/cn";
+import { HexField } from "./brand";
 import { useZira, type AppNotification } from "../store/useZira";
 
 function relative(ts: number): string {
@@ -58,9 +59,10 @@ export function NotificationCenter() {
 
       {open && createPortal(
         <div className="fixed inset-0 z-50 flex justify-end bg-black/40 backdrop-blur-[2px]" onClick={() => setOpen(false)}>
-          <aside className="flex h-full w-full max-w-sm flex-col border-l border-hairline bg-surface shadow-[var(--shadow-float)]" onClick={(e) => e.stopPropagation()}>
+          <aside className="glass flex h-full w-full max-w-sm flex-col rounded-none border-l border-hairline bg-[var(--bg-panel)] shadow-[var(--shadow-float)] backdrop-blur-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="brand-rule" />
             <div className="flex items-center justify-between border-b border-hairline px-4 py-3">
-              <h3 className="text-base font-semibold">Notifications</h3>
+              <h3 className="text-[1rem] font-semibold">Notifications</h3>
               <div className="flex items-center gap-3 text-muted">
                 <button title="Mark all read" onClick={markAllNotificationsRead} className="hover:text-text"><Check size={16} /></button>
                 <button title="Clear all" onClick={clearNotifications} className="hover:text-text"><Trash2 size={16} /></button>
@@ -69,7 +71,10 @@ export function NotificationCenter() {
             </div>
             <div className="min-h-0 flex-1 overflow-auto">
               {notifications.length === 0 ? (
-                <div className="px-4 py-12 text-center text-sm text-muted">Nothing yet. Payments, tasks, and milestones show up here.</div>
+                <div className="flex flex-col items-center gap-3 px-4 py-16 text-center">
+                  <HexField size={92} className="opacity-70" />
+                  <div className="text-sm text-muted">Nothing yet. Payments, tasks, and milestones show up here.</div>
+                </div>
               ) : (
                 notifications.map((n: AppNotification) => (
                   <button key={n.id} onClick={() => activate(n)}

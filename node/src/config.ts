@@ -84,6 +84,9 @@ export interface NodeRuntimeConfig {
 
   // Advanced / founder
   selfContained: boolean;     // activate FounderServices (model management, node-llama-cpp)
+  serveBaseline: boolean;     // opt-in (ZIRA_SERVE_BASELINE): hold + serve the baseline launch model so the
+                              // field can always answer, WITHOUT enabling full mining/storage or earning.
+                              // Off by default: nothing changes for existing users unless they set it.
   eventsKey?: string;         // founder-held events/ecosystem wallet key, enables transparent airdrops
   eventsClaimZir?: number;    // ZIR per events claim
   anchorReserveKey?: string;  // founder-held anchor-reserve wallet key, enables anchor seat assignment
@@ -167,6 +170,7 @@ export function loadConfig(overrides: Partial<NodeRuntimeConfig> = {}): NodeRunt
     provider,
 
     selfContained: envBool("ZIRA_SELF_CONTAINED", false),
+    serveBaseline: envBool("ZIRA_SERVE_BASELINE", false),
     eventsKey: process.env.ZIRA_EVENTS_KEY || undefined,
     eventsClaimZir: process.env.ZIRA_EVENTS_CLAIM_ZIR ? Number(process.env.ZIRA_EVENTS_CLAIM_ZIR) : undefined,
     anchorReserveKey: process.env.ZIRA_ANCHOR_RESERVE_KEY || undefined,

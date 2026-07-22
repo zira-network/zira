@@ -10,14 +10,18 @@ import { Card, Badge, Meter, PageHeader, LoadingState, useSlowHint, usePoll } fr
 import { NodeApi, type StatusInfo, type ExtendedStats } from "../lib/nodeApi";
 import { useZira } from "../store/useZira";
 import { formatNum, formatZir, shortAddress } from "../lib/format";
+import { ResonanceField } from "../components/ResonanceField";
 
 function Stat({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: "teal" | "indigo" | "warn" }) {
   const color = tone === "teal" ? "text-[var(--teal)]" : tone === "warn" ? "text-[var(--warn)]" : tone === "indigo" ? "text-[var(--indigo)]" : "text-text";
+  // min-w-0 lets the tile shrink inside its grid track (grid children default to min-width:auto and would
+  // otherwise be pushed wide by a long unbroken value); break-words + leading-tight + responsive sizing let
+  // long ZIR numbers and hardware names wrap and fit rather than clip. The label always shows in full.
   return (
-    <div className="rounded-lg border border-hairline bg-base/70 p-3">
+    <div className="min-w-0 rounded-lg border border-hairline bg-base/70 p-3">
       <div className="text-[11px] uppercase tracking-wide text-faint">{label}</div>
-      <div className={`mono mt-1 break-words text-lg font-semibold ${color}`}>{value}</div>
-      {sub && <div className="mt-0.5 text-[11px] text-faint">{sub}</div>}
+      <div className={`mono mt-1 break-words text-[1rem] font-semibold leading-tight sm:text-lg ${color}`}>{value}</div>
+      {sub && <div className="mt-0.5 break-words text-[11px] text-faint">{sub}</div>}
     </div>
   );
 }
@@ -65,32 +69,45 @@ export function Dashboard() {
   const storageUsed = mining ? Number(mining.storageUsedBytes || 0) : 0;
   const storageCap = mining ? Number(mining.storageCapBytes || 0) : 0;
 
+  // The field's energy is real: it brightens with providers answering + agreements landing, and it is "live"
+  // only when this node is synced and actually part of the work (mining/serving) or the network is active.
+  const providers = stats?.providersOnline ?? 0;
+  const locks = stats?.locksPerMinute ?? 0;
+  const intensity = Math.max(0, Math.min(1, providers / 8 * 0.6 + Math.min(locks, 12) / 12 * 0.4));
+  const fieldLive = (synced || lag < 0) && (providers > 0 || !!mining?.enabled);
+
   return (
     <div className="mx-auto max-w-6xl space-y-4 p-5">
       <PageHeader
         title="Dashboard"
-        badge={<Badge tone="teal">live</Badge>}
-        description="A real-time view of your node and the ZIRA network. Hardware and mining figures are read locally and shown only to you."
+        badge={<Badge tone={fieldLive ? "teal" : "neutral"}>{fieldLive ? "live" : "quiet"}</Badge>}
+        description="Your place in the resonance field. Hardware and mining figures are read locally and shown only to you."
       />
 
-      {/* Node health + your rewards */}
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Section title="Node health">
-          <div className="grid grid-cols-3 gap-2">
-            <Stat label="Sync" value={lag < 0 ? "..." : synced ? "Synced" : `${lag} behind`} tone={synced ? "teal" : "warn"} sub={stats ? `epoch ${stats.finalizedEpoch}` : undefined} />
-            <Stat label="Phase" value={stats?.phase ?? "-"} sub={stats?.network ?? undefined} />
-            <Stat label="Peers" value={stats ? String(stats.peers) : "-"} sub="connected" />
+      {/* HERO: the living field, your balance at its core, its energy driven by real network activity */}
+      <Card className="overflow-hidden !p-0">
+        <div className="brand-rule" />
+        <div className="grid items-center gap-4 p-5 md:grid-cols-[minmax(0,1fr)_320px]">
+          <div className="order-2 min-w-0 md:order-1">
+            <div className="text-[11px] uppercase tracking-[0.14em] text-faint">Your balance</div>
+            <div className="mono mt-1 break-words text-3xl font-semibold leading-none tracking-tight text-text sm:text-4xl">{status ? formatZir(status.balanceUZIR) : "-"} <span className="text-lg text-faint">ZIR</span></div>
+            {status && <div className="mono mt-1.5 break-all text-[11px] text-faint">{shortAddress(status.address)}</div>}
+            <div className="mt-4 grid grid-cols-3 gap-2">
+              <Stat label="Earned today" value={status ? formatZir(status.providerStatus?.earnedTodayUZIR ?? 0) : "-"} tone="teal" sub="ZIR" />
+              <Stat label="Answered" value={mining ? String(mining.answered ?? 0) : "-"} sub="queries" />
+              <Stat label="Sync" value={lag < 0 ? "..." : synced ? "Synced" : `${lag} back`} tone={synced ? "teal" : "warn"} sub={stats ? `epoch ${stats.finalizedEpoch}` : undefined} />
+            </div>
+            <Link to="/wallet" className="mt-3 inline-flex items-center gap-0.5 text-[11px] text-[var(--teal)] hover:underline">Open wallet <ArrowUpRight size={12} /></Link>
           </div>
-        </Section>
-        <Section title="Your rewards" to="/wallet" toLabel="Wallet">
-          <div className="grid grid-cols-3 gap-2">
-            <Stat label="Balance" value={status ? `${formatZir(status.balanceUZIR)}` : "-"} tone="teal" sub="ZIR" />
-            <Stat label="Earned today" value={status ? `${formatZir(status.providerStatus?.earnedTodayUZIR ?? 0)}` : "-"} sub="ZIR" />
-            <Stat label="Answered" value={mining ? String(mining.answered ?? 0) : "-"} sub="field queries" />
+          <div className="order-1 flex flex-col items-center md:order-2">
+            <ResonanceField size={300} intensity={intensity} live={fieldLive} />
+            <div className="mt-3 text-center">
+              <div className="mono text-lg font-semibold leading-none text-text">{stats ? formatNum(stats.activeNodes, 0) : "-"}</div>
+              <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-faint">nodes resonating</div>
+            </div>
           </div>
-          {status && <div className="mono mt-2 text-[11px] text-faint">{shortAddress(status.address)}</div>}
-        </Section>
-      </div>
+        </div>
+      </Card>
 
       {/* Network */}
       <Section title="Network" badge="shared gateway" to="/explorer" toLabel="Explorer">
@@ -106,8 +123,8 @@ export function Dashboard() {
       <Section title="Your machine" badge={mode === "node" ? "this device" : "local node"} to="/mine" toLabel="Mine">
         {hw ? (
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            <Stat label="GPU" value={hw.gpuName ? hw.gpuName.slice(0, 22) : "none"} tone={hw.gpuName ? "teal" : undefined} sub={hw.gpuVramMb ? `${(hw.gpuVramMb / 1024).toFixed(1)} GB VRAM` : "CPU only"} />
-            <Stat label="CPU" value={hw.cpuName ? hw.cpuName.slice(0, 22) : (hw.arch ?? "-")} sub={`${hw.cpuCores} cores`} />
+            <Stat label="GPU" value={hw.gpuName ? hw.gpuName : "none"} tone={hw.gpuName ? "teal" : undefined} sub={hw.gpuVramMb ? `${(hw.gpuVramMb / 1024).toFixed(1)} GB VRAM` : "CPU only"} />
+            <Stat label="CPU" value={hw.cpuName ? hw.cpuName : (hw.arch ?? "-")} sub={`${hw.cpuCores} cores`} />
             <Stat label="Memory" value={`${(hw.ramMb / 1024).toFixed(0)} GB`} sub="RAM" />
             <Stat label="Tier" value={hw.capabilityTier ?? "-"} tone="indigo" sub="capability" />
           </div>
@@ -122,7 +139,7 @@ export function Dashboard() {
           <>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               <Stat label="Status" value={mining.enabled ? "Mining" : "Idle"} tone={mining.enabled ? "teal" : undefined} sub={mining.serving ? "serving the field" : "liveness only"} />
-              <Stat label="Engine" value={mining.engineAvailable ? "ready" : "unavailable"} tone={mining.engineAvailable ? "teal" : "warn"} sub={mining.loadedModel ? mining.loadedModel.slice(0, 14) : "no model loaded"} />
+              <Stat label="Engine" value={mining.engineAvailable ? "ready" : "unavailable"} tone={mining.engineAvailable ? "teal" : "warn"} sub={mining.loadedModel ? mining.loadedModel : "no model loaded"} />
               <Stat label="Storage" value={`${gib(storageUsed)} GB`} sub={storageCap ? `of ${gib(storageCap)} GB cap` : "off"} />
               <Stat label="Answered" value={String(mining.answered ?? 0)} sub="queries served" />
             </div>

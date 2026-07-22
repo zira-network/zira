@@ -7,6 +7,7 @@ import { Link } from "react-router-dom";
 import { ArrowDownLeft, ArrowUpRight, Copy, Lock, Unlock, Download, AlertTriangle, RefreshCw, ShieldCheck, Crown } from "lucide-react";
 import { PROTOCOL, DOMAIN_META, isValidAddress, keypairFromPrivate, type SignedTx, type Domain } from "@zira/protocol";
 import { Card, Button, Input, Badge, Meter, Modal, Select, useToast, EmptyState, Textarea } from "../components/ui";
+import { Sparkline } from "../components/viz";
 import { useZira } from "../store/useZira";
 import { useUnlock } from "../store/useUnlock";
 import { extractPrivateKeyInput, Wallet } from "../lib/keys";
@@ -55,6 +56,30 @@ export function WalletPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, address, balanceUZIR, nodeBehind, historyLimit]);
 
+  // Balance-over-time for the hero sparkline: reconstruct the running balance from the signed history,
+  // anchored to the current confirmed balance so the last point is exactly today's number. Each event is a
+  // credit (received, reward, reserve grant) or a debit (sent + fee); walking them in time order yields the
+  // trajectory. Empty until there are at least two timestamped events to plot.
+  const balanceSeries = useMemo(() => {
+    if (!address || history.length < 2) return [];
+    const sorted = history
+      .filter((tx) => typeof tx.timestamp === "number")
+      .sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+    if (sorted.length < 2) return [];
+    const delta = (tx: SignedTx) =>
+      (tx.to === address || tx.kind === "reward" || tx.kind === "reserve_grant")
+        ? (tx.amountUZIR ?? 0)
+        : (tx.from === address && tx.to !== address)
+          ? -((tx.amountUZIR ?? 0) + (tx.feeUZIR ?? 0))
+          : 0;
+    const deltas = sorted.map(delta);
+    const total = deltas.reduce((s, d) => s + d, 0);
+    let running = balanceUZIR - total;
+    const pts = [running];
+    for (const d of deltas) { running += d; pts.push(running); }
+    return pts;
+  }, [history, address, balanceUZIR]);
+
   if (!hasWallet) {
     return (
       <div className="p-6">
@@ -67,7 +92,7 @@ export function WalletPage() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-5 p-6">
-      <BalanceCard />
+      <BalanceCard series={balanceSeries} />
       <StewardWalletCard />
       <EventsClaimCard address={address} />
       <TrustCard />
@@ -155,34 +180,44 @@ function TrustCard() {
   );
 }
 
-function Sparkline({ data }: { data: number[] }) {
-  if (data.length < 2) return <div className="h-16 rounded-lg border border-hairline bg-base" />;
-  const w = 320, h = 64, max = Math.max(...data, 1), min = Math.min(...data, 0);
-  const span = max - min || 1;
-  const pts = data.map((v, i) => `${(i / (data.length - 1)) * w},${h - ((v - min) / span) * (h - 6) - 3}`).join(" ");
-  return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="w-full">
-      <polyline points={pts} fill="none" stroke="var(--teal)" strokeWidth="2" />
-    </svg>
-  );
-}
-
-function BalanceCard() {
+function BalanceCard({ series = [] }: { series?: number[] }) {
   const balanceUZIR = useZira((s) => s.balanceUZIR);
   const network = useZira((s) => s.network);
   const nodeBehind = useZira((s) => s.nodeBehind);
   const share = (balanceUZIR / PROTOCOL.MAX_SUPPLY_UZIR) * 100;
+  // The balance is the one hero figure on this screen: a large mono number under a single brand rule, its
+  // recent trajectory drawn in the teal->indigo brand gradient when there is enough history to plot.
   return (
-    <Card className="relative overflow-hidden">
-      <div className="text-xs text-muted">Balance{network !== "mainnet" && <span className="ml-2 text-[var(--warn)]">test ZIR, no value</span>}</div>
-      <div className="mono mt-1 text-4xl font-semibold gradient-text">{formatZir(balanceUZIR)} <span className="text-xl">ZIR</span></div>
-      <div className="mono mt-1 text-xs text-faint">{formatUZir(balanceUZIR)} uZIR</div>
-      <div className="mt-3 text-xs text-faint">{share.toFixed(9)}% of the total supply</div>
-      {nodeBehind && (
-        // Your settled network balance, shown from the shared network view while your own node finishes
-        // catching up. It reconciles on its own in the background; nothing is lost, nothing to do.
-        <div className="mt-2 text-[11px] text-[var(--teal)]">Settled on the network. Your node is catching up.</div>
-      )}
+    <Card className="overflow-hidden !p-0">
+      <div className="brand-rule" />
+      <div className="p-5">
+        <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.14em] text-faint">
+          Balance{network !== "mainnet" && <Badge tone="warn">test ZIR, no value</Badge>}
+        </div>
+        <div className="mono mt-1 text-4xl font-semibold leading-none tracking-tight text-text">{formatZir(balanceUZIR)} <span className="text-lg text-faint">ZIR</span></div>
+        <div className="mono mt-1.5 text-[11px] text-faint">{formatUZir(balanceUZIR)} uZIR</div>
+        {series.length >= 2 && (
+          <div className="mt-4">
+            <div className="mb-1 text-[11px] uppercase tracking-[0.14em] text-faint">Balance over time</div>
+            <Sparkline data={series} height={44} />
+          </div>
+        )}
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          <div className="rounded-lg border border-hairline bg-[var(--bg-panel)] p-3">
+            <div className="text-[11px] uppercase tracking-[0.14em] text-faint">Share of supply</div>
+            <div className="mono mt-1 text-sm text-[var(--indigo)]">{share.toFixed(9)}%</div>
+          </div>
+          <div className="rounded-lg border border-hairline bg-[var(--bg-panel)] p-3">
+            <div className="text-[11px] uppercase tracking-[0.14em] text-faint">Network status</div>
+            <div className="mono mt-1 text-sm text-text">{nodeBehind ? <span className="text-[var(--teal)]">catching up</span> : "settled"}</div>
+          </div>
+        </div>
+        {nodeBehind && (
+          // Your settled network balance, shown from the shared network view while your own node finishes
+          // catching up. It reconciles on its own in the background; nothing is lost, nothing to do.
+          <div className="mt-3 text-[11px] text-[var(--teal)]">Settled on the network. Your node is catching up.</div>
+        )}
+      </div>
     </Card>
   );
 }
@@ -503,7 +538,7 @@ function TxHistory({ history, address, loading, error, onRefresh, canLoadMore, o
                   </div>
                 </div>
                 <div className="shrink-0 text-right">
-                  <div className={`mono text-base ${incoming ? "text-[var(--teal)]" : outgoing ? "text-[var(--warn)]" : ""}`}>{incoming ? "+" : outgoing ? "-" : ""}{formatZir(net)} ZIR</div>
+                  <div className={`mono text-[1rem] ${incoming ? "text-[var(--teal)]" : outgoing ? "text-[var(--warn)]" : ""}`}>{incoming ? "+" : outgoing ? "-" : ""}{formatZir(net)} ZIR</div>
                   <div className="text-[11px] text-faint">{timeAgo(tx.timestamp)}</div>
                   {tx.feeUZIR ? <div className="text-[11px] text-faint">fee {formatZir(tx.feeUZIR)} ZIR</div> : null}
                 </div>

@@ -2,6 +2,7 @@
 // The wallet unlock modal, mounted once. Any page can call useUnlock().request().
 import { useState } from "react";
 import { Modal, Button, Input } from "./ui";
+import { ZiraMark } from "./brand";
 import { useUnlock } from "../store/useUnlock";
 import { useZira } from "../store/useZira";
 import { Wallet } from "../lib/keys";
@@ -30,9 +31,12 @@ export function UnlockHost() {
 
   return (
     <Modal open={open} onClose={() => resolve(false)} title="Unlock your wallet">
-      <p className="mb-3 text-sm text-muted">
-        Your key is encrypted in this browser. Enter your passphrase to sign locally. It is never sent anywhere.
-      </p>
+      <div className="mb-3 flex items-center gap-3">
+        <ZiraMark size={30} glow />
+        <p className="text-sm text-muted">
+          Your key is encrypted in this browser. Enter your passphrase to sign locally. It is never sent anywhere.
+        </p>
+      </div>
       <Input
         type="password" value={pass} placeholder="Passphrase"
         onChange={(e) => setPass(e.target.value)}

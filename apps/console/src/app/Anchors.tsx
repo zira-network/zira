@@ -12,7 +12,8 @@ import { payUsdt } from "../lib/usdtPay";
 import { makeSignedTx } from "../lib/tx";
 import { NodeApi } from "../lib/nodeApi";
 import { AnchorGlyph, ANCHOR_CLASS_VISUAL } from "../components/anchorClass";
-import { AnchorRings } from "../components/AnchorRings";
+import { AnchorLattice } from "../components/AnchorLattice";
+import { NeonDial, Bars } from "../components/viz";
 
 // A seat is still AVAILABLE to contribute for while the steward holds it (the steward assigns it to a
 // contributor after their payment confirms). A seat counts as ASSIGNED only once it leaves the steward
@@ -103,30 +104,28 @@ export function Anchors() {
 
   return (
     <div className="mx-auto max-w-5xl space-y-5 p-6">
-      <Card className="field-hero">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <Badge tone="teal">ZRC-1 anchors live</Badge>
-            <h2 className="title-glow mt-2 text-2xl font-semibold tracking-tight">Anchors</h2>
-            <p className="mt-1 max-w-3xl text-sm text-muted">An anchor is one of only 512 permanent seats that form the network&apos;s trusted, well-routed core. Each carries a class, a starting trust level, a routing weight, and a ZIR allocation that vests to its owner over one year. Own and transfer one today; earning turns on in a later phase.</p>
-            <div className="mt-3 flex flex-wrap gap-1.5">
-              {[
-                "Scarce: only 512, ever",
-                "Foundational trust: elevated starting ZTI",
-                "Routing weight: higher classes carry more coordination",
-                "One-year ZIR vesting",
-                "Transferable ownership now",
-                "Earning and activation later",
-              ].map((t) => (
-                <span key={t} className="rounded-full border border-hairline bg-base px-2.5 py-1 text-[11px] text-muted">{t}</span>
-              ))}
+      {/* Hero: the 512-seat lattice as a luminous structure (the six anchor classes as concentric rings). */}
+      <Card className="overflow-hidden !p-0">
+        <div className="brand-rule" />
+        <div className="grid items-center gap-4 p-5 md:grid-cols-[minmax(0,1fr)_300px]">
+          <div className="order-2 min-w-0 md:order-1">
+            <div className="text-[11px] uppercase tracking-[0.16em] text-faint">Anchor lattice</div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-2.5">
+              <h2 className="text-2xl font-semibold tracking-tight text-text">The lattice</h2>
+              <Badge tone="teal">ZRC-1 anchors live</Badge>
+            </div>
+            <p className="mt-1.5 max-w-2xl text-sm text-muted">512 permanent seats form the network&apos;s trusted, well-routed core, in six classes from Genesis to Foundation. Each carries a starting trust level, a routing weight, and a ZIR allocation that vests over one year. Own and transfer one today; earning turns on in a later phase.</p>
+            <div className="mt-4 grid grid-cols-3 gap-2 text-center">
+              <div className="min-w-0 rounded-xl border border-hairline bg-[var(--bg-panel)] p-3"><div className="mono text-xl font-semibold text-[var(--teal)]">{claimed}</div><div className="mt-0.5 text-[10px] uppercase tracking-[0.14em] text-faint">assigned</div></div>
+              <div className="min-w-0 rounded-xl border border-hairline bg-[var(--bg-panel)] p-3"><div className="mono text-xl font-semibold text-text">{TOTAL_ANCHOR_SEATS - claimed}</div><div className="mt-0.5 text-[10px] uppercase tracking-[0.14em] text-faint">in reserve</div></div>
+              <div className="min-w-0 rounded-xl border border-hairline bg-[var(--bg-panel)] p-3"><div className="mono text-xl font-semibold text-[var(--indigo)]">{owned.length}</div><div className="mt-0.5 text-[10px] uppercase tracking-[0.14em] text-faint">yours</div></div>
+            </div>
+            <div className="mt-4">
+              <div className="mb-1.5 flex items-center justify-between text-[10px] uppercase tracking-[0.14em] text-faint"><span>Seats by class</span><span className="mono tracking-normal">A to F</span></div>
+              <Bars data={CLASS_CODES.map((c) => ANCHOR_CLASSES[c].seats)} height={26} />
             </div>
           </div>
-          <div className="grid grid-cols-3 gap-2 text-center text-xs">
-            <div className="rounded-lg border border-hairline bg-base p-2"><div className="mono text-sm text-[var(--teal)]">{claimed}/{TOTAL_ANCHOR_SEATS}</div><div className="text-faint">assigned</div></div>
-            <div className="rounded-lg border border-hairline bg-base p-2"><div className="mono text-sm text-[var(--teal)]">{TOTAL_ANCHOR_SEATS - claimed}</div><div className="text-faint">held by steward</div></div>
-            <div className="rounded-lg border border-hairline bg-base p-2"><div className="mono text-sm text-[var(--teal)]">{owned.length}</div><div className="text-faint">yours</div></div>
-          </div>
+          <div className="order-1 flex justify-center md:order-2"><AnchorLattice anchors={anchors} size={300} /></div>
         </div>
       </Card>
 
@@ -149,7 +148,6 @@ export function Anchors() {
             : <Lattice anchors={anchors} onPick={setPicked} />}
         </Card>
         <div className="space-y-4">
-          <Card><AnchorRings anchors={anchors} /></Card>
           <ClassLegend anchors={anchors} totalStakeUZIR={totalStakeUZIR} />
         </div>
       </div>
@@ -305,25 +303,40 @@ function Lattice({ anchors, onPick }: { anchors: Anchor[]; onPick: (a: Anchor) =
 
 
 function ClassLegend({ anchors, totalStakeUZIR }: { anchors: Anchor[]; totalStakeUZIR: number }) {
+  const assigned = anchors.filter(isAssigned).length;
+  const occupancy = TOTAL_ANCHOR_SEATS > 0 ? assigned / TOTAL_ANCHOR_SEATS : 0;
   return (
     <Card>
-      <h3 className="title-glow mb-1 text-sm font-semibold">Six classes, {TOTAL_ANCHOR_SEATS} seats</h3>
-      <p className="mb-2 text-[11px] text-faint">Higher classes carry more routing weight and a higher starting trust floor.</p>
-      <div className="space-y-2">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[10px] uppercase tracking-[0.16em] text-faint">Class ladder</div>
+          <h3 className="title-glow mt-0.5 text-sm font-semibold">Six classes, {TOTAL_ANCHOR_SEATS} seats</h3>
+          <p className="mt-1 text-[11px] text-faint">Higher classes carry more routing weight and a higher starting trust floor.</p>
+        </div>
+        <NeonDial value={occupancy} size={62} stroke={6} label={`${Math.round(occupancy * 100)}%`} sub="filled" />
+      </div>
+      <div className="mt-3 space-y-2">
         {CLASS_CODES.map((code) => {
           const c = ANCHOR_CLASSES[code];
+          const color = CLASS_COLOR[code];
           const taken = anchors.filter((a) => a.classCode === code && isAssigned(a)).length;
+          const fill = c.seats > 0 ? Math.min(1, taken / c.seats) : 0;
           return (
-            <div key={code} className="rounded-lg border border-hairline bg-base/70 p-2 text-xs">
-              <div className="flex items-center justify-between">
-                <span className="flex items-center gap-2 font-medium text-text"><span className="h-2.5 w-2.5 rounded-full" style={{ background: CLASS_COLOR[code], color: CLASS_COLOR[code] }} /> {code} · {c.name}</span>
-                <span className="mono text-faint">{taken}/{c.seats}</span>
+            <div key={code} className="rounded-lg border bg-base/70 p-2.5 text-xs" style={{ borderColor: `color-mix(in srgb, ${color} 22%, var(--border))` }}>
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex min-w-0 items-center gap-2 font-medium text-text"><AnchorGlyph cls={code} size={18} /> <span className="truncate">{code} · {c.name}</span></span>
+                <span className="mono shrink-0 text-faint">{taken}/{c.seats}</span>
               </div>
-              <div className="mt-1 grid grid-cols-2 gap-2 text-[11px]">
-                <span className="text-faint">Weight <span className="mono text-[var(--teal)]">{c.weight}/6</span></span>
-                <span className="text-faint">Min ZTI <span className="mono text-muted">{c.minZTI}</span></span>
+              <div className="mt-2 h-1 overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--text-faint)_18%,transparent)]">
+                <div className="h-full rounded-full transition-[width] duration-700" style={{ width: `${Math.round(fill * 100)}%`, background: color }} />
               </div>
-              <div className="mt-1 text-[11px] text-faint">{c.role}</div>
+              <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-faint">
+                <span className="flex items-center gap-1.5">Weight
+                  <span className="inline-flex gap-0.5">{Array.from({ length: 6 }).map((_, i) => <span key={i} className="h-1.5 w-1.5 rounded-full" style={{ background: i < c.weight ? color : "color-mix(in srgb, var(--text-faint) 22%, transparent)" }} />)}</span>
+                </span>
+                <span>Min ZTI <span className="mono text-muted">{c.minZTI}</span></span>
+              </div>
+              <div className="mt-1.5 text-[11px] text-faint">{c.role}</div>
             </div>
           );
         })}

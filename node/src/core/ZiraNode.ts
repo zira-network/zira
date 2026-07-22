@@ -42,6 +42,7 @@ export interface ZiraNodeOptions {
   observeEnabled?: boolean;
   hardwareDetect?: boolean;
   selfContained?: boolean;
+  serveBaseline?: boolean;   // opt-in: serve the baseline launch model with mining OFF (ZIRA_SERVE_BASELINE)
   taskReapMs?: number;
   providerConfig?: ProviderConfig;
   fastSync?: boolean;
@@ -471,6 +472,7 @@ export class ZiraNode {
       observeEnabled: options.observeEnabled ?? true,
       hardwareDetect: options.hardwareDetect ?? false,
       selfContained: options.selfContained ?? false,
+      serveBaseline: options.serveBaseline ?? false,
       taskReapMs: options.taskReapMs ?? 30_000,
       providerConfig: options.providerConfig ?? { ...DEFAULT_PROVIDER_CONFIG },
       // Fast-sync is hardened (verifyFastSyncSnapshot binds the snapshot to a finalized checkpoint
@@ -495,7 +497,7 @@ export class ZiraNode {
     this.checkpoints = new Checkpoints(genesis.network);
     this.store = new Store(dataDir);
     this.topics = buildTopics(this.gid);
-    this.models = new ModelService(dataDir, net, identity, () => this.founderAddresses(), (a) => this.publishModelAnnounce(a), launchModelsFor(genesis.network));
+    this.models = new ModelService(dataDir, net, identity, () => this.founderAddresses(), (a) => this.publishModelAnnounce(a), launchModelsFor(genesis.network), this.opts.serveBaseline);
     if (genesis.network !== "mainnet") this.state.setAuthorizedFounders([...this.state.activeFounderAddresses(), ...this.founderBackups()]);
     // Model management is isolated: only a founder node (or advanced self-contained mode) ever wires it in.
     if (this.isFounder() || this.opts.selfContained) {
@@ -1292,6 +1294,8 @@ export class ZiraNode {
   /** Use detected hardware to size mining defaults (advisory): GPU layers and CPU threads. */
   private applyHardwareToMining(h: HardwareProfile): void {
     try {
+      // Tier answer concurrency on the detected accelerator class regardless of the recommended-hardware toggle.
+      this.models.setHardwareTier(h.capabilityTier);
       const mining = this.models.currentMining();
       if (mining.useRecommendedHardware === false) return;
       const patch: Partial<MiningConfig> = {};

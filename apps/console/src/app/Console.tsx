@@ -4,9 +4,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { Send, Square, ChevronDown, ChevronUp, CheckCircle2, Plus, Trash2, ShieldCheck, Download, Sparkles, Upload, FolderOpen, FileText, X, HelpCircle, Copy, ListChecks, Check, FilePlus, Compass, ArrowRight, Bot, Menu, MessageSquarePlus, PanelLeftClose, PanelLeftOpen, Coins, Cpu } from "lucide-react";
-import { PROTOCOL, SPECIAL_ADDRESSES, verify as edVerify, type AnswerReceipt, type ChatMessage, type Conversation } from "@zira/protocol";
+import { PROTOCOL, SPECIAL_ADDRESSES, type AnswerReceipt, type ChatMessage, type Conversation } from "@zira/protocol";
 import { Button, Card, Badge, Meter, useToast, Spinner, Select } from "../components/ui";
-import { HexField } from "../components/brand";
+import { ResonanceField } from "../components/ResonanceField";
+import { Receipt } from "../components/Receipt";
 import { NodeApi, type FieldModel, type Pricing, type FreeTierQuota } from "../lib/nodeApi";
 import { FreeTierError, NodeClient } from "../client/NodeClient";
 import { useZira } from "../store/useZira";
@@ -1142,7 +1143,10 @@ function EmptyHero({ mode, onPick, workspaceChosen, onChooseFolder }: { mode: Co
       ];
   return (
     <div className="fade-in-up mx-auto flex max-w-2xl flex-col items-center justify-center gap-5 py-12 text-center sm:py-16">
-      <HexField size={104} />
+      <div className="flex flex-col items-center gap-2.5">
+        <ResonanceField size={216} intensity={isField ? 0.6 : 0.32} live={isField} />
+        <div className="text-[11px] uppercase tracking-[0.16em] text-faint">{isField ? "the field is listening" : "private to this machine"}</div>
+      </div>
       <div className="flex flex-col items-center gap-2">
         <h2 className="text-xl font-semibold tracking-tight">
           {isField ? <>Ask the <span className="gradient-text">network</span></> : <>Your <span className="gradient-text">private workspace</span></>}
@@ -1590,104 +1594,10 @@ function Message({ m, onPick, busy }: { m: ChatMessage; onPick: (opt: string) =>
           <CopyButton text={m.content} />
         </div>
       )}
-      {m.receipt && <ReceiptPanel receipt={m.receipt} />}
+      {m.receipt && <Receipt receipt={m.receipt} />}
     </div>
   );
 }
 
-// Answer provenance: a default-collapsed "How this was answered" panel that makes the multi-LLM
-// coordination visible. It lists the contributing Resonators (provider short address, their domain ZTI,
-// and per-contributor confidence) plus the coordinated confidence score. Every field is sourced from the
-// answer receipt the field already returns; when a field is absent it is omitted gracefully (no fabricated
-// data). The receipt exposes weight = domainZti x confidence, so a contributor's confidence is recovered
-// as weight / domainZti when both are present, and otherwise shown as the weight only.
-function contributorConfidence(weight: number, domainZti: number): number | null {
-  if (!Number.isFinite(weight)) return null;
-  if (!Number.isFinite(domainZti) || domainZti <= 0) return null;
-  return Math.max(0, Math.min(1, weight / domainZti));
-}
-
-function ReceiptPanel({ receipt }: { receipt: AnswerReceipt }) {
-  const [open, setOpen] = useState(false);
-  const n = receipt.contributors.length;
-  const noProviders = n === 0;
-  const hasConfidence = Number.isFinite(receipt.fusedConfidence);
-  return (
-    <Card className="max-w-[92%] p-3">
-      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="flex w-full items-center justify-between text-xs text-muted transition-colors hover:text-text">
-        <span className="flex items-center gap-2">
-          <ShieldCheck size={14} className={noProviders ? "text-[var(--warn)]" : "text-[var(--teal)]"} />
-          {noProviders ? (
-            <>Who answered: no provider has answered yet. Cost <span className="mono">0 ZIR</span>.</>
-          ) : (
-            <>Who answered: {n} provider{n === 1 ? "" : "s"}, weighted by earned trust.{hasConfidence ? <> Coordinated confidence <span className="mono">{formatNum(receipt.fusedConfidence, 2)}</span>.</> : null} Cost <span className="mono">{formatZir(receipt.costUZIR)} ZIR</span>.</>
-          )}
-        </span>
-        {open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-      </button>
-      {open && (
-        <div className="fade-in-up mt-3 flex flex-col gap-3">
-          {noProviders ? (
-            <div className="rounded-lg border border-[color-mix(in_srgb,var(--warn)_35%,transparent)] bg-[color-mix(in_srgb,var(--warn)_8%,transparent)] p-2.5 text-xs text-muted">
-              Your question went out to the network, but no online provider sent back a signed answer in time. A machine needs to be online and serving answers before the receipt can show who contributed.
-            </div>
-          ) : (
-            <>
-              {hasConfidence && (
-                <div className="flex items-center justify-between rounded-lg border border-hairline bg-base/60 px-2.5 py-2 text-xs">
-                  <span className="text-muted">Coordinated confidence</span>
-                  <span className="mono text-text">{formatNum(receipt.fusedConfidence, 2)}</span>
-                </div>
-              )}
-              {receipt.contributors.map((c, i) => {
-                // Prefer a node-provided confidence/address if a newer node exposes one; otherwise recover
-                // confidence from weight and domain ZTI, and fall back to the provider key for the label.
-                const extra = c as typeof c & { confidence?: number; address?: string };
-                const conf = Number.isFinite(extra.confidence) ? Math.max(0, Math.min(1, extra.confidence as number)) : contributorConfidence(c.weight, c.domainZti);
-                const who = extra.address ? shortAddress(extra.address) : shortHash(c.provider);
-                const hasZti = Number.isFinite(c.domainZti);
-                return (
-                  <div key={i} className="rounded-lg border border-hairline bg-base p-2.5">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-medium">{c.label || who} {c.model ? <span className="text-faint">{c.model}</span> : null}</span>
-                      <span className="mono text-faint">provider {who}</span>
-                    </div>
-                    {hasZti && <Meter value={c.domainZti} label="domain ZTI" className="my-1.5" />}
-                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-faint">
-                      {conf != null && <span>confidence <span className="mono text-muted">{formatNum(conf, 2)}</span></span>}
-                      {Number.isFinite(c.weight) && <span>weight <span className="mono text-muted">{formatNum(c.weight, 2)}</span></span>}
-                    </div>
-                    {c.excerpt ? <p className="mt-1 text-xs text-muted">{c.excerpt}</p> : null}
-                    {c.sig ? (() => {
-                      // Actually verify the contributor's ed25519 signature over the exact bytes it signed
-                      // (queryId + "\n" + answer) against its public key. A green check means checked, not
-                      // decorative. Older nodes that omit the signed payload show an honest "unverifiable".
-                      const verifiable = !!c.queryId && typeof c.answer === "string";
-                      const ok = verifiable ? edVerify(`${c.queryId}\n${c.answer}`, c.sig, c.provider) : false;
-                      return (
-                        <div className="mt-1 flex items-center gap-1 text-[11px] text-faint">
-                          {ok ? (
-                            <><CheckCircle2 size={11} className="text-[var(--teal)]" /> signature verified {shortHash(c.sig)}</>
-                          ) : verifiable ? (
-                            <><X size={11} className="text-[var(--warn)]" /> signature invalid {shortHash(c.sig)}</>
-                          ) : (
-                            <><ShieldCheck size={11} className="text-faint" /> signature {shortHash(c.sig)} · unverifiable</>
-                          )}
-                        </div>
-                      );
-                    })() : null}
-                  </div>
-                );
-              })}
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                {receipt.domain ? <Badge tone="neutral">domain: {receipt.domain}</Badge> : null}
-                {receipt.proofAvailable && <Badge tone="warn">proof available</Badge>}
-                {Number.isFinite(receipt.challengeOpenUntil) && <Badge tone="indigo">challenge open {Math.max(0, Math.round((receipt.challengeOpenUntil - Date.now()) / 60000))}m</Badge>}
-              </div>
-            </>
-          )}
-        </div>
-      )}
-    </Card>
-  );
-}
+// Answer provenance is now rendered by the first-class <Receipt/> component (src/components/Receipt.tsx),
+// a dark-glass Proof panel that reads every value straight from the AnswerReceipt the field returns.

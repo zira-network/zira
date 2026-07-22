@@ -60,6 +60,10 @@ export class ModelService {
     founderAddresses: Address | (() => Address[]),
     private announce: (a: ModelAnnounce) => void,
     private launchModels: ModelAnnounce[] = [],
+    // Opt-in baseline serving (mining OFF): hold + serve the baseline launch model so the field can always
+    // answer, without enabling full mining/storage or earning. Defaults to the env so a node started with
+    // ZIRA_SERVE_BASELINE=1 serves the baseline even if the flag is not threaded through options. Off by default.
+    private serveBaseline = process.env.ZIRA_SERVE_BASELINE === "1" || process.env.ZIRA_SERVE_BASELINE?.toLowerCase() === "true",
   ) {
     this.founderAddresses = typeof founderAddresses === "function" ? founderAddresses : () => [founderAddresses];
     this.store = new ModelStore(dataDir);
@@ -84,12 +88,13 @@ export class ModelService {
     // model without any live founder announce — this is what lets the VPS miner and any joining miner serve
     // and earn. We deliberately keep it OFF pure storage/consensus coordinators: fetching + hashing a multi-GB
     // model is CPU-heavy and would starve their checkpoint voting, so they stay free to finalize.
-    if (this.mining.enabled || this.mining.storageEnabled) this.registerLaunchModels();
+    if (this.mining.enabled || this.mining.storageEnabled || this.serveBaseline) this.registerLaunchModels();
     // On restart, reconcile heavy storage against the persisted cap before doing anything else: evict
     // anything over the cap or held while disabled, so the persisted runtime state is authoritative.
     this.enforceStorageCap();
     this.announceLocal();
     if (this.mining.enabled) { if (this.mining.mode === "auto") void this.reconcileAuto(); else if (this.mining.modelId) void this.loadIfReady(); }
+    else if (this.serveBaseline) void this.reconcileServeBaseline();
     else if (this.mining.ownTaskInference) void this.ensureOwnTaskModel();
   }
 
@@ -387,15 +392,19 @@ export class ModelService {
 
   /** The model an auto miner should run: the most recent authorized model matching its served domains. */
   recommendedModelId(domains: string[] = []): string | null {
-    const models = [...this.registry.values()].map((e) => e.meta).sort((a, b) => (b.version ?? 0) - (a.version ?? 0) || b.ts - a.ts);
+    const models = this.modelsByRecency();
     if (models.length === 0) return null;
     const match = domains.length === 0 ? models[0] : (models.find((m) => this.modelDomains(m).some((d) => domains.includes(d))) ?? models[0]);
     return match?.id ?? null;
   }
 
-  /** All authorized models, newest first. */
+  /** All authorized, non-deprecated models, newest first. A deprecated model (retired by the launch authority
+   * via deprecateModel, e.g. an engine-incompatible arch) is never auto-selected to recommend, route, serve, or
+   * offer in the picker, exactly as bestLocalModelId already excludes it. A node already serving a model that
+   * becomes deprecated keeps serving it until its next reload (servingId is eviction-protected); this only
+   * governs NEW selection. Purely local selection over soft catalog state; never a consensus surface. */
   private modelsByRecency(): ModelMeta[] {
-    return [...this.registry.values()].map((e) => e.meta).sort((a, b) => (b.version ?? 0) - (a.version ?? 0) || b.ts - a.ts);
+    return [...this.registry.values()].map((e) => e.meta).filter((m) => !m.deprecated).sort((a, b) => (b.version ?? 0) - (a.version ?? 0) || b.ts - a.ts);
   }
 
   /** Models that can serve a query in `domain`, ranked so the domain's preferred TYPE comes first (a
@@ -472,12 +481,37 @@ export class ModelService {
     await this.ensureSubprocessInference(target);
   }
 
+  /** Serve-baseline (opt-in via ZIRA_SERVE_BASELINE / config.serveBaseline, mining OFF): fetch + hold + serve
+   * the baseline launch model so the field can always answer, WITHOUT enabling full mining/storage or earning.
+   * Fork-safe: purely local scheduling — it never touches consensus, the state root, tx application, or
+   * emission. It fetches one servable model (reconcileStorage's needServing path), marks it local + announces
+   * it, then serves it from the isolated inference subprocess so canServe()/answering go live. */
+  async reconcileServeBaseline(): Promise<void> {
+    if (!this.serveBaseline || this.mining.enabled) return;
+    if (this.mining.endpoint && !this.endpointIsSubprocess) return; // an external endpoint already serves
+    // Secure one servable baseline model if we hold none yet (bounded: one hardware-fitting model, no cap growth).
+    if (!this.bestLocalModelId()) await this.reconcileStorage();
+    const target = this.bestLocalModelId();
+    if (!target) return;
+    const held = this.registry.get(target);
+    if (held && !held.local) {
+      held.local = true;
+      held.peerIds.add(this.net.peerId());
+      held.hosts.add(this.identity.address);
+      this.announce(this.makeAnnounce(held));
+    }
+    await this.ensureSubprocessInference(target);
+  }
+
   /** The best model this node can SERVE right now: the newest authorized model whose GGUF bytes are held
    * locally. Storage replicates only models that fit the cap, so this is inherently resource-aware — the
    * node serves the largest/best model it could actually fit, and nothing it can't. */
   private bestLocalModelId(): string | null {
-    for (const m of this.modelsByRecency()) if (!m.deprecated && this.store.hasValidGguf(m.id)) return m.id;
-    return null;
+    const local = this.modelsByRecency().filter((m) => this.store.hasValidGguf(m.id));
+    // Prefer a held model that has NOT failed to serve here (skips a crash-looping arch); if every held model
+    // has failed, fall back to the newest held anyway so the node still attempts to answer rather than nothing.
+    const servable = local.find((m) => !this.serveFailed(m.id));
+    return (servable ?? local[0])?.id ?? null;
   }
 
   /** Launch authority: retire (or reinstate) a model network-wide. Re-announces the SAME model id with a
@@ -511,6 +545,30 @@ export class ModelService {
   private inferenceProc: ChildProcess | null = null;
   private endpointIsSubprocess = false;
   private servingId: string | null = null; // model id the inference subprocess is actively serving (eviction-protected)
+  // Whether the serving subprocess actually has a GPU active (from its llama.gpu, surfaced over the status
+  // endpoint). Used to tier answer concurrency on real acceleration rather than on mining.gpuLayers, which can
+  // be 0 on a real GPU. Purely local scheduling; never touches consensus.
+  private subprocessHasGpu = false;
+  // Capability tier from hardware detection (gpu-heavy / gpu-strong / ...), set by ZiraNode when it detects
+  // hardware. Lets a stronger accelerator run more generations in parallel. Soft/local only.
+  private hwTier: string | null = null;
+  // Models that failed to SERVE on this machine (the inference subprocess crashed or never became ready, e.g.
+  // an engine-incompatible arch like the custom gemma-4-e4b). Selection skips a failed id for a cooldown so a
+  // single bad-but-authorized model can never wedge serving in a respawn crash-loop: the node falls back to the
+  // next servable local model (the safe baseline) and keeps answering. Purely local health; never a consensus
+  // surface. Retried after the cooldown in case the failure was transient (partial download, memory pressure).
+  private serveFailures = new Map<string, number>();
+  private static readonly SERVE_FAILURE_COOLDOWN_MS = 30 * 60_000;
+  private serveFailed(id: string): boolean {
+    const at = this.serveFailures.get(id);
+    if (at === undefined) return false;
+    if (Date.now() - at > ModelService.SERVE_FAILURE_COOLDOWN_MS) { this.serveFailures.delete(id); return false; }
+    return true;
+  }
+  private markServeFailure(id: string): void {
+    this.serveFailures.set(id, Date.now());
+    log.warn(`model ${id.slice(0, 12)} failed to serve; skipping it locally for ~30m and falling back to the next servable model`);
+  }
 
   private async ensureSubprocessInference(id: string): Promise<void> {
     if (this.inferenceProc || this.endpointIsSubprocess) return;       // already serving
@@ -527,33 +585,49 @@ export class ModelService {
     // a process doing heavy native/GPU init can take the parent down). detached so the GPU work is fully
     // its own. We never block on the load: the enable-mining RPC returns immediately and the endpoint is
     // wired up in the background once the server is ready.
+    // GPU offload for the subprocess: in auto/recommended-hardware mode leave it UNSET so the server offloads
+    // all layers (its default), matching the prior hardcoded 999. When the user set an explicit gpuLayers cap
+    // (recommended-hardware off, or ZIRA_GPU_LAYERS set), pass that cap through so it is honored. Purely local
+    // hardware scheduling; never a consensus surface.
+    const explicitGpuCap = this.mining.useRecommendedHardware === false
+      || (process.env.ZIRA_GPU_LAYERS !== undefined && process.env.ZIRA_GPU_LAYERS !== "");
+    const gpuLayersEnv = explicitGpuCap ? { ZIRA_INFERENCE_GPU_LAYERS: String(Math.max(0, Math.floor(Number(this.mining.gpuLayers) || 0))) } : {};
     const proc = spawn(process.execPath, [entry], {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", ZIRA_INFERENCE_SERVER: "1", ZIRA_INFERENCE_MODEL: gguf, ZIRA_INFERENCE_PORT: String(port), ZIRA_RESET: "0", ZIRA_BOOTSTRAP: "" },
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", ZIRA_INFERENCE_SERVER: "1", ZIRA_INFERENCE_MODEL: gguf, ZIRA_INFERENCE_PORT: String(port), ZIRA_RESET: "0", ZIRA_BOOTSTRAP: "", ...gpuLayersEnv },
       stdio: "ignore",
       windowsHide: true,
     });
     this.inferenceProc = proc;
+    let becameReady = false; // set once the subprocess serves this id; distinguishes a load crash from a normal stop
     const killChild = () => { try { proc.kill(); } catch { /* */ } };
     process.once("exit", killChild);
-    proc.on("error", (e) => { log.warn(`inference subprocess spawn error: ${(e as Error).message}`); if (this.inferenceProc === proc) this.inferenceProc = null; });
+    proc.on("error", (e) => { log.warn(`inference subprocess spawn error: ${(e as Error).message}`); this.markServeFailure(id); if (this.inferenceProc === proc) this.inferenceProc = null; });
     proc.on("exit", (code) => {
       log.warn(`inference subprocess exited (code ${code})`);
+      // Exited before it ever served this model => the model failed to load here (e.g. an incompatible arch).
+      // Record it so selection skips it and falls back to the next servable model instead of respawn-looping.
+      if (!becameReady) this.markServeFailure(id);
       process.removeListener("exit", killChild);
       if (this.inferenceProc === proc) {
         this.inferenceProc = null;
         this.servingId = null;
+        this.subprocessHasGpu = false;
         if (this.endpointIsSubprocess) { this.mining.endpoint = undefined; this.mining.endpointModel = undefined; this.endpointIsSubprocess = false; }
       }
     });
-    void this.waitForPort(port, 120000).then((ok) => {
+    void this.waitForPort(port, 120000).then(async (ok) => {
       if (ok && this.inferenceProc === proc) {
+        becameReady = true;
+        this.serveFailures.delete(id); // served successfully; clear any prior failure mark
         this.mining.endpoint = `http://127.0.0.1:${port}/v1`;
         this.mining.endpointModel = this.registry.get(id)?.meta.name || id;
         this.endpointIsSubprocess = true;
         this.servingId = id;
-        log.info(`inference subprocess ready; serving via ${this.mining.endpoint}`);
+        this.subprocessHasGpu = await this.fetchSubprocessGpu(port);
+        log.info(`inference subprocess ready; serving via ${this.mining.endpoint} (gpu=${this.subprocessHasGpu})`);
       } else if (!ok) {
         log.warn("inference subprocess did not become ready; staying in field-coordinator mode");
+        this.markServeFailure(id); // never became ready => skip this model and fall back to the next servable one
         killChild();
         if (this.inferenceProc === proc) this.inferenceProc = null;
       }
@@ -563,8 +637,25 @@ export class ModelService {
   private stopSubprocessInference(): void {
     if (this.inferenceProc) { try { this.inferenceProc.kill(); } catch { /* */ } this.inferenceProc = null; }
     this.servingId = null;
+    this.subprocessHasGpu = false;
     if (this.endpointIsSubprocess) { this.mining.endpoint = undefined; this.mining.endpointModel = undefined; this.endpointIsSubprocess = false; }
   }
+
+  /** Read the serving subprocess's status endpoint once to learn whether a GPU is actually active. Best-effort:
+   * any failure returns false (no GPU assumed), so it never blocks serving. */
+  private fetchSubprocessGpu(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const req = http.get({ host: "127.0.0.1", port, path: "/", timeout: 1500 }, (res) => {
+        let s = ""; res.on("data", (d) => (s += d)); res.on("end", () => { try { resolve(!!(JSON.parse(s) as { gpu?: boolean }).gpu); } catch { resolve(false); } });
+      });
+      req.on("error", () => resolve(false));
+      req.on("timeout", () => { req.destroy(); resolve(false); });
+    });
+  }
+
+  /** ZiraNode calls this when hardware detection completes, so answer concurrency can tier on the accelerator
+   * class (gpu-heavy / gpu-strong). Soft/local scheduling only; never a consensus surface. */
+  setHardwareTier(tier: string | null | undefined): void { this.hwTier = tier ?? null; }
 
   private waitForPort(port: number, timeoutMs: number): Promise<boolean> {
     const start = Date.now();
@@ -648,20 +739,33 @@ export class ModelService {
     // miner heartbeats and coordinates but never serves an answer. With storage off it fetches ONLY that one
     // serving model (it is not a general replicator); with storage on it also fills replication gaps.
     const storageOn = this.mining.storageEnabled;
-    let needServing = this.mining.enabled && !this.bestLocalModelId();
+    // Serve-baseline (opt-in, mining off) also needs one servable model so it can answer the field.
+    let needServing = (this.mining.enabled || this.serveBaseline) && !this.bestLocalModelId();
     if (!storageOn && !needServing) return; // storage off and either not mining or already have a servable model
+    // Securing exactly ONE serving model (storage off / serve-baseline): if a serving fetch is already in flight,
+    // wait for it instead of starting another. reconcileStorage runs on a timer, and the in-flight model is
+    // skipped by the storageFetches guard below, so without this each tick would start a DIFFERENT model and a
+    // bandwidth-limited node ends up with several half-finished downloads that never complete (observed live as
+    // multiple stuck .part files, serving never coming up). Storage-on replication is intentionally parallel.
+    if (!storageOn && needServing && this.storageFetches.size > 0) return;
     const cap = this.storageCapBytes();
     const connected = new Set(this.net.peers());
     const liveReplicas = (e: RegistryEntry): number => [...e.peerIds].filter((p) => connected.has(p)).length;
-    // Serving pick is HARDWARE-AWARE: prefer the LARGEST model this machine can actually run (bigger model =
-    // stronger answers = more coordination pay), capped by what fits in memory, so strong hardware serves a big
-    // model and a small machine serves a small one. Steward-ASSIGNED first, then under-replicated, then, when
-    // just securing a serving model, largest-that-fits first; otherwise newest first.
     const fitsHardware = (e: RegistryEntry): boolean => (e.meta.sizeBytes ?? 0) * 1.3 <= totalmem();
+    // Securing the FIRST servable model (nothing held yet, mining just on or serve-baseline): fetch the
+    // SMALLEST-that-fits so the node answers the field ASAP. A multi-GB "largest that fits" pick takes many
+    // minutes (or never, on a lone/slow node) to download, so the field never answers, which is strictly worse
+    // than a small model answering now (observed live: a miner stuck pulling a 5.4GB model, serving=false). Once
+    // a model is held, a STORAGE node replicates bigger/assigned models on its own schedule (the else branch:
+    // steward-ASSIGNED first, then under-replicated, then newest). A miner that wants a bigger served model turns
+    // storage on. Purely local scheduling; never a consensus surface.
+    const secureSmallestFirst = needServing;
     const entries = [...this.registry.values()].sort((a, b) =>
-      (Number(!!b.meta.assigned) - Number(!!a.meta.assigned))
-      || (liveReplicas(a) - liveReplicas(b))
-      || (!storageOn ? ((b.meta.sizeBytes ?? 0) - (a.meta.sizeBytes ?? 0)) : (b.meta.ts - a.meta.ts)));
+      secureSmallestFirst
+        ? ((a.meta.sizeBytes ?? 0) - (b.meta.sizeBytes ?? 0)) // smallest servable first: quickest to answer the field
+        : (Number(!!b.meta.assigned) - Number(!!a.meta.assigned))
+          || (liveReplicas(a) - liveReplicas(b))
+          || (!storageOn ? ((b.meta.sizeBytes ?? 0) - (a.meta.sizeBytes ?? 0)) : (b.meta.ts - a.meta.ts)));
     for (const entry of entries) {
       if (this.store.hasValidGguf(entry.meta.id)) continue;
       if (this.storageFetches.has(entry.meta.id)) continue;
@@ -730,6 +834,14 @@ export class ModelService {
     // always wins, so the toggle is real.
     const miningJustEnabled = patch.enabled === true && !prevEnabled;
     if (miningJustEnabled && patch.storageEnabled === undefined) this.mining.storageEnabled = true;
+    // Turning Mine ON defaults to RECOMMENDED HARDWARE (full GPU offload + auto threads) so the node uses the
+    // machine's full power out of the box, the sensible default a user expects when they choose to contribute.
+    // Only a pure enable does this: if the same action also pins gpuLayers/threads, that explicit choice wins
+    // (handled above), and a user can still turn recommended-hardware off afterward. This clears a stale "off"
+    // left from a prior manual tune so re-enabling mining is full-power again.
+    if (miningJustEnabled && patch.useRecommendedHardware === undefined && patch.gpuLayers === undefined && patch.threads === undefined) {
+      this.mining.useRecommendedHardware = true;
+    }
     const storageJustForcedOn = this.mining.storageEnabled && !prevStorage;
     // A GB-only patch (older Console) updates the byte cap too, so the authoritative value tracks it.
     if (patch.storageLimitGb !== undefined && patch.storageCapBytes === undefined) {
@@ -796,7 +908,8 @@ export class ModelService {
    * (mining on but no model/endpoint) do NOT "serve": they relay, weight and validate, but never publish a
    * placeholder answer that would compete with real ones in fusion. */
   canServe(): boolean {
-    if (!this.mining.enabled) return false;
+    // Serve-baseline lets a node answer the field with mining OFF (opt-in), so gate on either.
+    if (!this.mining.enabled && !this.serveBaseline) return false;
     return this.inference.loadedModel() !== null || !!this.mining.endpoint;
   }
   /** How many field queries this node answers in parallel, by hardware tier. A single-slot CPU node stays at 1
@@ -809,7 +922,15 @@ export class ModelService {
     const override = Number(process.env.ZIRA_ANSWER_CONCURRENCY);
     if (Number.isFinite(override) && override >= 1) return Math.min(8, Math.floor(override));
     let cores = 4; try { cores = cpus().length || 4; } catch { /* keep default */ }
-    if (this.mining.gpuLayers > 0) return 4;   // GPU offload: run several generations at once
+    // Key the GPU branch on whether the serving subprocess actually has a GPU active (real acceleration), not on
+    // mining.gpuLayers which can be 0 even on a real GPU. Preserve gpuLayers>0 as an additional signal so an
+    // external GPU endpoint (Ollama/LM Studio) still tiers up. Stronger accelerators run more in parallel.
+    const gpuActive = this.subprocessHasGpu || this.mining.gpuLayers > 0;
+    if (gpuActive) {
+      if (this.hwTier === "gpu-heavy") return 8;   // top-tier accelerator: many generations at once
+      if (this.hwTier === "gpu-strong") return 6;  // strong GPU
+      return 4;                                    // GPU offload: run several generations at once
+    }
     if (cores >= 12) return 2;                 // strong many-core CPU
     return 1;                                  // small CPU: one at a time to beat the TTL
   }
@@ -887,6 +1008,23 @@ export class ModelService {
   servableHealthy(): boolean { return this.serveHealth.healthy; }
   /** Full cached serve-health, for status/RPC visibility. */
   serveHealthInfo(): { healthy: boolean; lastProbeMs: number; lastOkMs: number; lastError: string | null } { return { ...this.serveHealth }; }
+
+  /** Opt-in low-priority keepalive (driven by the miner loop only when ZIRA_FULL_UTILIZATION is set and the
+   * node is idle): run ONE short, self-generated warmup generation whose result is DISCARDED — never published
+   * as an answer, never settled — so the accelerator stays warm between real queries. Fork-safe: purely local,
+   * it touches no consensus, state root, tx application, or emission. Bounded and best-effort; failures are ignored. */
+  async warmupKeepalive(): Promise<void> {
+    if (!this.canServe()) return;
+    try {
+      if (this.mining.endpoint) {
+        // Cheap: a handful of tokens with a short wall-clock bound. The subprocess pool runs it on a spare
+        // sequence, so a real query arriving meanwhile is unaffected.
+        await chat({ endpoint: this.mining.endpoint, model: this.mining.endpointModel || "zira", messages: [{ role: "user", content: "ok" }], maxTokens: 8, timeoutMs: 20_000 });
+      } else if (this.inference.loadedModel()) {
+        await this.inference.generate("Reply with the single word: ok", [{ role: "user", content: "ping" }]);
+      }
+    } catch { /* keepalive is best-effort; a failure never matters and is never surfaced */ }
+  }
 
   // ---- own-task inference: the user's own hardware for the user's own work, decoupled from mining ----
   // This path never serves the field, never answers others, and never earns. It can run even when

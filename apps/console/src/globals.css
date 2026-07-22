@@ -49,8 +49,10 @@
   --danger: #dc2626;
   --neutral: #525252;
 
-  /* The one quiet hero ramp per screen: teal fading to ink. Legible on white. */
-  --gradient: linear-gradient(135deg, #0c7d72 0%, #134e4a 60%, #0a0a0a 100%);
+  /* The brand signature: the two logo colors together, teal -> indigo. Used once per screen as the hero
+     figure (gradient text/fill) and as the 2px brand rule, so the app reads as ITS brand, not generic ink. */
+  --gradient: linear-gradient(135deg, #3ecfc0 0%, #4aa3d8 50%, #6b8ce8 100%);
+  --brand-gradient: linear-gradient(135deg, var(--brand-teal), var(--brand-indigo));
 
   --radius-sm: 4px; --radius: 6px; --radius-lg: 8px;
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1); --dur-fast: 110ms; --dur: 160ms;
@@ -70,34 +72,37 @@
 
 /* ---- DARK (true ink: near-black, not slate) ---- */
 :root[data-theme="dark"] {
-  --bg-base: #0a0a0a;
-  --bg-surface: #121214;
-  --bg-elevated: #1a1a1d;
-  --bg-panel: rgba(18, 18, 20, 0.90);
+  /* ZIRA Resonance: a deep-space navy canvas, glass panels, teal->indigo light. Backgrounds carry a hint of
+     blue (not pure black) so the neon energy and the glass surfaces read as luminous. */
+  --bg-base: #070a14;
+  --bg-surface: #0c1120;
+  --bg-elevated: #121a2e;
+  /* Glass: translucent navy for backdrop-blur panels (the mockup's frosted cards). */
+  --bg-panel: rgba(13, 20, 38, 0.62);
 
-  --border: rgba(255, 255, 255, 0.09);
-  --border-strong: rgba(255, 255, 255, 0.16);
+  --border: rgba(138, 160, 242, 0.12);
+  --border-strong: rgba(138, 160, 242, 0.24);
 
-  --text: #fafafa;
-  --text-muted: #a1a1aa;
-  --text-faint: #6b6b73;
+  --text: #eef2fb;
+  --text-muted: #9aa6c4;
+  --text-faint: #5f6b88;
 
-  /* On near-black, the accent brightens; dark ink on an --accent fill keeps a crisp corporate contrast. */
-  --accent: #2dd4bf;
+  /* The accent is the bright brand teal; it glows on the navy. */
+  --accent: #3ecfc0;
   --accent-contrast: #04221e;
-  --accent-soft: rgba(45, 212, 191, 0.13);
-  --accent-ring: rgba(45, 212, 191, 0.36);
+  --accent-soft: rgba(62, 207, 192, 0.12);
+  --accent-ring: rgba(62, 207, 192, 0.34);
 
-  --teal: #2dd4bf;
+  --teal: #3ecfc0;
   --indigo: #8aa0f2;
   --violet: #a1a1aa;
   --rose: #c4c4cc;
-  --mist: #fafafa;
+  --mist: #eef2fb;
   --warn: #f0b75e;
   --danger: #f87171;
-  --neutral: #a1a1aa;
+  --neutral: #9aa6c4;
 
-  --gradient: linear-gradient(135deg, #2dd4bf 0%, #0f766e 55%, #fafafa 100%);
+  --gradient: linear-gradient(135deg, #3ecfc0 0%, #4aa3d8 50%, #6b8ce8 100%);
 
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.40);
   --shadow-2: 0 2px 8px rgba(0, 0, 0, 0.46);
@@ -131,9 +136,63 @@ body {
   letter-spacing: -0.011em;
 }
 
-/* Premium keyboard focus: a single crisp accent ring with offset, never a default browser outline. */
+/* Ambient resonance glow: a soft teal->indigo aurora behind the app, only on the dark (default) theme, so the
+   canvas reads as deep space with light in it rather than a flat panel. Fixed, non-interactive, cheap. */
+:root[data-theme="dark"] body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(58% 42% at 50% 0%, rgba(62, 207, 192, 0.10), transparent 70%),
+    radial-gradient(48% 40% at 82% 8%, rgba(107, 140, 232, 0.10), transparent 72%),
+    radial-gradient(60% 50% at 12% 96%, rgba(107, 140, 232, 0.07), transparent 75%);
+}
+#root { position: relative; z-index: 1; }
+
+/* ---- Resonance glass + glow system (dark-first; degrades gracefully on light) ---- */
+/* Backdrop-blur is a known mobile perf sink, so the glass blur radius is bounded by a single token and
+   stepped down on small screens. The glass look is preserved; only the (expensive) radius is capped. */
+:root { --glass-blur: 16px; }
+@media (max-width: 640px) { :root { --glass-blur: 10px; } }
+
+.glass {
+  background: var(--bg-panel);
+  backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+/* A capped glass blur for panels that used an oversized Tailwind blur (backdrop-blur-xl == 24px). Uses the
+   bounded --glass-blur token so heavy blur never runs on low-end devices / the mobile webview. */
+.glass-blur {
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+}
+:root[data-theme="dark"] .glass {
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 18px 50px -28px rgba(0, 0, 0, 0.8);
+}
+/* a hairline gradient edge on the top of a glass hero, the "energized" panel */
+.glass-lit { position: relative; }
+.glass-lit::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px; pointer-events: none;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--brand-teal) 55%, transparent), transparent 40%, color-mix(in srgb, var(--brand-indigo) 45%, transparent));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+}
+.glow-teal { box-shadow: 0 0 24px -6px color-mix(in srgb, var(--brand-teal) 60%, transparent); }
+.glow-indigo { box-shadow: 0 0 24px -6px color-mix(in srgb, var(--brand-indigo) 60%, transparent); }
+/* Teal glow text. On the dark ground the bright brand teal clears AA; on the LIGHT theme the bright brand
+   teal on white fails contrast, so light mode uses the AA-safe --teal token for the text color and keeps the
+   brand hue only in the (decorative) glow. Keeps the accent identity without failing small-text contrast. */
+.text-glow-teal { color: var(--teal); text-shadow: 0 0 18px color-mix(in srgb, var(--brand-teal) 45%, transparent); }
+:root[data-theme="dark"] .text-glow-teal { color: var(--brand-teal); }
+
+/* Premium keyboard focus: a single crisp, SOLID accent ring with offset, never a default browser outline.
+   Solid --accent (not the translucent ring token) so it stays clearly visible on the deep-navy ground. */
 :where(a, button, input, textarea, select, [role="button"], [tabindex]):focus-visible {
-  outline: 2px solid var(--accent-ring);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
@@ -170,6 +229,37 @@ p { line-height: 1.6; }
   height: 2px;
   border-radius: 2px;
   background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 12%, transparent));
+}
+
+/* The brand signature rule: the two logo colors together. Used once per screen as the hero's top edge. */
+.brand-rule {
+  height: 2px;
+  border-radius: 2px;
+  background: var(--brand-gradient);
+}
+
+/* ---- Resonance field motion (v3 "living field" concept). All motion is opt-out via reduced-motion. ---- */
+@keyframes rf-orbit { to { transform: rotate(360deg); } }
+@keyframes rf-pulse {
+  0% { r: 13%; opacity: 0; }
+  10% { opacity: 0.5; }
+  100% { r: 46%; opacity: 0; }
+}
+@keyframes rf-node { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+@keyframes rf-breathe { 0%, 100% { transform: scale(1); opacity: 0.94; } 50% { transform: scale(1.035); opacity: 1; } }
+.rf-orbit { animation: rf-orbit linear infinite; }
+.rf-pulse { animation: rf-pulse 4.8s var(--ease) infinite; }
+.rf-node { animation: rf-node 3s var(--ease) infinite; }
+.rf-breathe { animation: rf-breathe 6s var(--ease) infinite; }
+/* Offscreen pause: a ResonanceField that scrolls out of view (or many instances mounted at once) stops
+   spending frames. The component toggles .rf-paused via an IntersectionObserver; here we simply freeze the
+   looping CSS animations. Paused (not removed) so it resumes instantly on scroll-back with no reflow. */
+.rf-paused .rf-orbit, .rf-paused .rf-pulse, .rf-paused .rf-node, .rf-paused .rf-breathe {
+  animation-play-state: paused;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rf-orbit, .rf-pulse, .rf-node, .rf-breathe { animation: none !important; }
+  .rf-pulse { display: none; }
 }
 
 input,
@@ -257,12 +347,6 @@ option {
   font-variant-numeric: tabular-nums;
 }
 
-.glass {
-  background: var(--bg-panel);
-  backdrop-filter: blur(14px);
-  border: 1px solid var(--border);
-}
-
 /* The page surface is calm: no grid overlay, no radial wash. */
 .page-shell {
   position: relative;
@@ -319,13 +403,6 @@ option {
 /* Quiet, intentional entrance for streamed answers and panels. */
 @keyframes fade-in-up { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 .fade-in-up { animation: fade-in-up var(--dur) var(--ease); }
-
-/* Keyboard focus is always visible, in both themes, in the accent. */
-:where(button, a, input, textarea, select, [tabindex]):focus-visible {
-  outline: 2px solid var(--accent-ring);
-  outline-offset: 2px;
-  border-radius: var(--radius-sm);
-}
 
 /* Respect reduced-motion: stop all looping/decorative animation and long transitions. */
 @media (prefers-reduced-motion: reduce) {

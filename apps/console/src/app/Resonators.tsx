@@ -8,6 +8,7 @@ import { useNavigate } from "react-router-dom";
 import { Plus, Bot, Sparkles, Wallet, Activity, Coins, Search, Check, X } from "lucide-react";
 import { DOMAINS, DOMAIN_META, generateKeypair, PROTOCOL, type Resonator, type Domain, type SpendLimits } from "@zira/protocol";
 import { Card, Button, Input, Textarea, Badge, Meter, Modal, Field, Select, PageHeader, useToast, EmptyState, Spinner, LoadingState, ErrorState, useSlowHint } from "../components/ui";
+import { ResonanceField } from "../components/ResonanceField";
 import { useZira } from "../store/useZira";
 import { useUnlock } from "../store/useUnlock";
 import { makeSignedTx, zirToUzir } from "../lib/tx";
@@ -182,7 +183,7 @@ export function Resonators() {
   function openBuilder(s: Starter | null) { if (!CREATION_LIVE) return; setStarter(s); setBuilding(true); }
 
   if (!enabled) {
-    return <div className="p-6"><EmptyState title="Resonators are almost here" hint="Resonators turn on with the economy. You can explore the field and your wallet now."><Bot size={40} className="text-muted" /></EmptyState></div>;
+    return <div className="p-6"><EmptyState title="Resonators are almost here" hint="Resonators turn on with the economy. You can explore the field and your wallet now."><div className="flex flex-col items-center"><ResonanceField size={132} live={false} intensity={0.24} /><div className="mt-3 text-[11px] uppercase tracking-[0.16em] text-faint">coming soon</div></div></EmptyState></div>;
   }
 
   return (
@@ -267,7 +268,10 @@ export function Resonators() {
           </EmptyState>
         ) : (
           <EmptyState title="Your own Resonator is coming soon" hint="Creating and funding your own Resonator is not live yet. Today, resonators are the network's coordination agents. You can explore them in Discover while this feature is on the way.">
-            <Bot size={40} className="text-muted" />
+            <div className="flex flex-col items-center">
+              <ResonanceField size={140} live={false} intensity={0.24} />
+              <div className="mt-3 text-[11px] uppercase tracking-[0.16em] text-faint">coming soon</div>
+            </div>
           </EmptyState>
         )
       ) : filtered.length === 0 ? (

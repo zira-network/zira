@@ -17,17 +17,34 @@ import { log } from "../log.js";
 
 const GEN_TIMEOUT_MS = Number(process.env.ZIRA_INFERENCE_TIMEOUT_MS) || 60_000;
 const DEFAULT_MAX_TOKENS = Number(process.env.ZIRA_INFERENCE_MAX_TOKENS) || 160;
-const CONTEXT_SEQUENCES = Math.max(2, Math.min(8, Number(process.env.ZIRA_INFERENCE_SEQUENCES) || 4));
+
+/** GPU layers to offload. Auto (unset) offloads ALL layers (999) when a GPU is present, matching the prior
+ *  hardcoded behavior; an explicit ZIRA_INFERENCE_GPU_LAYERS (passed from ModelService via mining.gpuLayers)
+ *  caps the offload, so strong-hardware users can push everything to the GPU and constrained users can pin it. */
+function resolveGpuLayers(): number {
+  const v = process.env.ZIRA_INFERENCE_GPU_LAYERS;
+  if (v === undefined || v === "") return 999;
+  const n = Math.floor(Number(v));
+  return Number.isFinite(n) && n >= 0 ? n : 999;
+}
+
+/** Size the context sequence pool so it is never the bottleneck for a strong GPU running many generations in
+ *  parallel. A GPU gets a deep pool; a CPU keeps a small one. Explicit ZIRA_INFERENCE_SEQUENCES always wins. */
+function contextSequences(hasGpu: boolean): number {
+  const env = Number(process.env.ZIRA_INFERENCE_SEQUENCES);
+  if (Number.isFinite(env) && env > 0) return Math.max(2, Math.min(16, Math.floor(env)));
+  return hasGpu ? 10 : 4;
+}
 
 /** How many generations run at once, sized to the hardware so it is FULLY used without missing the query TTL.
  *  A GPU can run several in parallel; a many-core CPU can run a couple; a small CPU stays at 1 (concurrent CPU
  *  generations slow each other so none land in time, the old field-wedge cause). Explicit override always wins. */
-function autoConcurrency(hasGpu: boolean): number {
+function autoConcurrency(hasGpu: boolean, sequences: number): number {
   const env = Number(process.env.ZIRA_INFERENCE_CONCURRENCY);
-  if (Number.isFinite(env) && env > 0) return Math.max(1, Math.min(CONTEXT_SEQUENCES - 1, Math.floor(env)));
+  if (Number.isFinite(env) && env > 0) return Math.max(1, Math.min(sequences - 1, Math.floor(env)));
   const cores = (availableParallelism?.() ?? cpus().length) || 4;
-  const auto = hasGpu ? 3 : (cores >= 12 ? 2 : 1);
-  return Math.max(1, Math.min(CONTEXT_SEQUENCES - 1, auto));
+  const auto = hasGpu ? 8 : (cores >= 12 ? 2 : 1);
+  return Math.max(1, Math.min(sequences - 1, auto));
 }
 
 export async function runInferenceServer(modelPath: string, port: number): Promise<void> {
@@ -39,13 +56,15 @@ export async function runInferenceServer(modelPath: string, port: number): Promi
   };
   const llama = await mod.getLlama();
   const hasGpu = !!llama.gpu && llama.gpu !== "none" && llama.gpu !== "false";
-  const maxConcurrent = autoConcurrency(hasGpu);
-  log.info(`inference engine ready (gpu=${llama.gpu || "none"}, concurrency=${maxConcurrent}); loading ${modelPath}`);
-  const model = await llama.loadModel({ modelPath, gpuLayers: 999 });
+  const sequences = contextSequences(hasGpu);
+  const maxConcurrent = autoConcurrency(hasGpu, sequences);
+  const gpuLayers = resolveGpuLayers();
+  log.info(`inference engine ready (gpu=${llama.gpu || "none"}, gpuLayers=${gpuLayers}, sequences=${sequences}, concurrency=${maxConcurrent}); loading ${modelPath}`);
+  const model = await llama.loadModel({ modelPath, gpuLayers });
   // A small pool of sequences with explicit release per request. Each query is independent (fresh
   // session + sequence), so we MUST dispose the sequence afterwards or the context runs out of slots
   // ("No sequences left") after the first generation.
-  const context = await model.createContext({ contextSize: 4096, sequences: CONTEXT_SEQUENCES });
+  const context = await model.createContext({ contextSize: 4096, sequences });
 
   // Bounded concurrency over the sequence pool: up to maxConcurrent generations run at once (each on its
   // own sequence), the rest queue. This replaces the old single serialized chain, where one stuck or slow
@@ -108,7 +127,9 @@ export async function runInferenceServer(modelPath: string, port: number): Promi
       })();
     } else {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, model: modelPath, active, queued: waiters.length }));
+      // Surface the real GPU state (llama.gpu) so the parent node can tier its answer concurrency on whether
+      // the accelerator is actually active, not on mining.gpuLayers (which can be 0 even on a real GPU).
+      res.end(JSON.stringify({ ok: true, model: modelPath, active, queued: waiters.length, gpu: hasGpu }));
     }
   });
   server.listen(port, "127.0.0.1", () => log.info(`inference server listening on 127.0.0.1:${port} (max ${maxConcurrent} concurrent, ${GEN_TIMEOUT_MS}ms timeout)`));

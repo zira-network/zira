@@ -6,7 +6,8 @@
 // clear "coming soon" state instead of failing.
 import { useRef, useState } from "react";
 import { ImageIcon, Sparkles } from "lucide-react";
-import { Card, Badge, Button, Input, Textarea, Select, PageHeader } from "../components/ui";
+import { Card, Badge, Button, Input, Textarea, Select, PageHeader, Spinner } from "../components/ui";
+import { ResonanceField } from "../components/ResonanceField";
 import { NodeApi } from "../lib/nodeApi";
 import { useZira } from "../store/useZira";
 
@@ -67,6 +68,23 @@ export function Images() {
         description="Ask the field to generate an image. Independent machines render your prompt and are paid when their results perceptually agree, so no single company is the source."
       />
 
+      {/* Honest dormant hero: the image engine is built and dormant, not a missing model. The field is
+          rendered calm (live={false}) to read as ready-but-idle rather than broken. */}
+      <Card className="overflow-hidden !p-0">
+        <div className="brand-rule" />
+        <div className="grid items-center gap-4 p-5 md:grid-cols-[200px_minmax(0,1fr)]">
+          <div className="order-1 flex flex-col items-center justify-center">
+            <ResonanceField size={180} live={false} intensity={0.2} />
+            <div className="mt-3 text-center text-[11px] uppercase tracking-[0.16em] text-faint">dormant</div>
+          </div>
+          <div className="order-2">
+            <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.16em] text-[var(--indigo)]"><ImageIcon size={13} /> Built, not yet armed</div>
+            <h2 className="mt-1 text-xl font-semibold text-text">Image generation is coming soon</h2>
+            <p className="mt-1 text-sm text-muted">The coordinate-and-settle image pipeline is built into the node and dormant. It turns on once a node arms image generation and an image model is distributed across the field. Nothing is missing; the field is simply idle until then.</p>
+          </div>
+        </div>
+      </Card>
+
       <Card>
         <label className="text-xs font-medium text-muted">Prompt</label>
         <Textarea
@@ -113,7 +131,7 @@ export function Images() {
           ) : phase === "error" ? (
             <div className="text-sm text-[var(--danger)]">{message}</div>
           ) : (
-            <div className="flex items-center gap-2 text-sm text-muted"><span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />{message}</div>
+            <div className="flex items-center gap-2 text-sm text-muted"><Spinner size={16} />{message}</div>
           )}
         </Card>
       )}

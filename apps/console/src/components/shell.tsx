@@ -171,14 +171,14 @@ function Sidebar() {
       <div className={cn("flex items-center py-5", collapsed ? "flex-col gap-3 px-2" : "gap-2.5 px-5")}>
         {!collapsed && (
           <div className="flex flex-1 items-center gap-2.5">
-            <ZiraMark size={26} />
+            <ZiraMark size={26} glow />
             <div>
-              <span className="text-base font-semibold tracking-tight text-text">ZIRA</span>
+              <span className="text-[1rem] font-semibold tracking-tight text-text">ZIRA</span>
               <div className="text-[10px] uppercase tracking-[0.2em] text-faint">the AI network</div>
             </div>
           </div>
         )}
-        {collapsed && <ZiraMark size={24} />}
+        {collapsed && <ZiraMark size={24} glow />}
         <button
           onClick={toggleSidebar}
           aria-expanded={!collapsed}
@@ -234,9 +234,9 @@ function MobileNav() {
       <div className="absolute inset-0 bg-black/45 backdrop-blur-[2px] fade-in-up" onClick={() => setOpen(false)} />
       <aside className="relative flex h-full w-64 max-w-[80vw] flex-col border-r border-hairline bg-surface shadow-[var(--shadow-float)]">
         <div className="flex items-center gap-2.5 px-5 py-5">
-          <ZiraMark size={26} />
+          <ZiraMark size={26} glow />
           <div className="flex-1">
-            <span className="text-base font-semibold tracking-tight text-text">ZIRA</span>
+            <span className="text-[1rem] font-semibold tracking-tight text-text">ZIRA</span>
             <div className="text-[10px] uppercase tracking-[0.2em] text-faint">the AI network</div>
           </div>
           <button onClick={() => setOpen(false)} aria-label="Close navigation" className="rounded-md p-1.5 text-faint transition-colors hover:bg-elevated hover:text-text"><X size={18} /></button>
@@ -351,11 +351,11 @@ function TopBar({ title }: { title: string }) {
   const setTheme = useUi((s) => s.setTheme);
   const userZti = zti || stats?.avgZti || 0;
   return (
-    <header className="sticky top-0 z-20 flex items-center justify-between gap-3 border-b border-hairline bg-[color-mix(in_srgb,var(--bg-base)_82%,transparent)] px-5 py-3 backdrop-blur-xl">
+    <header className="sticky top-0 z-20 flex items-center justify-between gap-3 border-b border-hairline bg-[color-mix(in_srgb,var(--bg-base)_82%,transparent)] px-5 py-3 glass-blur">
       <div className="flex min-w-0 items-center gap-2">
         <button onClick={() => setMobileNavOpen(true)} aria-label="Open navigation"
           className="rounded-md p-1.5 text-muted transition-colors hover:bg-elevated hover:text-text md:hidden"><Menu size={18} /></button>
-        <h1 className="app-title truncate text-base font-semibold tracking-tight text-text">{title}</h1>
+        <h1 className="app-title truncate text-[1rem] font-semibold tracking-tight text-text">{title}</h1>
       </div>
       <div className="flex items-center gap-2">
         {isStewardWallet && (

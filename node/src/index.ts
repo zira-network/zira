@@ -154,6 +154,7 @@ async function main(): Promise<void> {
     observeEnabled: cfg.observeEnabled,
     hardwareDetect: cfg.hardwareDetect,
     selfContained: cfg.selfContained,
+    serveBaseline: cfg.serveBaseline,
     taskReapMs: cfg.taskReapMs,
     providerConfig: cfg.provider,
     fastSync: cfg.fastSync,

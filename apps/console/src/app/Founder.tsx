@@ -10,6 +10,7 @@ import {
 } from "@zira/protocol";
 import type { StewardKind } from "../store/useZira";
 import { Card, Button, Input, Badge, useToast, EmptyState, Field, Select, Textarea, Modal, LoadingState, ErrorState, useSlowHint, usePoll, PageHeader } from "../components/ui";
+import { NeonDial } from "../components/viz";
 import { useZira } from "../store/useZira";
 import { useUnlock } from "../store/useUnlock";
 import { makeSignedTx, zirToUzir } from "../lib/tx";
@@ -131,10 +132,20 @@ export function Founder() {
       <Card>
         <div className="flex items-center gap-2"><Crown size={18} className="text-[var(--warn)]" /><h2 className="text-lg font-semibold">Launch reserve</h2></div>
         <p className="mt-1 text-xs text-muted">The genesis reserve (41% of supply) is pre-allocated transparently and recorded on the public ledger from block 0: 30% to the anchor reserve, a steward-administered wallet released to anchor seat owners as their seats are assigned; 10% to the ecosystem and events reserve for airdrops and grants; and 1% to steward operations. Distribution from the steward operational slice runs through the scheduled reserve distribution below. The anchor reserve is held for the seat owners, and the events reserve is distributed through the events claim. Import an active stewardship wallet only when you need to sign.</p>
-        <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-          <Stat label="Network genesis reserve" value={`${formatZir(reserveTotal)} ZIR`} hint="anchors 30% · events 10% · steward ops 1%" tone="teal" />
-          <Stat label="Allocated (latest 100 grants)" value={`${formatZir(totalGranted)} ZIR`} hint={`${grants.length} grant${grants.length === 1 ? "" : "s"} shown`} />
-          <Stat label="Reserve remaining" value={`${formatZir(reserveRemaining)} ZIR`} hint="reserve − allocated (this view)" />
+        <div className="mt-3 flex flex-col items-center gap-4 sm:flex-row">
+          <div className="shrink-0">
+            <NeonDial
+              value={reserveTotal > 0 ? reserveRemaining / reserveTotal : 0}
+              size={104}
+              label={`${reserveTotal > 0 ? Math.round((reserveRemaining / reserveTotal) * 100) : 0}%`}
+              sub="remaining"
+            />
+          </div>
+          <div className="grid w-full grid-cols-2 gap-2.5 sm:grid-cols-3">
+            <Stat label="Network genesis reserve" value={`${formatZir(reserveTotal)} ZIR`} hint="anchors 30% · events 10% · steward ops 1%" tone="teal" />
+            <Stat label="Allocated (latest 100 grants)" value={`${formatZir(totalGranted)} ZIR`} hint={`${grants.length} grant${grants.length === 1 ? "" : "s"} shown`} />
+            <Stat label="Reserve remaining" value={`${formatZir(reserveRemaining)} ZIR`} hint="reserve − allocated (this view)" />
+          </div>
         </div>
       </Card>
 

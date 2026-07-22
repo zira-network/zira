@@ -4,7 +4,7 @@
 import { useEffect, useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { Modal, Button, Input, Textarea } from "../components/ui";
-import { HexField } from "../components/brand";
+import { ResonanceField } from "../components/ResonanceField";
 import { Wallet, extractPrivateKeyInput } from "../lib/keys";
 import { useZira } from "../store/useZira";
 import { setClientMode, isLocalNode } from "../client/createClient";
@@ -100,20 +100,27 @@ export function Onboarding() {
   return (
     <Modal open={open} onClose={() => { if (privacyAccepted()) finish(); }} title="Welcome to ZIRA" wide>
       {step === 0 && (
-        <div className="flex flex-col items-center gap-4 text-center">
-          <HexField size={120} />
-          <p className="max-w-md text-sm leading-relaxed text-muted">
-            ZIRA is AI that runs on people&apos;s machines instead of one company&apos;s servers. Ask the network
-            and get an answer you can verify, or work privately on your own machine. You can also earn by
-            contributing your computer, or build AI workers that work for you. No central server. No subscription.
-          </p>
+        <div className="flex flex-col items-center gap-6 py-2 text-center">
+          <div className="flex flex-col items-center gap-3">
+            <ResonanceField size={160} live intensity={0.82} />
+            <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[var(--teal)]">Ignite the field</div>
+          </div>
+          <div className="flex flex-col items-center gap-2.5">
+            <h3 className="text-2xl font-semibold tracking-tight text-text">AI you run, own, and verify</h3>
+            <p className="max-w-md text-sm leading-relaxed text-muted">
+              ZIRA is AI that runs on people&apos;s machines instead of one company&apos;s servers. Ask the network
+              and get an answer you can verify, or work privately on your own machine. You can also earn by
+              contributing your computer, or build AI workers that work for you. No central server. No subscription.
+            </p>
+          </div>
           <Button variant="primary" onClick={() => setStep(1)}>Get started</Button>
         </div>
       )}
 
       {step === 1 && (
         <div className="flex flex-col gap-3">
-          <h4 className="font-medium">Connect to the live network</h4>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--teal)]">Step one</div>
+          <h4 className="text-lg font-semibold tracking-tight">Connect to the live network</h4>
           <p className="text-sm text-muted">ZIRA connects to a node and joins the live network. There is no demo mode, this is the real thing. New here? For the network's first year, the contributing community covers a free allowance of questions, no ZIR or machine needed. After that, add ZIR or run your own machine to keep asking; contributing your machine keeps it free with no limit.</p>
           <div className="grid grid-cols-1 gap-3">
             <Button variant="primary" onClick={() => chooseMode("node")}>Connect to the live network</Button>
@@ -123,7 +130,8 @@ export function Onboarding() {
 
       {step === 2 && (
         <div className="flex flex-col gap-3">
-          <h4 className="font-medium">Your privacy, and a few honest terms</h4>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--teal)]">Before you begin</div>
+          <h4 className="text-lg font-semibold tracking-tight">Your privacy, and a few honest terms</h4>
           <p className="text-sm text-muted">ZIRA keeps your data with you. A few honest things to know before you make a wallet.</p>
           <ul className="space-y-1.5 text-sm text-muted">
             <li><span className="text-text">Your data stays on your machine.</span> Your chats and files live on this device and are never sent to a company. When you ask the network, only your question travels to the models that answer it, and only to complete that answer.</li>
@@ -157,7 +165,8 @@ export function Onboarding() {
 
       {step === 3 && (
         <div className="flex flex-col gap-3">
-          <h4 className="font-medium">Create or import a wallet</h4>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--teal)]">Your wallet</div>
+          <h4 className="text-lg font-semibold tracking-tight">Create or import a wallet</h4>
           <p className="text-sm text-muted">Choose a passphrase. It encrypts your private key, which stays only on this device. If you lose the passphrase, no one can recover your funds, not even us.</p>
           <div className="relative">
             <Input
@@ -192,7 +201,8 @@ export function Onboarding() {
 
       {step === 4 && created && (
         <div className="flex flex-col gap-3">
-          <h4 className="font-medium">Back up your key now</h4>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--warn)]">Keep this safe</div>
+          <h4 className="text-lg font-semibold tracking-tight">Back up your key now</h4>
           <p className="text-sm text-[var(--warn)]">Write this down and keep it safe and offline. This is the only way to restore your wallet. We cannot recover it for you.</p>
           <div className="rounded-lg border border-hairline bg-base p-3">
             <div className="text-xs text-faint">Address</div>
@@ -206,7 +216,8 @@ export function Onboarding() {
 
       {step === 6 && (
         <div className="flex flex-col gap-3">
-          <h4 className="font-medium">Your wallet</h4>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--teal)]">Your wallet</div>
+          <h4 className="text-lg font-semibold tracking-tight">This device is ready</h4>
           <p className="text-sm text-muted">This device already created a wallet, and everything it earns goes there. Keep it, or bring a wallet you already have.</p>
           <Button variant="primary" onClick={() => setStep(5)}>Keep this device&apos;s wallet</Button>
           <div className="mt-1 border-t border-hairline pt-3">
@@ -232,16 +243,22 @@ export function Onboarding() {
       )}
 
       {step === 7 && (
-        <div className="flex flex-col items-center gap-3 text-center">
-          <HexField size={80} />
-          <h4 className="font-medium">Wallet imported</h4>
-          <p className="max-w-sm text-sm text-muted">ZIRA is restarting to load your wallet. Your balance appears once the node finishes syncing, usually under a minute.</p>
+        <div className="flex flex-col items-center gap-4 py-2 text-center">
+          <div className="flex flex-col items-center gap-2.5">
+            <ResonanceField size={120} live intensity={0.6} />
+            <div className="text-[11px] uppercase tracking-[0.16em] text-faint">syncing</div>
+          </div>
+          <div className="flex flex-col items-center gap-1.5">
+            <h4 className="text-lg font-semibold tracking-tight">Wallet imported</h4>
+            <p className="max-w-sm text-sm leading-relaxed text-muted">ZIRA is restarting to load your wallet. Your balance appears once the node finishes syncing, usually under a minute.</p>
+          </div>
         </div>
       )}
 
       {step === 5 && (
         <div className="flex flex-col gap-3">
-          <h4 className="font-medium">Pick a starting point</h4>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--teal)]">You&apos;re in</div>
+          <h4 className="text-lg font-semibold tracking-tight">Pick a starting point</h4>
           <p className="text-sm text-muted">You can do all of these and switch any time. The roles stack.</p>
           <div className="grid gap-2">
             <button onClick={finish} className="rounded-lg border border-hairline px-3 py-2 text-left text-sm hover:border-hairline-strong">

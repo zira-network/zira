@@ -121,7 +121,7 @@ export function CommandPalette() {
   return (
     <div className="fixed inset-0 z-[70] flex items-start justify-center p-4 pt-[12vh]" role="dialog" aria-modal="true" aria-label="Command palette">
       <div className="absolute inset-0 bg-black/45 backdrop-blur-[2px] fade-in-up" onClick={() => setOpen(false)} />
-      <div className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-hairline bg-surface shadow-[var(--shadow-float)] fade-in-up" onKeyDown={onKeyDown}>
+      <div className="glass glass-lit relative w-full max-w-lg overflow-hidden rounded-2xl border border-hairline bg-[var(--bg-panel)] shadow-[var(--shadow-float)] backdrop-blur-xl fade-in-up" onKeyDown={onKeyDown}>
         <div className="flex items-center gap-2 border-b border-hairline px-4 py-3">
           <Search size={16} className="shrink-0 text-faint" />
           <input
@@ -148,7 +148,7 @@ export function CommandPalette() {
               aria-selected={idx === activeIdx}
               onMouseMove={() => setActiveIdx(idx)}
               onClick={() => c.run()}
-              className={`flex w-full items-center gap-3 px-4 py-2 text-left text-sm transition-colors ${idx === activeIdx ? "bg-elevated text-text" : "text-muted hover:bg-elevated/60"}`}
+              className={`flex w-full items-center gap-3 border-l-2 px-4 py-2 text-left text-sm transition-colors ${idx === activeIdx ? "border-[var(--accent)] bg-elevated text-text" : "border-transparent text-muted hover:bg-elevated/60"}`}
             >
               <c.icon size={16} className={idx === activeIdx ? "text-[var(--accent)]" : "text-faint"} />
               <span className="flex-1">{c.label}</span>

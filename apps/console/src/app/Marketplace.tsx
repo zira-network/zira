@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ChevronLeft, ChevronRight, CircuitBoard, Info, Search, Star, X } from "lucide-react";
 import {
-  DOMAINS, DOMAIN_META, ANCHOR_CLASSES, ANCHOR_CLASS_ZTI,
+  DOMAINS, DOMAIN_META, ANCHOR_CLASSES, ANCHOR_CLASS_ZTI, MAINNET_ANCHOR_STEWARD,
   type AnchorClass, type Listing, type Domain, type Task, type TaskStatus,
 } from "@zira/protocol";
 import { Card, Button, Input, Select, Badge, Meter, Modal, Textarea, useToast, EmptyState, LoadingState, ErrorState, useSlowHint, PageHeader } from "../components/ui";
@@ -122,9 +122,11 @@ export function Marketplace() {
     const term = q.trim().toLowerCase();
     return list.filter((l) => {
       const ai = anchorInfo(l.resonatorId);
-      // Discover shows every assigned anchor resonator coordinating the field, whether it is still held by
-      // the steward reserve or already signed to an owner. The signed/unsigned distinction governs earning
-      // and ownership (Lattice), not visibility, so the directory reflects the whole active core.
+      // Discover shows only resonators that are actually coordinating the field: signed to a real owner (not
+      // still held by the steward reserve) AND doing verified work (earned trust or answered). Reserve-held
+      // and idle seats belong in the Lattice, not the live directory, so what you see is the active core.
+      if (l.owner === MAINNET_ANCHOR_STEWARD) return false;
+      if (!(l.zti > 0 || (l.jobsDone ?? 0) > 0)) return false;
       if (kind === "anchor" && !ai) return false;
       if (kind === "network" && (ai || (address && l.owner === address))) return false;
       if (term && !(`${l.name} ${l.purpose}`.toLowerCase().includes(term))) return false;
@@ -132,9 +134,10 @@ export function Marketplace() {
     });
   }, [list, kind, q, address]);
 
-  // Honest top-of-page metric: every anchor resonator in the directory, matching what shows.
-  const anchorCount = useMemo(() => list.filter((l) => anchorInfo(l.resonatorId)).length, [list]);
-  const topZti = useMemo(() => list.reduce((m, l) => Math.max(m, l.zti), 0), [list]);
+  // Honest top-of-page metric: only the assigned, coordinating resonators (what the directory actually shows).
+  const active = useMemo(() => list.filter((l) => l.owner !== MAINNET_ANCHOR_STEWARD && (l.zti > 0 || (l.jobsDone ?? 0) > 0)), [list]);
+  const anchorCount = useMemo(() => active.filter((l) => anchorInfo(l.resonatorId)).length, [active]);
+  const topZti = useMemo(() => active.reduce((m, l) => Math.max(m, l.zti), 0), [active]);
 
   if (!enabled) {
     return <div className="p-6"><EmptyState title="Discover opens with the economy" hint="Find AI workers and pay them in ZIR for a task. This opens as the economy goes live."><CircuitBoard size={40} className="text-muted" /></EmptyState></div>;

@@ -14,6 +14,10 @@ import { NodeApi, type ResonatorStats } from "../lib/nodeApi";
 
 const WITHDRAW_FEE_UZIR = 1000; // 0.001 ZIR network fee charged on a withdraw
 
+// Owner management of a Resonator (edit settings, transfer ownership) is not live yet — it ships in a later
+// phase alongside resonator creation. Funding and withdrawing stay available. Flip to true to enable.
+const RESONATOR_MANAGEMENT_LIVE = false;
+
 // A single, consistent status read shared by the header badge and the Autonomy tile so text and tone can
 // never disagree, and the out-of-funds case is surfaced instead of hidden behind a stale status string.
 function resonatorStatus(r: Resonator): { label: string; tone: "teal" | "warn" | "neutral" } {
@@ -276,8 +280,8 @@ export function ResonatorDetail() {
             </div>
             <p className="mt-2 text-xs text-faint">A <span className="mono">0.001 ZIR</span> network fee applies. Balance available: <span className="mono text-muted">{formatZir(r.balanceUZIR)} ZIR</span>. Signed locally with the Resonator key held in your browser, then sent to the network.{withdrawAmt && !withdrawValid && <span className="text-[var(--warn)]"> That is more than the Resonator can pay after the fee.</span>}</p>
           </Card>
-          {(!address || address === r.owner) && <ResonatorSettings r={r} onSaved={load} />}
-          {(!address || address === r.owner) && (
+          {RESONATOR_MANAGEMENT_LIVE && (!address || address === r.owner) && <ResonatorSettings r={r} onSaved={load} />}
+          {RESONATOR_MANAGEMENT_LIVE && (!address || address === r.owner) && (
             <Card>
               <h3 className="mb-1 text-sm font-semibold">Transfer ownership</h3>
               <p className="mb-2 text-xs text-faint">Hand this Resonator to another ZIR address. It keeps its earned trust, history, balance, domains, and limits; the new owner controls it from then on. Signed by you as the current owner.</p>
@@ -285,6 +289,15 @@ export function ResonatorDetail() {
                 <Input placeholder="New owner zir1..." value={transferTo} onChange={(e) => setTransferTo(e.target.value)} className="mono" />
                 <Button variant="primary" onClick={transfer} disabled={!transferTo.startsWith("zir1")}>Transfer</Button>
               </div>
+            </Card>
+          )}
+          {!RESONATOR_MANAGEMENT_LIVE && (!address || address === r.owner) && (
+            <Card>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold">Edit and transfer</h3>
+                <Badge tone="neutral">coming soon</Badge>
+              </div>
+              <p className="mt-1 text-xs text-faint">Editing a Resonator's settings and transferring ownership open in a later phase, alongside creating your own Resonators. Funding and withdrawing are available now.</p>
             </Card>
           )}
         </div>
