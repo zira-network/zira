@@ -97,12 +97,21 @@ export interface MiningPatch { enabled?: boolean; mode?: "auto" | "select"; mode
 
 // User-controllable peer-to-peer storage (soft infra, not ledger state). capBytes defaults to 1 GiB.
 export interface StorageState { enabled: boolean; capBytes: number; usedBytes: number }
+// Live local machine + node telemetry for the Dashboard (rates are per-second deltas between polls; the first
+// sample after boot reports 0 rate). Optional: older nodes and gateways do not send it.
+export interface Telemetry {
+  cpuUtil: number; loadAvg1: number;
+  ramUsedFrac: number; ramUsedGb: number; ramTotalGb: number;
+  rxBytesPerSec: number; txBytesPerSec: number; rxTotalBytes: number; txTotalBytes: number;
+  bandwidthCapKbps: number; autoKbps: number;
+}
 export interface StatusInfo {
   nodeConfig: NodeConfig;
   providerConfig: ProviderConfig;
   providerStatus: ProviderStatus;
   mining: MiningStatus;
   hardware: HardwareProfile | null;
+  telemetry?: Telemetry;
   isFounder: boolean;
   founderAddresses?: string[];
   address: string;
@@ -214,6 +223,10 @@ export const NodeApi = {
     rpcPost<{ jobId?: string; paramsHash?: string; priceUZIR?: number; disabled?: boolean; reason?: string; error?: string }>("/image/submit", body),
   imageResult: (id: string) =>
     rpcGet<{ found: boolean; jobId?: string; settled?: boolean; providers?: string[]; canonicalHash?: string | null; commitments?: number }>(`/image/result?id=${encodeURIComponent(id)}`),
+  // Own-machine image generation (Machine tier): whether this node is armed, and generate one image locally.
+  imageReady: () => rpcGet<{ ready: boolean }>("/image/ready"),
+  imageGenerate: (body: { prompt: string; seed?: number; params?: { width?: number; height?: number; steps?: number; cfg?: number; negativePrompt?: string } }) =>
+    rpcPost<{ ok: boolean; dataUrl?: string; width?: number; height?: number; reason?: string; disabled?: boolean; refused?: boolean }>("/image/generate", body),
 
   // What this address earned by ANSWERING the field (coordination payouts), derived on-chain by the node.
   answererEarnings: (address: string) => rpcGet<{ address: string; earnedUZIR: number; payouts: number }>(`/answerers/mine?address=${encodeURIComponent(address)}`),

@@ -3,6 +3,7 @@
 // the built Console static files. A user runs a node and opens its address to get the GUI, synced
 // by peers. Pointing the Console at your own node is fully trustless for you.
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { sampleTelemetry, countRx, countTx } from "../core/telemetry.js";
 import { timingSafeEqual } from "node:crypto";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, normalize, extname } from "node:path";
@@ -127,8 +128,10 @@ export function startRpc(node: ZiraNode, opts: RpcOptions): () => void {
 }
 
 function json(res: ServerResponse, data: unknown, status = 200): void {
+  const payload = JSON.stringify(data);
+  countTx(Buffer.byteLength(payload));  // outbound serving bytes, for the Dashboard bandwidth meter
   res.writeHead(status, { "Content-Type": "application/json", "Access-Control-Allow-Headers": "Content-Type, Authorization, X-ZIRA-Admin", "Access-Control-Allow-Methods": "GET,POST,OPTIONS" });
-  res.end(JSON.stringify(data));
+  res.end(payload);
 }
 
 function applyCors(req: IncomingMessage, res: ServerResponse, gateway: boolean): void {
@@ -158,6 +161,7 @@ async function body(req: IncomingMessage): Promise<any> {
     let aborted = false;
     req.on("data", (c) => {
       if (aborted) return;
+      countRx((c as Buffer).length || 0);  // inbound bytes, for the Dashboard bandwidth meter
       s += c;
       if (s.length > MAX_BODY_BYTES) { aborted = true; s = ""; try { req.destroy(); } catch { /* already closing */ } resolve({}); }
     });
@@ -393,7 +397,7 @@ const PUBLIC_GET_ROUTES = new Set<string>([
   "/stats", "/net", "/validators", "/status", "/mining", "/models", "/models/route", "/models/by-type",
   "/supply", "/pricing", "/locks", "/query/quota",
   // explorer / history reads
-  "/history", "/events", "/explorer/history",
+  "/history", "/history/archive", "/events", "/explorer/history",
   // balances/nonce/value/fieldnodes/zti reads are public chain reads
   "/balance", "/nonce", "/value", "/fieldnodes", "/zti", "/zti/history",
   // marketplace / resonators / tasks reads
@@ -511,6 +515,20 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
       return json(res, node.importIdentity(String(b.privateKey ?? "")));
     }
     case "GET /history": return json(res, history(node, q));
+    // Opt-in full-history archive read (ZIRA_ARCHIVE=1). Paginated + bounded, streamed from the local
+    // append-only archive so an explorer/client can page an archive node's complete history. When the
+    // archive is disabled this returns { enabled:false, total:0, rows:[] }.
+    case "GET /history/archive": {
+      if (!node.archive.enabled()) return json(res, { enabled: false, total: 0, rows: [] });
+      const page = await node.archive.read({
+        address: q.get("address"),
+        fromTs: q.get("from") ? Number(q.get("from")) : null,
+        toTs: q.get("to") ? Number(q.get("to")) : null,
+        offset: int(q, "offset", 0),
+        limit: Math.min(500, int(q, "limit", 100)),
+      });
+      return json(res, { enabled: true, total: page.total, rows: page.rows });
+    }
     case "GET /events": return json(res, s.recentHistory(null, int(q, "limit", 100)));
     case "GET /locks": return json(res, s.recentLocks(int(q, "limit", 50)));
     case "GET /value": return json(res, s.valueOf(q.get("subject") ?? ""));
@@ -553,9 +571,9 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
 
     // ---- node + provider status (Tier 1 + Tier 2) ----
     case "GET /status":
-    case "GET /mining": return json(res, await node.statusInfo());
+    case "GET /mining": return json(res, { ...(await node.statusInfo()), telemetry: sampleTelemetry() });
     case "POST /status":
-    case "POST /mining": { const b = await body(req); await node.applyStatusPatch(b); return json(res, await node.statusInfo()); }
+    case "POST /mining": { const b = await body(req); await node.applyStatusPatch(b); return json(res, { ...(await node.statusInfo()), telemetry: sampleTelemetry() }); }
     case "POST /hardware/refresh": { await node.refreshHardware(); return json(res, await node.statusInfo()); }
 
     // ---- user-controllable peer-to-peer storage (soft infrastructure, NOT ledger/consensus state) ----
@@ -622,6 +640,13 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
         { provider: String(c.provider ?? ""), pHash: String(c.pHash ?? ""), seed: (Number(c.seed) || 0) | 0, modelId: String(c.modelId ?? ""), paramsHash: String(c.paramsHash ?? "") },
         Date.now());
       return json(res, { ok: true, settled: !!settle?.agreed, providers: settle?.agreeingProviders ?? [] });
+    }
+    // Own-machine (Machine-tier) image generation: private to this node, no coordination or payment. Returns
+    // the PNG as a data URL, or { disabled } when the sd engine + model are not armed. Prompt is G1-screened.
+    case "GET /image/ready": return json(res, { ready: node.imageReady() });
+    case "POST /image/generate": { const b = await body(req);
+      const out = await node.generateImageLocal({ prompt: String(b.prompt ?? ""), params: b.params, seed: (Number(b.seed) || 0) | 0 });
+      return json(res, out, out.ok ? 200 : 200);
     }
 
     // ---- providers + query fusion ----

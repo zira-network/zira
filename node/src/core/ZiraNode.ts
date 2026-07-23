@@ -19,12 +19,16 @@ import { settlementWalletsFor, treasuryWalletsFor } from "../genesis-docs.js";
 import { launchModelsFor } from "../launch-models.js";
 import { verifyContribution, type WatchNetwork } from "../anchor/paymentWatcher.js";
 import { State, epochOf, SETTLE_ROUNDS } from "./State.js";
+import { HistoryArchive } from "./HistoryArchive.js";
 import { weightedOutputs } from "./payout-split.js";
 import { SoftState } from "./SoftState.js";
 import { Checkpoints } from "./Checkpoints.js";
 import { Store } from "./Store.js";
 import { ModelService } from "../models/ModelService.js";
 import { ImageCoordinator } from "../image/ImageCoordinator.js";
+import { ImageEngine } from "../image/ImageEngine.js";
+import { screenImagePrompt } from "../image/ImageSafety.js";
+import type { ImageParams } from "@zira/protocol";
 import type { MiningConfig } from "../models/types.js";
 import { FounderServices } from "./FounderServices.js";
 import { InferenceProvider } from "../provider/InferenceProvider.js";
@@ -32,7 +36,7 @@ import { startMiner } from "../provider/loop.js";
 import { type Envelope, envelopeId, type ProviderAnnounce, type QueryMsg, type AnswerMsg } from "./types.js";
 import type { ModelAnnounce } from "../models/types.js";
 import type { ZiraNetwork } from "../p2p/Network.js";
-import { topics as buildTopics, SNAPSHOT_PROTOCOL, LIVENESS_PROTOCOL } from "../p2p/topics.js";
+import { topics as buildTopics, SNAPSHOT_PROTOCOL, LIVENESS_PROTOCOL, CHECKPOINT_PROTOCOL } from "../p2p/topics.js";
 import { detectHardware } from "../hardware/detect.js";
 import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -85,7 +89,7 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "2.9.0";
+const NODE_RELEASE_VERSION = "3.1.0";
 // Per-cycle coordination batch. Every funded+listed resonator is eligible; autonomousResonanceBatch picks
 // this many per 5-minute cycle by a DETERMINISTIC ZTI-WEIGHTED draw, so higher-trust resonators (anchors,
 // seeded 0.95/0.85/… by class) are driven most often and earn the most, while every other funded resonator
@@ -400,9 +404,16 @@ export class ZiraNode {
   readonly soft = new SoftState();
   readonly checkpoints: Checkpoints;
   readonly models: ModelService;
+  // Opt-in, fork-safe local archive of finalized ledger history (ZIRA_ARCHIVE=1). Pure local disk; no
+  // consensus effect. Off by default: a normal node is byte-identical whether or not this exists.
+  readonly archive: HistoryArchive;
   // Text-to-image job coordination (2.9.0 Track A). Dormant unless ZIRA_IMAGE_ENABLE=1; holds only soft,
   // bounded in-memory job state and settles via the fork-safe perceptual agreement. No consensus effect.
   readonly imageCoordinator = new ImageCoordinator();
+  // The isolated stable-diffusion.cpp engine for own-machine image generation. available() is false unless
+  // ZIRA_IMAGE_ENABLE=1 and the sd binary is present (ZIRA_SD_BIN or a bundled sd-bundle), so a node without
+  // the engine simply reports images unavailable. Subprocess-isolated: a generation crash never touches RPC.
+  readonly imageEngine = new ImageEngine();
   hardware: HardwareProfile | null = null;
   readonly opts: Required<ZiraNodeOptions>;
   founderServices: FounderServices | null = null;
@@ -496,6 +507,7 @@ export class ZiraNode {
     this.state = new State(genesis, this.decentralizationActivationEpoch);
     this.checkpoints = new Checkpoints(genesis.network);
     this.store = new Store(dataDir);
+    this.archive = new HistoryArchive(dataDir);
     this.topics = buildTopics(this.gid);
     this.models = new ModelService(dataDir, net, identity, () => this.founderAddresses(), (a) => this.publishModelAnnounce(a), launchModelsFor(genesis.network), this.opts.serveBaseline);
     if (genesis.network !== "mainnet") this.state.setAuthorizedFounders([...this.state.activeFounderAddresses(), ...this.founderBackups()]);
@@ -847,6 +859,7 @@ export class ZiraNode {
     });
     // fast sync: a joining node adopts a finalized snapshot from a peer instead of replaying history
     this.net.handle(SNAPSHOT_PROTOCOL, () => this.serveSnapshot());
+    this.net.handle(CHECKPOINT_PROTOCOL, () => this.serveCheckpoint());
     this.net.handle(LIVENESS_PROTOCOL, (req, from) => this.serveLiveness(req, from));
     this.net.onPeerConnect((peer) => {
       this.models.announceLocal();
@@ -1177,6 +1190,48 @@ export class ZiraNode {
     await this.net.stop();
   }
 
+  /** The local SD model file for own-machine image generation: ZIRA_SD_MODEL when set, else null. (The paid
+   * network path fetches an authorized, founder-distributed model via the storage network; that is staged next.) */
+  private resolveSdModelPath(): string | null {
+    const env = process.env.ZIRA_SD_MODEL;
+    return env && existsSync(env) ? env : null;
+  }
+
+  /** Whether own-machine image generation is armed on this node (enable flag + sd binary + a model present). */
+  imageReady(): boolean { return this.imageEngine.available() && !!this.resolveSdModelPath(); }
+
+  /** Own-machine text-to-image: screen the prompt (G1 safety), generate ONE image locally in the isolated SD
+   * engine, and return it as a data URL. Private to this node: no network coordination, no payment, no consensus.
+   * Returns a discriminated result the Console renders directly. Never throws into the RPC path. */
+  async generateImageLocal(input: { prompt: string; params?: Partial<ImageParams>; seed?: number }): Promise<
+    | { ok: true; dataUrl: string; width: number; height: number }
+    | { ok: false; reason: string; disabled?: boolean; refused?: boolean }
+  > {
+    if (!this.imageEngine.available()) {
+      return { ok: false, disabled: true, reason: "Image generation is not armed on this node. Set ZIRA_IMAGE_ENABLE=1 and provide the sd binary (ZIRA_SD_BIN) and a model (ZIRA_SD_MODEL)." };
+    }
+    const prompt = String(input.prompt ?? "").trim();
+    if (!prompt) return { ok: false, reason: "empty prompt" };
+    const verdict = screenImagePrompt(prompt, input.params?.negativePrompt);
+    if (!verdict.allowed) return { ok: false, refused: true, reason: verdict.reason };
+    const modelPath = this.resolveSdModelPath();
+    if (!modelPath) return { ok: false, disabled: true, reason: "No image model is available. Set ZIRA_SD_MODEL to a local SD model file." };
+    const outDir = join(this.dataDir, "img-out");
+    try { mkdirSync(outDir, { recursive: true }); } catch { /* */ }
+    const outPath = join(outDir, `img-${Date.now()}.png`);
+    const res = await this.imageEngine.generate({ prompt, params: input.params, seed: (Number(input.seed) || 0) | 0, modelPath, outPath }).catch(() => null);
+    if (!res) { try { rmSync(outPath, { force: true }); } catch { /* */ } return { ok: false, reason: "Generation failed or timed out." }; }
+    try {
+      const bytes = readFileSync(res.pngPath);
+      return { ok: true, dataUrl: `data:image/png;base64,${bytes.toString("base64")}`, width: res.width, height: res.height };
+    } catch {
+      return { ok: false, reason: "Could not read the generated image." };
+    } finally {
+      // Always remove the on-disk PNG, including when the read above throws, so failures never leak files.
+      try { rmSync(res.pngPath, { force: true }); } catch { /* best effort */ }
+    }
+  }
+
   /** GET /rpc/status: the node + mining + provider view used by the Console Mine page. */
   async statusInfo(): Promise<{
     nodeConfig: { observeEnabled: boolean };
@@ -1317,6 +1372,7 @@ export class ZiraNode {
     const now = Date.now();
     const advanced = this.state.advance(now);
     if (advanced > 0) this.voteCheckpoints(now);
+    this.maybeFollowFinality(now);  // finality-follow: pull the latest checkpoint so a follower tracks the leader in seconds
     this.maybeResyncOnStall(now);   // finality watchdog: self-heal if finalizedEpoch freezes behind the mesh
     this.maybeResyncOnDivergence(now); // state watchdog: self-heal if our applied state stops matching consensus
     this.soft.prune(now);
@@ -2325,6 +2381,13 @@ export class ZiraNode {
       const oldest = this.finalizedSnapByRoot.keys().next().value as string | undefined;
       if (oldest !== undefined) this.finalizedSnapByRoot.delete(oldest);
     }
+    // Opt-in archive (ZIRA_ARCHIVE=1): at each finalized checkpoint, append the recent ledger window to the
+    // local append-only archive. recentHistory is bounded (HISTORY_CAP/REWARD_HISTORY_CAP), so appending it
+    // every finalization + on-disk dedup grows a COMPLETE history on a long-running archive node. Fork-safe:
+    // pure local disk, no consensus effect, and try/caught so it can never delay or break finalization.
+    if (this.archive.enabled()) {
+      try { this.archive.append(this.state.recentHistory(null, 11000)); } catch { /* never break finality */ }
+    }
     const me = this.state.accounts.get(this.identity.address);
     if (!me || !me.isMaster) return;
     const vote = this.checkpoints.createVote(epoch, root, this.state.supply, this.identity, me.zti, now);
@@ -2455,6 +2518,18 @@ export class ZiraNode {
   private readonly resyncStallMs = 120_000;    // finalizedEpoch must stay frozen this long to count as stalled
   private readonly resyncMinGap = 40;          // and the processed head must be at least this far ahead
   private readonly resyncCooldownMs = 90_000;  // and at most one resync attempt per this window
+  // Finality-follow (pull-based). The stall watchdog above only fires after MINUTES and then does a heavy full
+  // snapshot; it is the last-resort self-heal, not a way to track the leader closely. Between its firings a
+  // follower/read node's finalized view drifts far behind whenever gossiped checkpoint votes lose a mesh race,
+  // so a just-confirmed transaction can look pending for the full ~2 min catch-up cadence. This lighter loop
+  // pulls ONLY the latest finalized checkpoint (CHECKPOINT_PROTOCOL: a few signed votes, no state) on a tight
+  // cadence and applies those votes through the normal receiveVote path, so finalizedEpoch tracks the leader
+  // within seconds. Consensus-neutral (existing signed votes only) and never runs on a genesis master, which
+  // finalizes its own votes and must never adopt finality from a peer.
+  private followFinalizedAt = 0;
+  private followInFlight = false;              // a pull can outlast the cooldown on a slow peer; never overlap
+  private readonly followGapEpochs = 20;       // only chase once finality lags the head beyond the healthy settle window (~18 epochs)
+  private readonly followCooldownMs = 6_000;   // at most one lightweight checkpoint pull per this window
 
   private liveNonce = 0;
   /** Answer a liveness/coordination challenge: return our address + a signature over the master's nonce, so
@@ -2631,6 +2706,25 @@ export class ZiraNode {
     }));
   }
 
+  /** Serve ONLY the latest finalized checkpoint (epoch + root + finalizing votes), no state snapshot. A
+   *  follower/read node polls this frequently to advance its finalized marker within seconds when gossiped
+   *  checkpoint votes lose a mesh race. Same verifiable-checkpoint selection as serveSnapshot (walk the cache
+   *  for the newest entry we can PROVE finalized), so the votes we return always back the epoch/root we
+   *  advertise. Tiny and consensus-neutral: it re-transmits existing signed votes, never a new root. */
+  private async *serveCheckpoint(): AsyncIterable<Uint8Array> {
+    let serveRoot = this.checkpoints.lastFinalizedRoot, serveEpoch = this.checkpoints.lastFinalizedEpoch;
+    if (!this.finalizedSnapByRoot.get(serveRoot)) {
+      for (const [r, e] of [...this.finalizedSnapByRoot.entries()].reverse()) {
+        if (this.checkpoints.finalizingVotes(e.epoch, r).length > 0) { serveRoot = r; serveEpoch = e.epoch; break; }
+      }
+    }
+    yield enc.encode(JSON.stringify({
+      finalizedEpoch: serveEpoch,
+      finalizedRoot: serveRoot,
+      votes: this.checkpoints.finalizingVotes(serveEpoch, serveRoot),
+    }));
+  }
+
   /**
    * Verify a peer snapshot is cryptographically bound to a genuinely finalized checkpoint before
    * adopting it. Delegates to the pure verifyFastSyncSnapshot using this node's genesis.
@@ -2737,6 +2831,63 @@ export class ZiraNode {
     this.lastResyncAt = now;
     log.warn(`finality stalled: finalizedEpoch ${fin} unchanged for ${Math.round((now - this.finalizedProgressAt) / 1000)}s (processed ${this.state.lastProcessedEpoch}); attempting resync from peers`);
     void this.attemptResyncFromPeers();
+  }
+
+  /**
+   * Finality-follow (pull). Keep a follower/read node's finalized marker tracking the leader within seconds
+   * instead of drifting behind until the heavy stall watchdog fires (minutes). When our finalized epoch lags
+   * the processed head beyond the healthy settle window, pull ONLY the latest finalized checkpoint from a peer
+   * (CHECKPOINT_PROTOCOL, a handful of signed votes, no state) and feed each vote through the SAME receiveVote
+   * path gossip uses. Robust where gossip is not: request/response does not depend on gossipsub mesh health.
+   * Consensus-neutral: transmits existing signed votes only, advances finality exactly as the gossip path
+   * would, and if our applied state for that epoch differs the divergence watchdog still heals it. Never runs
+   * on a genesis master (it finalizes its own votes) so it can never pull a foreign root onto the leader.
+   */
+  private maybeFollowFinality(now: number): void {
+    if (!this.opts.fastSync || process.env.ZIRA_FULL_SYNC === "1") return;
+    if (this.state.isGenesisMaster(this.identity.address)) return;   // the leader/masters finalize themselves
+    if (this.resyncInFlight || this.followInFlight) return;
+    if (this.state.lastProcessedEpoch - this.checkpoints.lastFinalizedEpoch <= this.followGapEpochs) return;
+    if (now - this.followFinalizedAt < this.followCooldownMs) return;
+    if (this.net.peerCount() === 0) return;
+    this.followFinalizedAt = now;
+    void this.attemptFollowFinality();
+  }
+
+  /** Pull the latest finalized checkpoint (votes only) from a few peers and apply the most-advanced verified
+   *  one through receiveVote. Cheap enough to run every few seconds; never adopts state, only advances the
+   *  finalized marker, so it can never fork — a vote must carry a genuine >= quorum master signature set. */
+  private async attemptFollowFinality(): Promise<void> {
+    if (this.resyncInFlight || this.followInFlight) return;
+    this.followInFlight = true;
+    try {
+      type Ckpt = { finalizedEpoch: number; finalizedRoot: string; votes: SignedCheckpointVote[] };
+      const got: Ckpt[] = [];
+      for (const p of this.net.peers().slice(0, 3)) {
+        try {
+          const frames = await this.net.request(p, CHECKPOINT_PROTOCOL, enc.encode("{}"), 6_000);
+          if (frames[0]) got.push(JSON.parse(dec.decode(frames[0])) as Ckpt);
+        } catch { /* peer on an older build has no such protocol, or it raced; try the next */ }
+      }
+      if (!got.length) return;
+      got.sort((a, b) => (b.finalizedEpoch ?? -1) - (a.finalizedEpoch ?? -1));
+      for (const c of got) {
+        if (!c || !Array.isArray(c.votes) || c.finalizedEpoch <= this.checkpoints.lastFinalizedEpoch) continue;
+        let applied = false;
+        for (const v of c.votes) {
+          // Only trust votes that verify AND bind to the advertised (epoch, root); receiveVote then finalizes it
+          // exactly as the gossip receiver does once quorum trust accrues. De-duped by isVoteKnown.
+          if (v.epoch !== c.finalizedEpoch || v.stateRoot !== c.finalizedRoot) continue;
+          if (this.checkpoints.isVoteKnown(v.id)) continue;
+          if (!verifyCheckpointVote(v)) continue;
+          this.checkpoints.receiveVote(v, this.state.totalMasterTrust(), this.state.masterZtiMap());
+          applied = true;
+        }
+        if (applied && this.checkpoints.lastFinalizedEpoch >= c.finalizedEpoch) return; // followed to the leader
+      }
+    } finally {
+      this.followInFlight = false;
+    }
   }
 
   /**

@@ -573,6 +573,10 @@ export class ModelService {
   private async ensureSubprocessInference(id: string): Promise<void> {
     if (this.inferenceProc || this.endpointIsSubprocess) return;       // already serving
     if (process.env.ZIRA_INFERENCE_SERVER === "1") return;             // never recurse inside the server itself
+    // Respect the serve-failure cooldown even when this is the only local model (bestLocalModelId falls back to
+    // it): do not respawn a model still in its cooldown window, so one bad-but-only model cannot crash-loop the
+    // subprocess every reconcile tick. It is retried automatically once the cooldown expires.
+    if (this.serveFailed(id)) return;
     const gguf = this.store.pathOf(id);
     if (!gguf || !this.store.hasValidGguf(id)) return;
     const entry = process.argv[1];

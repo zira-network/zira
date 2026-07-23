@@ -14,6 +14,7 @@ import { extractPrivateKeyInput, Wallet } from "../lib/keys";
 import { loadReconciledHistory } from "../lib/history";
 import { NodeApi, type ZtiSnapshot, type EventsStatus } from "../lib/nodeApi";
 import { makeSignedTx, zirToUzir } from "../lib/tx";
+import { addPending, reconcilePending, usePendingTx } from "../lib/pendingTx";
 import { formatZir, formatUZir, shortAddress, shortHash, timeAgo } from "../lib/format";
 import { featureEnabled } from "../lib/phase";
 
@@ -284,7 +285,7 @@ function SendForm() {
       const nonce = await client.getNonce(address);
       const tx = makeSignedTx({ network, to, amountUZIR, nonce, kind: "transfer", memo: memo || undefined });
       const res = await client.submitTx(tx);
-      if (res.accepted) { toast.push("Sent. Transaction " + shortHash(tx.id)); setTo(""); setAmount(""); setMemo(""); await refresh(); }
+      if (res.accepted) { addPending(tx); toast.push("Sent. Confirming on the network..."); setTo(""); setAmount(""); setMemo(""); await refresh(); }
       else toast.push("Rejected: " + (res.reason ?? "unknown"), "danger");
     } catch (e) {
       toast.push(e instanceof Error ? e.message : "send failed", "danger");
@@ -490,6 +491,12 @@ function TxHistory({ history, address, loading, error, onRefresh, canLoadMore, o
     if (tx.from === address && tx.to !== address) acc.out += (tx.amountUZIR ?? 0) + (tx.feeUZIR ?? 0);
     return acc;
   }, { in: 0, out: 0 }), [address, history]);
+  // Optimistic pending: transfers this wallet just sent, shown as "confirming" until the ledger reflects them.
+  // As soon as the fetched history contains a tx's id we drop its echo, so no row is ever shown twice.
+  const pending = usePendingTx();
+  useEffect(() => { reconcilePending(new Set(history.map((h) => h.id))); }, [history]);
+  const confirmedIds = useMemo(() => new Set(history.map((h) => h.id)), [history]);
+  const pendingRows = pending.filter((p) => p.from === address && !confirmedIds.has(p.id) && (filter === "all" || filter === "outgoing"));
   return (
     <Card>
       <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -513,7 +520,38 @@ function TxHistory({ history, address, loading, error, onRefresh, canLoadMore, o
         <div className="rounded-lg border border-hairline bg-base p-2"><div className="text-faint">Sent + fees</div><div className="mono">{formatZir(totals.out)} ZIR</div></div>
       </div>
       {error && <p className="mb-2 rounded-lg border border-[color-mix(in_srgb,var(--danger)_35%,transparent)] bg-[color-mix(in_srgb,var(--danger)_8%,transparent)] p-2 text-xs text-muted">{error}</p>}
-      {loading && rows.length === 0 ? <p className="text-xs text-muted">Loading wallet history...</p> : rows.length === 0 ? <p className="text-xs text-muted">No matching transactions yet.</p> : (
+      {pendingRows.length > 0 && (
+        <div className="mb-2 grid gap-2">
+          {pendingRows.map((tx) => {
+            const net = (tx.amountUZIR ?? 0) + (tx.feeUZIR ?? 0);
+            return (
+              <div key={tx.id} className="rounded-xl border border-dashed border-[color-mix(in_srgb,var(--teal)_40%,var(--border))] bg-[color-mix(in_srgb,var(--teal)_6%,transparent)] p-3 text-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex items-start gap-2">
+                    <span className="mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-full border border-[color-mix(in_srgb,var(--teal)_42%,var(--border))] text-[var(--teal)]">
+                      <RefreshCw size={15} className="animate-spin [animation-duration:2.4s]" />
+                    </span>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Badge tone="teal">confirming</Badge>
+                        <span className="text-xs text-muted">Sent, settling on the network</span>
+                      </div>
+                      <div className="mono mt-1 break-all text-[11px] text-faint">{shortHash(tx.id)}</div>
+                      <div className="mt-1 text-xs text-faint">to <span className="mono">{shortAddress(tx.to)}</span></div>
+                      {tx.memo && <div className="mt-1 rounded-md border border-hairline bg-surface/60 px-2 py-1 text-xs text-muted">{tx.memo}</div>}
+                    </div>
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <div className="mono text-[1rem] text-[var(--warn)]">-{formatZir(net)} ZIR</div>
+                    <div className="text-[11px] text-faint">a moment ago</div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {loading && rows.length === 0 ? <p className="text-xs text-muted">Loading wallet history...</p> : rows.length === 0 && pendingRows.length === 0 ? <p className="text-xs text-muted">No matching transactions yet.</p> : (
         <div className="grid gap-2">
           {rows.map((tx) => {
             const direction = directionFor(tx);

@@ -53,7 +53,7 @@ export function Select({ className, children, ...props }: SelectHTMLAttributes<H
 
 // ---- Badge ----
 type Tone = "teal" | "indigo" | "warn" | "danger" | "neutral";
-export function Badge({ tone = "neutral", className, children }: { tone?: Tone; className?: string; children: ReactNode }) {
+export function Badge({ tone = "neutral", className, children, title }: { tone?: Tone; className?: string; children: ReactNode; title?: string }) {
   const tones: Record<Tone, string> = {
     teal: "text-[var(--teal)] border-[color-mix(in_srgb,var(--teal)_28%,transparent)] bg-[color-mix(in_srgb,var(--teal)_10%,transparent)]",
     indigo: "text-[var(--accent)] border-[color-mix(in_srgb,var(--accent)_28%,transparent)] bg-[var(--accent-soft)]",
@@ -61,7 +61,7 @@ export function Badge({ tone = "neutral", className, children }: { tone?: Tone; 
     danger: "text-[var(--danger)] border-[color-mix(in_srgb,var(--danger)_28%,transparent)] bg-[color-mix(in_srgb,var(--danger)_10%,transparent)]",
     neutral: "text-muted border-hairline bg-elevated",
   };
-  return <span className={cn("inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-medium", tones[tone], className)}>{children}</span>;
+  return <span title={title} className={cn("inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-medium", tones[tone], className)}>{children}</span>;
 }
 
 // ---- Tooltip (simple title based) ----

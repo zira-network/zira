@@ -1,14 +1,14 @@
 // apps/web/src/app/Console.tsx
 // The chat home. The question goes to the field through askField, paid with a signed query fee,
 // answered by providers' own models, and the answer carries a verifiable receipt.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
-import { Send, Square, ChevronDown, ChevronUp, CheckCircle2, Plus, Trash2, ShieldCheck, Download, Sparkles, Upload, FolderOpen, FileText, X, HelpCircle, Copy, ListChecks, Check, FilePlus, Compass, ArrowRight, Bot, Menu, MessageSquarePlus, PanelLeftClose, PanelLeftOpen, Coins, Cpu } from "lucide-react";
+import { Send, Square, ChevronDown, ChevronUp, CheckCircle2, Plus, Trash2, ShieldCheck, Download, Sparkles, Upload, FolderOpen, FileText, X, HelpCircle, Copy, ListChecks, Check, FilePlus, Compass, ArrowRight, Bot, Menu, MessageSquarePlus, PanelLeftClose, PanelLeftOpen, Coins, Cpu, Image as ImageIcon } from "lucide-react";
 import { PROTOCOL, SPECIAL_ADDRESSES, type AnswerReceipt, type ChatMessage, type Conversation } from "@zira/protocol";
-import { Button, Card, Badge, Meter, useToast, Spinner, Select } from "../components/ui";
+import { Button, Card, Badge, Meter, useToast, Spinner, Select, Modal, Input } from "../components/ui";
 import { ResonanceField } from "../components/ResonanceField";
 import { Receipt } from "../components/Receipt";
-import { NodeApi, type FieldModel, type Pricing, type FreeTierQuota } from "../lib/nodeApi";
+import { NodeApi, type FieldModel, type Pricing } from "../lib/nodeApi";
 import { FreeTierError, NodeClient } from "../client/NodeClient";
 import { useZira } from "../store/useZira";
 import { useUi } from "../store/useUi";
@@ -213,10 +213,59 @@ function parseFileProposals(content: string): { files: ProposedFile[]; prose: st
   return { files, prose };
 }
 
+// Own-machine image generation (Machine tier for T2I): a compact studio that runs the local stable-diffusion
+// engine privately on this node. No ZIR, no upload, no network coordination. Shown only when the node reports
+// image serving armed (ZIRA_IMAGE_ENABLE=1 + sd binary + model); otherwise the toolbar button explains it is
+// coming soon. The paid, multi-provider network path is staged on top of this.
+function ImageStudio({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const toast = useToast();
+  const [prompt, setPrompt] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [img, setImg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  async function generate() {
+    const p = prompt.trim();
+    if (!p || busy) return;
+    setBusy(true); setErr(null); setImg(null);
+    try {
+      const r = await NodeApi.imageGenerate({ prompt: p });
+      if (r.ok && r.dataUrl) setImg(r.dataUrl);
+      else { setErr(r.reason || "Generation failed."); if (r.refused) toast.push("That prompt is refused by the content-safety policy.", "warn"); }
+    } catch (e) { setErr(e instanceof Error ? e.message : "Generation failed."); }
+    finally { setBusy(false); }
+  }
+  return (
+    <Modal open={open} onClose={onClose} title="Generate an image">
+      <div className="space-y-3">
+        <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={3}
+          onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void generate(); } }}
+          placeholder="Describe the image. Runs privately on your machine. Cmd/Ctrl+Enter to generate."
+          className="w-full resize-none rounded-lg border border-hairline bg-base p-3 text-sm text-text placeholder:text-faint outline-none focus:border-[var(--accent)]" />
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] text-faint">Runs on your machine. No ZIR, nothing uploaded.</span>
+          <Button variant="primary" onClick={() => void generate()} disabled={!prompt.trim() || busy}>{busy ? "Generating..." : "Generate"}</Button>
+        </div>
+        {busy && <div className="flex items-center gap-2 text-sm text-muted"><Spinner /> The engine is drawing. The first run can take a while.</div>}
+        {err && <div className="rounded-lg border border-hairline bg-base p-2 text-sm text-[var(--danger)]">{err}</div>}
+        {img && (
+          <div>
+            <img src={img} alt="Generated image" className="w-full rounded-lg border border-hairline" />
+            <div className="mt-2 text-right"><a href={img} download="zira-image.png"><Button variant="ghost">Download</Button></a></div>
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 export function Console() {
   const { client, mode, address, hasWallet, unlocked, mining, setMining, refreshStatus, hardware } = useZira();
   const toast = useToast();
   const [hwBusy, setHwBusy] = useState(false);
+  // Own-machine image generation: armed only when the local node reports the sd engine + model ready.
+  const [imgReady, setImgReady] = useState(false);
+  const [imageOpen, setImageOpen] = useState(false);
+  useEffect(() => { NodeApi.imageReady().then((r) => setImgReady(!!r.ready)).catch(() => setImgReady(false)); }, []);
   // "Use my machine for my own tasks": run YOUR OWN questions privately on YOUR OWN hardware (local
   // inference for your queries). This is NOT mining: it does not serve the field, does not answer other
   // people, and earns no ZIR. It only toggles own-task local inference (ownTaskInference) and pulls the
@@ -236,7 +285,7 @@ export function Console() {
       await refreshStatus();
       toast.push(on
         ? "This machine now answers your own questions privately on your computer. This is not Mining and earns no ZIR. To help the network and earn, open the Mine tab."
-        : "Stopped using this machine for your own tasks. Your questions go to the network: free within your allowance, or paid with ZIR.");
+        : "Stopped using this machine for your own tasks. Your questions go to the network, answered by independent miners you pay in ZIR.");
     } catch (e) { toast.push(e instanceof Error ? e.message : "could not update this machine", "danger"); }
     finally { setHwBusy(false); }
   }
@@ -268,16 +317,15 @@ export function Console() {
     return saved === "local" && isLocalNode() ? "local" : "field";
   });
   // Compute tier, ORTHOGONAL to the Field/Local mode. It decides who does the work and how it is paid:
-  //   free    = the network answers, within your free allowance (no ZIR moves)
   //   zir     = the network answers, and you pay the miners who answered (needs an unlocked wallet)
   //   machine = your own hardware answers (own-task inference), private, costs and earns no ZIR
   // It applies in BOTH modes: Field (plain chat) and Local (work inside a chosen folder).
-  type ComputeTier = "free" | "zir" | "machine";
+  type ComputeTier = "zir" | "machine";
   const [computeTier, setComputeTier] = useState<ComputeTier>(() => {
-    const saved = localStorage.getItem("zira.console.computeTier") as ComputeTier | null;
-    // Default is ZIR (pay the miners who answer) when the Console opens. Machine is "coming soon", so any
-    // stored "machine" preference maps back to ZIR.
-    return saved === "machine" ? "zir" : (saved ?? "zir");
+    // The retired "free" tier is gone: network answers come from independent miners running the
+    // inference on their hardware, paid in ZIR. Machine is "coming soon" and not selectable, so any
+    // stored "free" or "machine" preference migrates to ZIR (persisted by the effect below).
+    return "zir";
   });
   useEffect(() => { localStorage.setItem("zira.console.computeTier", computeTier); }, [computeTier]);
   const useLocalInference = computeTier === "machine";
@@ -369,15 +417,6 @@ export function Console() {
     return () => { live = false; clearInterval(iv); };
   }, [mode]);
 
-  // Free tier: how many free field questions remain for the connected wallet this window. Fetched on
-  // mount and after each sent question. The node enforces the limit; this only surfaces it honestly.
-  const [freeTier, setFreeTier] = useState<FreeTierQuota | null>(null);
-  const refreshQuota = useCallback(async () => {
-    if (mode !== "node" || !address) { setFreeTier(null); return; }
-    try { setFreeTier(await NodeApi.queryQuota(address)); } catch { /* quota optional */ }
-  }, [mode, address]);
-  useEffect(() => { void refreshQuota(); }, [refreshQuota]);
-
   useEffect(() => { saveConvos(convos); }, [convos]);
   useEffect(() => { localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects)); }, [projects]);
   useEffect(() => { localStorage.setItem("zira.console.answerMode", answerMode); }, [answerMode]);
@@ -449,17 +488,36 @@ export function Console() {
 
   async function attachFiles(files: FileList | null) {
     if (!files?.length) return;
-    const selected = [...files].slice(0, MAX_WORKSPACE_FILES);
+    // Classify by kind so the user gets honest, specific feedback instead of a silent "nothing attached".
+    // The field reads TEXT and CODE files as answer context. Images have no vision model armed yet, and other
+    // binaries cannot be read as text, so we register them as skipped with a clear reason rather than failing.
+    const all = [...files];
+    const isImage = (f: File) => (f.type || "").toLowerCase().startsWith("image/")
+      || /\.(png|jpe?g|gif|webp|bmp|avif|heic|heif|tiff?)$/i.test(f.name);
+    const isTextLike = (f: File) => {
+      const t = (f.type || "").toLowerCase();
+      if (t.startsWith("text/")) return true;
+      if (/^application\/(json|xml|javascript|x-yaml|yaml|toml|x-sh|x-httpd-php|sql|csv)/.test(t)) return true;
+      if (t.startsWith("image/") || t.startsWith("video/") || t.startsWith("audio/") || t === "application/pdf" || t === "application/zip") return false;
+      // Extension fallback for text/code files with no or loose MIME (common on Windows/desktop).
+      return /\.(txt|md|markdown|rst|json|jsonl|ndjson|csv|tsv|ya?ml|toml|ini|env|properties|cfg|conf|xml|html?|svg|css|scss|less|js|jsx|ts|tsx|mjs|cjs|vue|py|rb|go|rs|java|kt|kts|c|h|cc|cpp|hpp|cs|php|swift|sh|bash|zsh|fish|ps1|sql|graphql|proto|dockerfile|makefile|gradle|log|diff|patch)$/i.test(f.name)
+        || /^(dockerfile|makefile|readme|license)$/i.test(f.name);
+    };
+    const textFiles = all.filter(isTextLike);
+    const imageFiles = all.filter((f) => !isTextLike(f) && isImage(f));
+    const otherFiles = all.filter((f) => !isTextLike(f) && !isImage(f));
+
+    const selected = textFiles.slice(0, MAX_WORKSPACE_FILES);
     const next: WorkspaceAttachment[] = [];
     let remaining = MAX_WORKSPACE_BYTES;
-    let skipped = Math.max(0, files.length - selected.length);
+    let skippedBig = Math.max(0, textFiles.length - selected.length);
     for (const file of selected) {
-      if (remaining <= 0) break;
-      if (file.size > remaining && next.length > 0) { skipped++; continue; }
+      if (remaining <= 0) { skippedBig++; continue; }
+      if (file.size > remaining && next.length > 0) { skippedBig++; continue; }
       try {
         const text = await file.slice(0, Math.min(file.size, remaining)).text();
         const readable = text.replace(/\0/g, "").trimEnd();
-        if (!readable) { skipped++; continue; }
+        if (!readable) { skippedBig++; continue; }
         next.push({
           name: file.name,
           path: file.name,
@@ -469,7 +527,7 @@ export function Console() {
         });
         remaining -= Math.min(file.size, text.length);
       } catch {
-        skipped++;
+        skippedBig++;
       }
     }
     setAttachments((prev) => {
@@ -477,7 +535,12 @@ export function Console() {
       for (const file of next) byPath.set(file.path, file);
       return [...byPath.values()].slice(0, MAX_WORKSPACE_FILES);
     });
-    toast.push(next.length ? `Attached ${next.length} readable file${next.length === 1 ? "" : "s"}${skipped ? `, skipped ${skipped}` : ""}.` : "No readable text files attached.", next.length ? "teal" : "warn");
+    const parts: string[] = [];
+    if (next.length) parts.push(`Attached ${next.length} text file${next.length === 1 ? "" : "s"}`);
+    if (imageFiles.length) parts.push(`skipped ${imageFiles.length} image${imageFiles.length === 1 ? "" : "s"} (image understanding is coming soon)`);
+    if (otherFiles.length) parts.push(`skipped ${otherFiles.length} unsupported file${otherFiles.length === 1 ? "" : "s"} (text and code only)`);
+    if (skippedBig) parts.push(`skipped ${skippedBig} over the size limit`);
+    toast.push(parts.length ? parts.join(", ") + "." : "Nothing readable to attach.", next.length ? "teal" : "warn");
   }
 
   async function chooseWorkspaceFolder() {
@@ -666,7 +729,7 @@ export function Console() {
       return;
     }
     if (computeTier === "zir" && mode === "node" && (!hasWallet || !unlocked)) {
-      toast.push("ZIR tier pays the miners who answer. Unlock a wallet first, or switch to Free.", "warn");
+      toast.push("The network is answered by independent miners you pay in ZIR. Unlock a wallet first to ask.", "warn");
       return;
     }
     const question = raw.trim();
@@ -778,7 +841,6 @@ export function Console() {
     } finally {
       endStreaming(convoId);
       abortMap.current.delete(convoId);
-      void refreshQuota();
     }
   }
 
@@ -822,7 +884,6 @@ export function Console() {
     } finally {
       endStreaming(offer.convoId);
       abortMap.current.delete(offer.convoId);
-      void refreshQuota();
     }
   }
 
@@ -857,9 +918,6 @@ export function Console() {
   // and is shown there. No fabricated numbers: the base is whatever the node's /pricing returns.
   const breadthMultiplier = coordinationProfile === "quick" ? 1 : coordinationProfile === "deep" ? 3 : 1.8;
   const estimateUZIR = Math.round(((pricing?.queryUZIR ?? PROTOCOL.QUERY_PRICE_UZIR) + PROTOCOL.BASE_FEE_UZIR) * breadthMultiplier);
-  // Whether this next question is covered by the free allowance (contributing, or remaining > 0), so the
-  // estimate reads "free" vs a ZIR amount honestly.
-  const nextIsFree = Boolean(freeTier && (freeTier.contributor || freeTier.unlimited || freeTier.remaining > 0)) || Boolean(mining?.enabled);
 
   function toggleTaskDone(id: string) {
     setAndPersistTasks((prev) => {
@@ -962,10 +1020,7 @@ export function Console() {
             </div>
             {/* Compute tier: who does the work and how it's paid. Applies in BOTH modes. */}
             <div role="tablist" aria-label="Compute and payment" className="relative inline-flex shrink-0 rounded-lg border border-hairline bg-base/50 p-1">
-              <button role="tab" aria-selected={computeTier === "free"} onClick={() => setTier("free")} title="The network answers, within your free allowance." className={`relative z-[1] inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-all ${computeTier === "free" ? "bg-[color-mix(in_srgb,var(--teal)_15%,transparent)] text-[var(--teal)] shadow-[0_1px_0_color-mix(in_srgb,var(--teal)_22%,transparent)]" : "text-faint hover:text-text"}`}>
-                Free
-              </button>
-              <button role="tab" aria-selected={computeTier === "zir"} onClick={() => setTier("zir")} title="The network answers; you pay the miners who answer in ZIR." className={`relative z-[1] inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-all ${computeTier === "zir" ? "bg-[color-mix(in_srgb,var(--teal)_15%,transparent)] text-[var(--teal)] shadow-[0_1px_0_color-mix(in_srgb,var(--teal)_22%,transparent)]" : "text-faint hover:text-text"}`}>
+              <button role="tab" aria-selected={computeTier === "zir"} onClick={() => setTier("zir")} title="The network answers; independent miners run the inference on their hardware and you pay them in ZIR." className={`relative z-[1] inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-all ${computeTier === "zir" ? "bg-[color-mix(in_srgb,var(--teal)_15%,transparent)] text-[var(--teal)] shadow-[0_1px_0_color-mix(in_srgb,var(--teal)_22%,transparent)]" : "text-faint hover:text-text"}`}>
                 <Coins size={12} /> ZIR
               </button>
               <button role="tab" aria-disabled title="Your own computer answers, coming soon." disabled className="relative z-[1] inline-flex cursor-not-allowed items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-faint opacity-60">
@@ -973,7 +1028,7 @@ export function Console() {
                 <span className="ml-0.5 rounded-full border border-hairline px-1.5 py-px text-[9px] uppercase tracking-wide text-faint">soon</span>
               </button>
             </div>
-            <span className="hidden min-w-0 max-w-xl truncate text-xs text-faint xl:inline">{(answerMode === "local" ? "Work in a folder on your computer. " : "") + (computeTier === "free" ? "The network answers, within your free allowance. Signed receipt included." : computeTier === "zir" ? "The network answers; you pay the miners who answer in ZIR (unlock a wallet first)." : "Your own computer answers. Private, costs and earns no ZIR (that is Mining, a separate switch).")}</span>
+            <span className="hidden min-w-0 max-w-xl truncate text-xs text-faint xl:inline">{(answerMode === "local" ? "Work in a folder on your computer. " : "") + (computeTier === "zir" ? "The network answers; independent miners run the inference on their hardware and you pay them in ZIR (unlock a wallet first)." : "Your own computer answers. Private, costs and earns no ZIR (that is Mining, a separate switch).")}</span>
           </div>
           {answerMode === "field" && (
             <div className="flex shrink-0 items-center gap-2 text-xs text-muted">
@@ -1048,9 +1103,18 @@ export function Console() {
             )}
             <div className="field-surface flex items-end gap-2 rounded-2xl border border-hairline-strong p-2 shadow-[var(--shadow-1)] transition-all focus-within:border-[var(--accent)] focus-within:ring-2 focus-within:ring-[var(--accent-ring)]">
               <input ref={fileRef} type="file" multiple className="hidden" onChange={(e) => { void attachFiles(e.target.files); e.currentTarget.value = ""; }} />
+              <ImageStudio open={imageOpen} onClose={() => setImageOpen(false)} />
               <div className="flex flex-col gap-1">
                 <Button variant="ghost" title={answerMode === "field" ? "Attach files to this field query" : "Choose local files as workspace context"} onClick={() => fileRef.current?.click()}><Upload size={15} /></Button>
                 {answerMode === "local" && <Button variant="ghost" title="Choose the local workspace folder. This does not upload the folder." onClick={chooseWorkspaceFolder}><FolderOpen size={15} /></Button>}
+                {answerMode === "field" && !personaId && (
+                  <Button variant="ghost" title={imgReady ? "Generate an image on your machine" : "Generate an image (coming soon)"}
+                    onClick={() => imgReady
+                      ? setImageOpen(true)
+                      : toast.push("Image generation runs on your own machine once armed: set ZIRA_IMAGE_ENABLE=1 and provide the sd binary (ZIRA_SD_BIN) and a model (ZIRA_SD_MODEL). The paid network path is staged next.", "warn")}>
+                    <ImageIcon size={15} />
+                  </Button>
+                )}
               </div>
               <textarea
                 value={input} onChange={(e) => setInput(e.target.value)}
@@ -1072,11 +1136,7 @@ export function Console() {
               ) : (
                 <span>
                   {answerMode === "local" && <>This runs in your folder; only the question and any files you attach are sent, never the whole folder. </>}
-                  {computeTier === "free" && nextIsFree ? (
-                    <>This question is <span className="text-[var(--teal)]">free</span> right now. Past the free allowance, asking more of the network costs about <span className="mono text-muted" title="An estimate. The price changes with how broadly you ask (the profile) and live demand. The exact amount comes back on the answer receipt.">{formatZir(estimateUZIR)} ZIR</span> per question ({coordinationProfile}).</>
-                  ) : (
-                    <>About <span className="mono text-muted" title="An estimate. The price changes with how broadly you ask (the profile) and live demand. The exact amount comes back on the answer receipt.">~{formatZir(estimateUZIR)} ZIR</span> for this question{simpleMode ? "" : ` (${coordinationProfile})`}. You see the exact cost on the receipt once the answer arrives.</>
-                  )}
+                  <>The network answers; independent miners run the inference and you pay them about <span className="mono text-muted" title="An estimate. The price changes with how broadly you ask (the profile) and live demand. The exact amount comes back on the answer receipt.">~{formatZir(estimateUZIR)} ZIR</span> for this question{simpleMode ? "" : ` (${coordinationProfile})`}. You see the exact cost on the receipt once the answer arrives.</>
                 </span>
               )}
               {computeTier !== "machine" && pricing && <span className="mono shrink-0 whitespace-nowrap text-faint" title="The price moves with live demand and how many machines are online across the network.">{pricing.providersOnline} online · {pricing.openQueries} asking</span>}
@@ -1089,31 +1149,6 @@ export function Console() {
                 </span>
                 {mining?.ownTaskInference && hwSummary && <span className="text-faint">On <span className="text-text">{hwSummary}</span>. Private, earns no ZIR.</span>}
                 {mining?.ownTaskInference && <button onClick={rescanHardware} disabled={hwBusy} className="underline hover:text-text disabled:opacity-50">rescan</button>}
-              </div>
-            )}
-            {computeTier === "free" && freeTier && (
-              <div className="mt-1.5 flex items-center gap-1.5 px-1 text-xs text-muted">
-                {(freeTier.contributor || freeTier.unlimited) ? (
-                  <>
-                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--teal)]" />
-                    <span>Free questions: <span className="text-text">unlimited</span> while your machine helps run the network.</span>
-                  </>
-                ) : freeTier.freeTierEnded ? (
-                  <>
-                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--warn)]" />
-                    <span>The free tier has ended. Add ZIR to your wallet to keep asking, or contribute your own machine to ask for free.</span>
-                  </>
-                ) : freeTier.remaining > 0 ? (
-                  <>
-                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--teal)]" />
-                    <span>Free questions: <span className="mono text-text">{freeTier.remaining}</span> of <span className="mono">{freeTier.limit}</span> left</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--warn)]" />
-                    <span>Free questions reset in <span className="mono">{Math.ceil(freeTier.resetMs / 60000)}m</span>. Add ZIR to your wallet to keep asking now.</span>
-                  </>
-                )}
               </div>
             )}
           </div>
@@ -1165,7 +1200,7 @@ function EmptyHero({ mode, onPick, workspaceChosen, onChooseFolder }: { mode: Co
           </Card>
         ))}
       </div>
-      {isField && <ThreeWaysToAsk />}
+      {isField && <WaysToAsk />}
       {!isField && (
         workspaceChosen
           ? <div className="rounded-full border border-[color-mix(in_srgb,var(--indigo)_35%,transparent)] bg-[color-mix(in_srgb,var(--indigo)_10%,transparent)] px-4 py-1.5 text-xs text-[var(--indigo)]">Folder ready. Describe what to build, fix, or plan.</div>
@@ -1183,20 +1218,15 @@ function EmptyHero({ mode, onPick, workspaceChosen, onChooseFolder }: { mode: Co
   );
 }
 
-// Three ways to use ZIRA, presented crisply so the distinction reads at a glance: ask free within the
-// allowance, pay ZIR for broader coordinated answers, or run it privately on your own machine. The cost
-// of the paid path is dynamic on purpose, which the card states plainly without inventing a number.
-function ThreeWaysToAsk() {
+// Two ways to use ZIRA, presented crisply so the distinction reads at a glance: pay ZIR for answers the
+// network's independent miners produce on their own hardware, or run it privately on your own machine.
+// The cost of the network path is dynamic on purpose, which the card states plainly without inventing a number.
+function WaysToAsk() {
   const ways = [
     {
-      k: "Ask free",
-      tone: "var(--teal)",
-      v: "For the network's first year, the contributing community covers a free allowance of everyday questions, no ZIR and no machine of your own needed. After that first year, ask with ZIR or run your own machine. Contributing your machine keeps your questions free, with no limit, for good.",
-    },
-    {
-      k: "Pay ZIR for more",
+      k: "Ask with ZIR",
       tone: "var(--indigo)",
-      v: "Spend ZIR to put more of the network on a harder question, so more providers work on it. The price changes with how broadly you ask and how hard the task is. You see an estimate before you send and the exact amount on the receipt.",
+      v: "The network answers. Independent miners run the inference on their own hardware and you pay them in ZIR. The price changes with how broadly you ask and how hard the task is. You see an estimate before you send and the exact amount on the receipt.",
     },
     {
       k: "Use your machine",
@@ -1206,8 +1236,8 @@ function ThreeWaysToAsk() {
   ];
   return (
     <div className="w-full max-w-lg text-left">
-      <div className="mb-2 text-center text-[11px] uppercase tracking-wider text-faint">Three ways to use ZIRA</div>
-      <div className="grid gap-2 sm:grid-cols-3">
+      <div className="mb-2 text-center text-[11px] uppercase tracking-wider text-faint">Two ways to use ZIRA</div>
+      <div className="grid gap-2 sm:grid-cols-2">
         {ways.map((w) => (
           <Card key={w.k} className="p-3">
             <div className="flex items-center gap-1.5 text-xs font-semibold text-text">

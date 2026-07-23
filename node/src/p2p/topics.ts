@@ -13,6 +13,12 @@ export const SYNC_PROTOCOL = "/zira/sync/1.0.0";
 // Fast sync: a joining node adopts a finalized state snapshot from a peer instead of replaying the
 // whole history. This is what lets the network scale to a long history and many participants.
 export const SNAPSHOT_PROTOCOL = "/zira/snapshot/1.0.0";
+// Finality follow: a follower/read node pulls ONLY the latest finalized checkpoint (epoch + root + its
+// signed finalizing votes), with no state snapshot, so it can advance its finalized marker within seconds
+// even when gossiped checkpoint votes lose a gossipsub mesh race. Tiny payload (a handful of signed votes),
+// consensus-neutral (transmits existing votes only), and far lighter than a full-snapshot resync — this is
+// what keeps a gateway's finalized view tracking the leader continuously instead of catching up in minutes.
+export const CHECKPOINT_PROTOCOL = "/zira/checkpoint/1.0.0";
 // Liveness/coordination proof: a master sends a fresh nonce, the peer returns its ZIR address and a
 // signature over the nonce. Answering proves the peer is a real, directly-reachable, participating node,
 // which is the baseline "coordination" work (no model download required). Storage serving earns on top.

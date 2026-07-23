@@ -8,7 +8,6 @@
 import { useEffect, useState, useMemo, type ReactNode } from "react";
 import { Cpu, Radio, ShieldCheck, Server, CheckCircle2, Sparkles, Boxes, Link2, TrendingUp, Users, HelpCircle, Wallet as WalletIcon, History as HistoryIcon } from "lucide-react";
 import { Card, Button, Input, Badge, useToast, EmptyState, Field, usePoll, PageHeader, Meter, Spinner, ErrorState } from "../components/ui";
-import { HardwarePanel } from "../components/HardwarePanel";
 import { HexField } from "../components/brand";
 import { ResonanceField } from "../components/ResonanceField";
 import { NodeApi, type ModelRecommendation, type FieldModel, type MiningStatus, type Pricing } from "../lib/nodeApi";
@@ -50,47 +49,36 @@ function Stat({ label, value, tone = "default", hint }: { label: ReactNode; valu
   );
 }
 
-// A lightweight tier divider so the long card stack reads as a structured information architecture
-// (Your participation / Node / Mining details / Steward) instead of a flat settings dump.
-function TierHeader({ label, hint }: { label: string; hint?: string }) {
-  return (
-    <div className="flex items-center gap-3 pt-1">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-faint">{label}</div>
-      {hint && <div className="text-[11px] text-faint">{hint}</div>}
-      <div className="h-px flex-1 bg-hairline" />
-    </div>
-  );
-}
-
-// The hardware control for the field. Two choices: "field" lends this machine to the field's
-// coordination and earns; "off" does not. Using your OWN hardware for your OWN tasks is not here;
-// it lives in the Console (Local mode), so this page is only about contributing to the field.
-function HardwareModeControl({ mode, busy, hardwareName, usingEndpoint, endpointModel, fieldDetail, onPick }: {
+// The one contribution switch. On means this machine works for the network and earns when that work is
+// paid; Off keeps it to yourself. "field" preserves the existing mining semantics unchanged, "off" fully
+// disengages. Using your OWN hardware for your OWN tasks is not here; it lives in the Console (Local mode).
+// Teal is rationed to the active On state; an active Off reads as a neutral, deliberate choice.
+function ContributionSwitch({ mode, busy, hardwareName, usingEndpoint, endpointModel, onPick }: {
   mode: "field" | "off";
   busy: boolean;
   hardwareName: string;
   usingEndpoint: boolean;
   endpointModel?: string;
-  fieldDetail: string;
   onPick: (next: "field" | "off") => void;
 }) {
   const options: { id: "field" | "off"; title: string; detail: string; icon: typeof Radio }[] = [
-    { id: "field", title: "Mine for the network", detail: "Put this machine to work for the network. No model or storage needed; other contributors answer alongside you. You earn ZIR when that work is paid, and your own questions are free while you contribute.", icon: Radio },
-    { id: "off", title: "Off", detail: "Do not lend this machine to the field. Field mode still works over the network, and you can still use your own hardware for your own tasks from the Console.", icon: ShieldCheck },
+    { id: "field", title: "On", detail: "Contribute this machine. It works for the network and earns ZIR when that work is paid. No model or storage required, and your own questions stay free while you contribute.", icon: Radio },
+    { id: "off", title: "Off", detail: "Keep this machine to yourself. The network keeps running on its other nodes, and you can still use this machine for your own tasks from the Console.", icon: ShieldCheck },
   ];
   return (
-    <div className="mt-3 space-y-2">
-      <div role="radiogroup" aria-label="Hardware use" className="grid gap-2 sm:grid-cols-2">
+    <div className="mt-4 space-y-2">
+      <div role="radiogroup" aria-label="Contribute this machine to the network" className="grid gap-2 sm:grid-cols-2">
         {options.map((o) => {
           const active = mode === o.id;
+          const on = o.id === "field";
           const Icon = o.icon;
           return (
             <button key={o.id} role="radio" aria-checked={active} disabled={busy} onClick={() => { if (!active) onPick(o.id); }}
-              className={`flex flex-col gap-1 rounded-xl border p-3 text-left transition-colors disabled:opacity-50 ${active ? "border-[var(--teal)] bg-[color-mix(in_srgb,var(--teal)_10%,transparent)]" : "border-hairline bg-surface/60 hover:border-hairline-strong"}`}>
-              <div className="flex items-center gap-2 text-sm font-medium text-text">
-                <Icon size={15} className={active ? "text-[var(--teal)]" : "text-muted"} />
+              className={`flex flex-col gap-1 rounded-xl border p-3 text-left transition-colors disabled:opacity-50 ${active && on ? "border-[var(--teal)] bg-[color-mix(in_srgb,var(--teal)_10%,transparent)]" : active ? "border-hairline-strong bg-elevated" : "border-hairline bg-surface/60 hover:border-hairline-strong"}`}>
+              <div className="flex items-center gap-2 text-sm font-semibold text-text">
+                <Icon size={15} className={active && on ? "text-[var(--teal)]" : "text-muted"} />
                 {o.title}
-                {active && <span className="ml-auto inline-block h-1.5 w-1.5 rounded-full bg-[var(--teal)]" />}
+                {active && <span className={`ml-auto inline-block h-1.5 w-1.5 rounded-full ${on ? "bg-[var(--teal)]" : "bg-[var(--text-faint)]"}`} />}
               </div>
               <div className="text-[11px] leading-relaxed text-faint">{o.detail}</div>
             </button>
@@ -98,8 +86,8 @@ function HardwareModeControl({ mode, busy, hardwareName, usingEndpoint, endpoint
         })}
       </div>
       <div className="rounded-lg border border-hairline bg-base px-3 py-2 text-[11px] text-faint">
-        {mode === "field" && <span>{usingEndpoint ? `Serving the field model (${endpointModel || "loading"})` : `${hardwareName} serving as ${fieldDetail}`}.</span>}
-        {mode === "off" && <span>Not lending this machine to the field. Field mode still works over the network, and Local mode in the Console can use this machine for your own tasks.</span>}
+        {mode === "field" && <span>{usingEndpoint ? `Serving the field model (${endpointModel || "loading"})` : `${hardwareName} is contributing to the network`}.</span>}
+        {mode === "off" && <span>This machine is not contributing. The network keeps running on its other nodes, and Local mode in the Console can still use this machine for your own tasks.</span>}
       </div>
     </div>
   );
@@ -154,17 +142,6 @@ function hardwareTitle(hardware: HardwareProfile | null): string {
   if (!hardware) return "Scanning this machine";
   if (hardware.gpuName) return hardware.gpuName;
   return hardware.cpuName ?? `${hardware.platform}/${hardware.arch ?? "unknown"}`;
-}
-
-function earningLane(args: { mining: MiningStatus | null | undefined; usingEndpoint: boolean; coordinationOnly: boolean; fieldReady: boolean }): { title: string; detail: string; tone: "teal" | "indigo" | "warn" | "neutral" } {
-  const { mining, usingEndpoint, coordinationOnly, fieldReady } = args;
-  if (!mining?.enabled) return { title: "Mining off", detail: "Turn mining on to relay queries, coordinate models, and prepare earning paths.", tone: "neutral" };
-  if (usingEndpoint) return { title: "Answer mining", detail: "Highest earning path: this node is serving the field's distributed model on your hardware and answering paid queries for coordination pay.", tone: "teal" };
-  if (mining.loadedModel) return { title: "Answer mining", detail: "Highest earning path: this machine is running the field's distributed model for signed field answers.", tone: "teal" };
-  if (coordinationOnly) return { title: "Coordination mining", detail: "Active now: signed query relay, model-field verification, autonomous Resonator coordination, workspace routing, observations, and field-status answers. Turn on Storage to serve the field model and earn answer rewards.", tone: "indigo" };
-  if (mining.localTaskPermission) return { title: "Workspace task permission", detail: "This node allows the field to route private build, file, planning, or debugging tasks here when you allow it. This permission does not mean downloading or running a local model by itself.", tone: "indigo" };
-  if (fieldReady) return { title: "Model ready, receiving", detail: "The field model is distributed. Turn on Storage to receive and serve it on this machine and move into full answer mining.", tone: "warn" };
-  return { title: "Coordinating field", detail: "Mining is enabled for relay, observations, and coordination. Local model bytes are optional unless this node will do full model inference.", tone: "indigo" };
 }
 
 // One source of truth for the node's participation state, so the hero badge, hardware badge, mining
@@ -507,11 +484,29 @@ function HowYouEarn() {
   );
 }
 
-// Live machine telemetry (desktop only): hardware names + realtime CPU/RAM utilization from the Electron
-// main process (Node os module, no extra dependency). CPU% is the busy delta between polls. Power and
-// temperature need a native sensor module and are not shown; the panel degrades gracefully (renders nothing
-// when there is no desktop bridge, e.g. web/mobile).
-function MachineTelemetry() {
+// "Your machine": the hardware you are contributing, its live vitals, and the controls that set HOW MUCH of
+// it contributes, gathered into one compact panel. Recommended hardware is on by default (a full but sensible
+// amount for everyday use); turn it off to set GPU layers and CPU threads yourself, and set the storage cap.
+// Nothing here pushes the machine to a maximum; the user chooses how much they lend. Live CPU/RAM utilization
+// comes from the Electron main process (Node os module); power and temperature need a native sensor and are
+// not shown. Handlers and state are owned by Mine() and passed in, so mining/storage logic is unchanged.
+function YourMachine({
+  hardware, mining, busy, hardwareBusy,
+  gpuLayers, setGpuLayers, threads, setThreads, onSaveHardware,
+  storageLimit, setStorageLimit, onUpdateStorage, onEmptyStorage, onRescan,
+}: {
+  hardware: HardwareProfile | null;
+  mining: MiningStatus | null | undefined;
+  busy: boolean;
+  hardwareBusy: boolean;
+  gpuLayers: string; setGpuLayers: (v: string) => void;
+  threads: string; setThreads: (v: string) => void;
+  onSaveHardware: (useRecommended: boolean) => void;
+  storageLimit: string; setStorageLimit: (v: string) => void;
+  onUpdateStorage: (on: boolean) => void;
+  onEmptyStorage: () => void;
+  onRescan: () => void;
+}) {
   const [hw, setHw] = useState<HardwareTelemetry | null>(null);
   useEffect(() => {
     let live = true;
@@ -520,20 +515,106 @@ function MachineTelemetry() {
     const t = setInterval(tick, 2000);
     return () => { live = false; clearInterval(t); };
   }, []);
-  if (!hw) return null;
+
+  const useRecommended = (mining?.useRecommendedHardware ?? true) !== false;
+  const cores = hardware?.cpuCores ?? hw?.cpuCores ?? 0;
+  const gpu = (hardware?.gpuName && hardware.gpuName.trim()) || (hw?.gpuModel && hw.gpuModel.trim()) || "";
+  const cpuName = hardware?.cpuName || hw?.cpuModel || "CPU";
+  const ramGb = hw ? hw.ramTotalGB : hardware ? Math.round((hardware.ramMb ?? 0) / 1024) : 0;
+  const platform = hw ? `${hw.platform}/${hw.arch}` : hardware ? `${hardware.platform}/${hardware.arch ?? "?"}` : "";
+  const capacity = Math.min(1, (mining?.threads ?? 0) / Math.max(1, cores));
+  const storageEnabled = mining?.storageEnabled ?? false;
+  const usedBytes = mining?.storageUsedBytes ?? 0;
+  const capBytes = mining?.storageCapBytes ?? (mining?.storageLimitGb ?? 8) * 1024 ** 3;
   const bar = (pct: number) => (
     <div className="h-1.5 overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--text-faint)_18%,transparent)]"><div className="h-full rounded-full bg-[var(--teal)] transition-[width] duration-500" style={{ width: Math.max(0, Math.min(100, pct)) + "%" }} /></div>
   );
+
   return (
     <Card>
-      <div className="mb-1 flex items-center gap-2"><Cpu size={16} className="text-[var(--teal)]" /><h3 className="text-sm font-semibold">Your machine</h3></div>
-      <div className="text-xs text-muted">{hw.cpuModel} &middot; {hw.cpuCores} cores &middot; {hw.ramTotalGB.toFixed(0)} GB RAM &middot; {hw.platform}/{hw.arch}</div>
-      <div className="mt-0.5 text-xs text-muted">GPU: <span className="text-text">{hw.gpuModel && hw.gpuModel.trim() ? hw.gpuModel : "none detected (CPU mining)"}</span></div>
-      <div className="mt-3 grid gap-3 sm:grid-cols-2">
-        <div><div className="mb-1 flex justify-between text-[11px] text-faint"><span>CPU</span><span className="mono text-[var(--teal)]">{hw.cpuPct}%</span></div>{bar(hw.cpuPct)}</div>
-        <div><div className="mb-1 flex justify-between text-[11px] text-faint"><span>Memory</span><span className="mono">{hw.ramUsedGB.toFixed(1)} / {hw.ramTotalGB.toFixed(0)} GB</span></div>{bar(hw.ramPct)}</div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2"><Cpu size={18} className="text-[var(--indigo)]" /><h2 className="text-lg font-semibold">Your machine</h2></div>
+        <div className="flex items-center gap-2">
+          <Badge tone="indigo" className="text-[10px] uppercase tracking-wide">{hardware?.capabilityTier ?? "detecting"}</Badge>
+          <Button variant="ghost" onClick={onRescan} disabled={hardwareBusy} className="text-xs">{hardwareBusy ? "Scanning" : "Rescan"}</Button>
+        </div>
       </div>
-      <p className="mt-2 text-[11px] text-faint">Live utilization on this machine. Power and temperature need a native sensor module and are not shown here.</p>
+      <p className="mt-1 text-sm text-muted">The hardware you are contributing, and how much of it. Recommended is a full but sensible default for everyday use. Turn it off to tune GPU layers, CPU threads, and storage yourself.</p>
+
+      {/* Identity + live vitals */}
+      <div className="mt-3 rounded-xl border border-hairline bg-base p-3">
+        <div className="text-xs text-muted">{gpu ? <span className="text-text">{gpu}</span> : <span className="text-text">No GPU detected, CPU only</span>} &middot; {cpuName} &middot; {cores || "?"} cores &middot; {ramGb || "?"} GB RAM{platform ? ` · ${platform}` : ""}</div>
+        {hw && (
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div><div className="mb-1 flex justify-between text-[11px] text-faint"><span>CPU</span><span className="mono text-[var(--teal)]">{hw.cpuPct}%</span></div>{bar(hw.cpuPct)}</div>
+            <div><div className="mb-1 flex justify-between text-[11px] text-faint"><span>Memory</span><span className="mono">{hw.ramUsedGB.toFixed(1)} / {hw.ramTotalGB.toFixed(0)} GB</span></div>{bar(hw.ramPct)}</div>
+          </div>
+        )}
+        <p className="mt-2 text-[11px] text-faint">Live utilization on this machine. Power and temperature need a native sensor module and are not shown here.</p>
+      </div>
+
+      {/* How much of this machine contributes: recommended by default, or set the numbers yourself. */}
+      <div className="mt-3 rounded-xl border border-hairline bg-base p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-xs">
+            <div className="font-medium text-text">Recommended hardware use</div>
+            <div className="mt-0.5 text-faint">On uses a sensible amount of this machine so it stays comfortable for everyday use. Turn it off to set the numbers yourself.</div>
+          </div>
+          <Toggle on={useRecommended} onClick={() => onSaveHardware(!useRecommended)} disabled={busy || !hardware} />
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+          <Stat label="GPU layers" value={mining?.gpuLayers ?? hardware?.recommendedGpuLayers ?? 0} tone="indigo" hint={gpu ? "on GPU" : "CPU only"} />
+          <Stat label="CPU threads" value={`${mining?.threads ?? 0} / ${cores || "?"}`} tone="indigo" hint="cores at work" />
+          <Stat label="Mode" value={useRecommended ? "recommended" : "manual"} />
+        </div>
+        {cores ? (
+          <div className="mt-3">
+            <div className="mb-1 flex justify-between text-[11px] text-faint"><span>Share of this machine in use</span><span className="mono">{Math.round(capacity * 100)}%</span></div>
+            <Meter value={capacity} />
+          </div>
+        ) : null}
+        {!useRecommended && (
+          <>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              <Field label="GPU layers" hint="0 = CPU only. Higher uses more VRAM.">
+                <Input className="mono" type="number" min={0} max={100} value={gpuLayers} onChange={(e) => setGpuLayers(e.target.value)} />
+              </Field>
+              <Field label="CPU threads" hint={`1 to ${cores || "available"}.`}>
+                <Input className="mono" type="number" min={1} max={cores || 128} value={threads} onChange={(e) => setThreads(e.target.value)} />
+              </Field>
+            </div>
+            <Button variant="secondary" className="mt-2" onClick={() => onSaveHardware(false)} disabled={busy}>Save these settings</Button>
+          </>
+        )}
+      </div>
+
+      {/* Storage: an optional contribution knob, its cap set right here alongside the compute controls. */}
+      <div className="mt-3 rounded-xl border border-hairline bg-base p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-xs">
+            <div className="flex items-center gap-2 font-medium text-text"><Link2 size={14} className="text-[var(--indigo)]" /> Share storage</div>
+            <div className="mt-0.5 text-faint">Hold and pass authorized model bytes to peers for a bonus on top of coordination. Optional: with it off, this machine still mines and earns from coordination.</div>
+          </div>
+          <Toggle on={storageEnabled} onClick={() => onUpdateStorage(!storageEnabled)} disabled={busy} />
+        </div>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+          <Field label="Storage cap" hint="GB. The node never holds more than this. When full it keeps serving what fits and stops taking new bytes.">
+            <Input className="mono" value={storageLimit} onChange={(e) => setStorageLimit(e.target.value)} onBlur={() => onUpdateStorage(storageEnabled)} disabled={busy} />
+          </Field>
+          <Stat label="Used of cap" value={<span className="text-sm">{formatBytes(usedBytes)} / {formatBytes(capBytes)}{(mining?.storageDownloadingBytes ?? 0) > 0 ? <span className="text-faint"> (+{formatBytes(mining?.storageDownloadingBytes ?? 0)} downloading)</span> : null}</span>} />
+        </div>
+        {usedBytes > 0 && (
+          <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-faint">
+            <span>Free the disk without turning storage off. The node re-fills from the field up to your cap, and the model it is actively serving is kept.</span>
+            <Button variant="ghost" onClick={onEmptyStorage} disabled={busy} className="shrink-0 text-xs">Empty stored models</Button>
+          </div>
+        )}
+        {storageEnabled && usedBytes >= capBytes && (
+          <div className="mt-2 rounded-lg border border-[color-mix(in_srgb,var(--warn)_35%,transparent)] bg-[color-mix(in_srgb,var(--warn)_7%,transparent)] p-2 text-[11px] text-muted">
+            Storage is at its cap. This node keeps serving what it already holds and will not take new bytes until you raise the cap.
+          </div>
+        )}
+      </div>
     </Card>
   );
 }
@@ -756,24 +837,6 @@ export function Mine() {
     finally { setBusy(false); }
   }
 
-  async function saveMaximumHardwareUse() {
-    const maxThreads = Math.max(1, hardware?.cpuCores ?? 128);
-    const maxGpuLayers = Math.max(0, Math.min(100, hardware?.recommendedGpuLayers ?? (Number(gpuLayers) || 0)));
-    setBusy(true);
-    try {
-      await setMining({
-        gpuLayers: maxGpuLayers,
-        threads: maxThreads,
-        useRecommendedHardware: false,
-      });
-      setGpuLayers(String(maxGpuLayers));
-      setThreads(String(maxThreads));
-      await refreshStatus();
-      toast.push("Maximum detected mining hardware use saved.");
-    } catch (e) { toast.push(e instanceof Error ? e.message : "could not apply maximum hardware use", "danger"); }
-    finally { setBusy(false); }
-  }
-
   const peers = stats?.activeNodes ?? 0;
   const usingEndpoint = !!mining?.endpoint;
   const ready = mining?.serving ?? false;
@@ -788,7 +851,6 @@ export function Mine() {
   const intelligenceScore = miningIntelligenceScore({ mining, hardware, models: knownModels, peers, usingEndpoint });
   const contributionLabel = miningContributionLabel({ mining, usingEndpoint, fieldReady });
   const coordinationOnly = ready && mining?.answerLabel === "field-coordinator";
-  const lane = earningLane({ mining, usingEndpoint, coordinationOnly, fieldReady });
   const earningMiners = localLaunchMiners.filter((m) => m.mining && m.serving && m.providerReachable);
   const launchSettlementDailyCapUZIR = 20_000_000;
   const cappedLaunchMiners = localLaunchMiners.filter((m) => !m.isFounder && m.earnedTodayUZIR >= launchSettlementDailyCapUZIR);
@@ -819,28 +881,38 @@ export function Mine() {
     <div className="mx-auto max-w-5xl space-y-5 p-6">
       <PageHeader
         title="Mine"
-        description="Lend this machine to the network and earn ZIR when the work it helps with is paid."
+        description="One switch. Turn it on to contribute this machine to the network and earn ZIR when its work is paid, or leave it off and keep the machine to yourself."
         badge={<Badge tone={state.tone}><span className="inline-block h-1.5 w-1.5 rounded-full bg-current" /> {state.label}</Badge>}
       />
 
-      <TierHeader label="Your participation" hint="State, hardware, convergence, and earnings" />
-      {/* Resonance hero: this node as a light in the field. It brightens with real coordination (providers +
-          locks) and is "live" only when mining is on and actually serving. */}
+      {/* On or off, front and center. The resonance mark is this node as a light in the field: it brightens
+          with real coordination (providers + locks) and is "live" only while contributing. The switch sits
+          right beside it so the first thing on the page is the single decision, are you contributing or not. */}
       <Card className="overflow-hidden !p-0">
         <div className="brand-rule" />
-        <div className="grid items-center gap-4 p-5 md:grid-cols-[260px_minmax(0,1fr)]">
+        <div className="grid items-center gap-4 p-5 md:grid-cols-[240px_minmax(0,1fr)]">
           <div className="order-1 flex flex-col items-center justify-center">
             <ResonanceField
-              size={248}
+              size={224}
               live={!!mining?.enabled}
               intensity={Math.max(0, Math.min(1, providersOnline / 8 * 0.5 + Math.min(locksPerMinute, 12) / 12 * 0.3 + (mining?.serving ? 0.2 : 0)))}
             />
-            <div className="mt-3 text-center text-[11px] uppercase tracking-[0.16em] text-faint">{mining?.serving ? "serving the field" : mining?.enabled ? "coordinating" : "idle"}</div>
+            <div className="mt-3 text-center text-[11px] uppercase tracking-[0.16em] text-faint">{mining?.serving ? "serving the field" : mining?.enabled ? "coordinating" : "off"}</div>
           </div>
           <div className="order-2">
-            <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.16em] text-[var(--teal)]"><Sparkles size={13} /> Your node in the field</div>
-            <h2 className="mt-1 text-xl font-semibold text-text">Lend this machine to the network and earn ZIR</h2>
+            <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.16em] text-[var(--teal)]"><Sparkles size={13} /> Contribute this machine</div>
+            <h2 className="mt-1 text-xl font-semibold text-text">{mining?.enabled ? "This machine is contributing to the network" : "This machine is not contributing"}</h2>
             <p className="mt-1 text-sm text-muted">{state.detail}</p>
+
+            <ContributionSwitch
+              mode={hardwareMode}
+              busy={busy}
+              hardwareName={hardwareTitle(hardware)}
+              usingEndpoint={usingEndpoint}
+              endpointModel={mining?.endpointModel}
+              onPick={setHardwareMode}
+            />
+
             <div className="mt-4 grid grid-cols-3 gap-2">
               <div className="rounded-lg border border-hairline bg-[var(--bg-panel)] p-3"><div className="flex items-center gap-1 text-[11px] font-medium text-text"><Radio size={12} /> Coordination</div><div className="mono mt-1 text-sm text-text">{providersOnline}<span className="text-faint text-xs"> providers</span></div><div className="text-[11px] text-faint">{peers} peers · {locksPerMinute}/min</div></div>
               <div className="rounded-lg border border-hairline bg-[var(--bg-panel)] p-3"><div className="flex items-center gap-1 text-[11px] font-medium text-text"><TrendingUp size={12} /> Earned today</div><div className="mono mt-1 text-sm text-[var(--teal)]">{formatZir(earned24hUZIR)}<span className="text-faint text-xs"> ZIR</span></div></div>
@@ -862,56 +934,6 @@ export function Mine() {
         zti={zti}
         minerAddress={minerAddress}
       />
-
-      {/* Your hardware: one simple control. Mine for the field or off, with one-click Engage maximum. */}
-      <Card>
-        <div className="flex items-center gap-2"><Cpu size={18} className="text-[var(--indigo)]" /><h2 className="text-lg font-semibold">Your hardware</h2></div>
-        <p className="mt-1 text-sm text-muted">Mining gives your hardware's work to the field's coordination, no model or storage required, and earns ZIR when that work is paid. Or use this machine only for your own tasks, or turn local inference off. These are separate: you can run your own tasks without ever mining.</p>
-
-        <HardwareModeControl
-          mode={hardwareMode}
-          busy={busy}
-          hardwareName={hardwareTitle(hardware)}
-          usingEndpoint={usingEndpoint}
-          endpointModel={mining?.endpointModel}
-          fieldDetail={lane.title.toLowerCase()}
-          onPick={setHardwareMode}
-        />
-
-        {/* Hardware-engaged summary: makes it concrete that mining puts the whole machine to work, and puts
-            "Engage maximum" one click away instead of buried in advanced settings. Shown only while mining. */}
-        {mining?.enabled && (
-          <div className="mt-3 rounded-xl border border-[color-mix(in_srgb,var(--indigo)_24%,var(--border))] bg-[color-mix(in_srgb,var(--indigo)_6%,transparent)] p-3">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 text-sm font-medium text-text"><Cpu size={15} className="text-[var(--indigo)]" /> Hardware engaged</div>
-              <Badge tone="indigo" className="text-[10px] uppercase tracking-wide">{hardware?.capabilityTier ?? "detecting"}</Badge>
-            </div>
-            <div className="mt-2 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-              <Stat label="Machine" value={<span className="text-sm">{hardwareTitle(hardware)}</span>} />
-              <Stat label="CPU threads" value={`${mining?.threads ?? 0} / ${hardware?.cpuCores ?? "?"}`} tone="indigo" hint="cores at work" />
-              <Stat label="GPU layers" value={mining?.gpuLayers ?? 0} tone="indigo" hint={hardware?.gpuName ? "on GPU" : "CPU only"} />
-            </div>
-            {hardware?.cpuCores ? (
-              <div className="mt-2">
-                <div className="mb-1 flex justify-between text-[11px] text-faint">
-                  <span>capacity engaged</span>
-                  <span className="mono">{Math.round(100 * Math.min(1, (mining?.threads ?? 0) / Math.max(1, hardware.cpuCores)))}%</span>
-                </div>
-                <Meter value={Math.min(1, (mining?.threads ?? 0) / Math.max(1, hardware.cpuCores))} />
-              </div>
-            ) : null}
-            <div className="mt-2.5 flex flex-wrap items-center gap-2">
-              <Button variant="secondary" onClick={() => void saveMaximumHardwareUse()} disabled={busy}>Engage maximum</Button>
-              <span className="text-[11px] text-faint">Put every available core and GPU layer to work for stronger throughput and rewards.</span>
-            </div>
-          </div>
-        )}
-
-      </Card>
-
-      {/* Your machine, always visible: hardware names (incl. GPU) + live CPU/RAM utilization. Kept out of the
-          collapsed details so a contributor immediately sees the hardware they are lending to the field. */}
-      <MachineTelemetry />
 
       {/* Field convergence: the 3-contributor earning gate, the single health panel that decides whether mining pays. */}
       <ConvergencePanel
@@ -935,6 +957,25 @@ export function Mine() {
           earnedAnsweringUZIR={earnedAnsweringUZIR}
         />
       )}
+
+      {/* Your machine: the compact hardware readout with its own controls (recommended vs manual GPU layers
+          and CPU threads, storage cap) and live CPU/RAM utilization, all in one place. */}
+      <YourMachine
+        hardware={hardware}
+        mining={mining}
+        busy={busy}
+        hardwareBusy={hardwareBusy}
+        gpuLayers={gpuLayers}
+        setGpuLayers={setGpuLayers}
+        threads={threads}
+        setThreads={setThreads}
+        onSaveHardware={(useRecommended) => void saveHardwareUse(useRecommended)}
+        storageLimit={storageLimit}
+        setStorageLimit={setStorageLimit}
+        onUpdateStorage={(on) => void updateStorage(on)}
+        onEmptyStorage={() => void emptyStorage()}
+        onRescan={() => void rescanHardware()}
+      />
 
       {/* Period earnings history: 1H / 24H / 7D / 30D, computed from the signed ledger. */}
       <EarningsHistory address={address} />
@@ -975,7 +1016,7 @@ export function Mine() {
       {/* Mining details: engine, hardware, models, storage, and steward controls. */}
       <Card>
         <div className="flex items-center gap-2"><Cpu size={18} className="text-[var(--indigo)]" /><h2 className="text-lg font-semibold">Mining details</h2></div>
-        <p className="mt-1 text-sm text-muted">Coordination is the base. Your hardware relays signed work, submits observations, and helps converge Resonator and model outputs by earned trust. Serving a model and sharing storage are independent add-ons below; neither is required to mine.</p>
+        <p className="mt-1 text-sm text-muted">Coordination is the base. Your hardware relays signed work, submits observations, and helps converge Resonator and model outputs by earned trust. Serving a model is an independent add-on below; how much of this machine you contribute and the storage cap live in Your machine above. Neither is required to mine.</p>
 
         <div className="mt-3 rounded-xl border border-[color-mix(in_srgb,var(--teal)_24%,var(--border))] bg-[radial-gradient(circle_at_top_left,color-mix(in_srgb,var(--teal)_14%,transparent),transparent_36%),var(--bg-base)] p-3">
           <div className="flex items-center justify-between gap-3">
@@ -1053,36 +1094,6 @@ export function Mine() {
           </div>
         )}
 
-        <div className="mt-3 rounded-lg border border-hairline bg-base p-3">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-xs font-medium text-text"><Cpu size={14} /> Hardware intelligence</div>
-            <Badge tone={hardware?.recommendedMode === "gpu" ? "teal" : hardware?.recommendedMode === "cpu" ? "indigo" : "neutral"}>{hardware?.recommendedMode ?? "scanning"}</Badge>
-          </div>
-          <HardwarePanel hardware={hardware} onRefresh={rescanHardware} refreshing={hardwareBusy} />
-          <div className="mt-3 grid gap-2.5 sm:grid-cols-3">
-            <Stat label="Applied GPU layers" value={mining?.gpuLayers ?? hardware?.recommendedGpuLayers ?? 0} />
-            <Stat label="Applied CPU threads" value={mining?.threads ?? hardware?.recommendedThreads ?? 0} />
-            <Stat label="Tuning mode" value={mining?.useRecommendedHardware === false ? "manual" : "adaptive"} />
-          </div>
-          <div className="mt-3 rounded-lg border border-hairline bg-surface/60 p-3">
-            <div className="mb-2 text-xs font-medium text-text">Adjust mining hardware use</div>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <Field label="GPU layers" hint="0 = CPU only. Higher uses more VRAM.">
-                <Input className="mono" type="number" min={0} max={100} value={gpuLayers} onChange={(e) => setGpuLayers(e.target.value)} />
-              </Field>
-              <Field label="CPU threads" hint={`1 to ${hardware?.cpuCores ?? "available"} threads.`}>
-                <Input className="mono" type="number" min={1} max={hardware?.cpuCores ?? 128} value={threads} onChange={(e) => setThreads(e.target.value)} />
-              </Field>
-            </div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Button variant="secondary" onClick={() => saveHardwareUse(false)} disabled={busy}>Save manual use</Button>
-              <Button variant="ghost" onClick={() => saveHardwareUse(true)} disabled={busy || !hardware}>Use detected recommendation</Button>
-              <Button variant="ghost" onClick={saveMaximumHardwareUse} disabled={busy || !hardware}>Use maximum detected</Button>
-            </div>
-            <p className="mt-2 text-[11px] text-faint">Recommendation is safer for everyday use. Maximum detected uses all CPU threads and the detected GPU offload estimate; use it only when you intentionally want this node to mine as hard as this machine can.</p>
-          </div>
-        </div>
-
         {/* Optional add-on: Serve a model. Independent of coordination and of storage. */}
         <div className="mt-3 rounded-lg border border-hairline bg-base p-3">
           <div className="mb-1 flex items-center gap-2 text-xs font-medium text-text"><Boxes size={14} className="text-[var(--indigo)]" /> Serve a model <span className="font-normal text-faint">optional add-on</span></div>
@@ -1091,36 +1102,6 @@ export function Mine() {
           {!hasKnownModels && hasLocalModelCache && (
             <div className="mt-2 rounded-lg border border-[color-mix(in_srgb,var(--warn)_35%,transparent)] bg-[color-mix(in_srgb,var(--warn)_7%,transparent)] p-3 text-xs text-muted">
               This node has {formatBytes(mining?.storageUsedBytes ?? 0)} in its local model cache, but no authorized field model is currently announced on this network. This can happen after switching networks or testing earlier model links. Start fresh from genesis removes the cache, history, and old local model bytes.
-            </div>
-          )}
-        </div>
-
-        {/* Storage (peer-to-peer): a user-controllable toggle with a byte cap. Independent of mining and
-            of serving a model: you can share storage without mining, or mine without sharing storage. */}
-        <div className="mt-3 rounded-lg border border-hairline bg-base p-3">
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-xs">
-              <div className="flex items-center gap-2 font-medium text-text"><Link2 size={14} className="text-[var(--indigo)]" /> Storage (peer-to-peer) <span className="font-normal text-faint">optional, on while you mine</span></div>
-              <div className="mt-0.5 text-faint">Serving authorized model bytes earns a bonus on top of coordination, and passes models to other peers without a central host. It is optional: turn it off and this node still mines and earns from coordination, it just stops holding and serving heavy model bytes.</div>
-            </div>
-            <Toggle on={mining?.storageEnabled ?? false} onClick={() => updateStorage(!(mining?.storageEnabled ?? false))} disabled={busy} />
-          </div>
-          <div className="mt-2 grid gap-2 sm:grid-cols-3">
-            <Field label="Storage cap" hint="GB. Default is 8 GB, enough to hold one authorized model so this node can actually serve the field. The node never stores more than this; when full it stops taking new bytes and keeps serving what fits.">
-              <Input className="mono" value={storageLimit} onChange={(e) => setStorageLimit(e.target.value)} onBlur={() => updateStorage(mining?.storageEnabled ?? false)} disabled={busy} />
-            </Field>
-            <Stat label="Used of cap" value={<span className="text-sm">{formatBytes(mining?.storageUsedBytes ?? 0)} / {formatBytes(mining?.storageCapBytes ?? (mining?.storageLimitGb ?? 8) * 1024 ** 3)}{(mining?.storageDownloadingBytes ?? 0) > 0 ? <span className="text-faint"> (+{formatBytes(mining?.storageDownloadingBytes ?? 0)} downloading)</span> : null}</span>} />
-            <Stat label="Mode" value={<span className="text-sm">{mining?.storageEnabled ? "storage peer" : "light node"}</span>} />
-          </div>
-          {(mining?.storageUsedBytes ?? 0) > 0 && (
-            <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-faint">
-              <span>Free the disk without turning storage off. The node re-fills from the field up to your cap; the model it is actively serving is kept.</span>
-              <Button variant="ghost" onClick={emptyStorage} disabled={busy} className="shrink-0 text-xs">Empty stored models</Button>
-            </div>
-          )}
-          {mining?.storageEnabled && (mining?.storageUsedBytes ?? 0) >= (mining?.storageCapBytes ?? (mining?.storageLimitGb ?? 8) * 1024 ** 3) && (
-            <div className="mt-2 rounded-lg border border-[color-mix(in_srgb,var(--warn)_35%,transparent)] bg-[color-mix(in_srgb,var(--warn)_7%,transparent)] p-2 text-[11px] text-muted">
-              Storage is at its cap. This node keeps serving what it already holds and will not take new bytes until you raise the cap.
             </div>
           )}
         </div>

@@ -113,16 +113,26 @@ export function ResonanceField({
             className={animate ? "rf-node" : undefined} style={{ animationDelay: `${i * 0.7}s` }} />;
         })}
 
-        {/* the mark: six overlapping circles, gradient fill + bright hairline outlines + glowing center */}
+        {/* the mark: six TRANSLUCENT overlapping circles whose overlaps glow brighter (flower-of-life light,
+           matching the brand art), crisp neon-bright hairline outlines, and a glowing convergence center. */}
         <g className={animate ? "rf-breathe" : undefined} style={{ transformOrigin: `${cx}px ${cy}px` }}>
-          <g filter={`url(#${fBloom})`} opacity={glow * 0.7}>
-            {cells.map((c, i) => <circle key={`bl${i}`} cx={c.x} cy={c.y} r={petalR} fill={`url(#${gEnergy})`} fillOpacity={c.op * 0.8} />)}
+          {/* soft outer bloom of the whole mark */}
+          <g filter={`url(#${fBloom})`} opacity={glow * 0.6}>
+            {cells.map((c, i) => <circle key={`bl${i}`} cx={c.x} cy={c.y} r={petalR} fill={`url(#${gEnergy})`} fillOpacity={c.op * 0.7} />)}
           </g>
-          {cells.map((c, i) => <circle key={`f${i}`} cx={c.x} cy={c.y} r={petalR} fill={`url(#${gEnergy})`} fillOpacity={c.op * 0.62} />)}
-          {cells.map((c, i) => <circle key={`o${i}`} cx={c.x} cy={c.y} r={petalR} fill="none" stroke="#DFFBFF"
-            strokeOpacity={live ? 0.62 : 0.32} strokeWidth={Math.max(0.8, size * 0.0032)} filter={`url(#${fLine})`} />)}
-          <circle cx={cx} cy={cy} r={size * 0.03} fill="#ffffff" filter={`url(#${fLine})`} opacity={glow} />
-          <circle cx={cx} cy={cy} r={size * 0.012} fill="#ffffff" opacity={Math.min(1, glow + 0.15)} />
+          {/* translucent fills with SCREEN blend: petals are see-through and their crossings add up into brighter
+             lens shapes, exactly the layered-light look of the reference. */}
+          <g style={{ mixBlendMode: "screen" }}>
+            {cells.map((c, i) => <circle key={`f${i}`} cx={c.x} cy={c.y} r={petalR} fill={`url(#${gEnergy})`} fillOpacity={(live ? 0.42 : 0.3) * (0.6 + c.op * 0.4)} />)}
+          </g>
+          {/* neon outlines: a soft wide glow pass under a crisp bright hairline */}
+          {cells.map((c, i) => <circle key={`og${i}`} cx={c.x} cy={c.y} r={petalR} fill="none" stroke="#6FE9E0"
+            strokeOpacity={live ? 0.5 : 0.22} strokeWidth={Math.max(1.4, size * 0.006)} filter={`url(#${fBloom})`} style={{ mixBlendMode: "screen" }} />)}
+          {cells.map((c, i) => <circle key={`o${i}`} cx={c.x} cy={c.y} r={petalR} fill="none" stroke="#EAFEFF"
+            strokeOpacity={live ? 0.72 : 0.34} strokeWidth={Math.max(0.7, size * 0.0028)} filter={`url(#${fLine})`} />)}
+          {/* glowing convergence center */}
+          <circle cx={cx} cy={cy} r={size * 0.032} fill="#ffffff" filter={`url(#${fBloom})`} opacity={glow * 0.9} style={{ mixBlendMode: "screen" }} />
+          <circle cx={cx} cy={cy} r={size * 0.011} fill="#ffffff" opacity={Math.min(1, glow + 0.15)} />
         </g>
       </svg>
     </div>

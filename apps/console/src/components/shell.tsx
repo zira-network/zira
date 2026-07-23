@@ -7,7 +7,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
   MessageSquare, Wallet as WalletIcon, Bot, CircuitBoard, Network, Hexagon,
-  BookOpen, Settings as SettingsIcon, Crown, Radio, Wifi, WifiOff, Zap, Gem, Gauge, Image as ImageIcon,
+  BookOpen, Settings as SettingsIcon, Crown, Radio, WifiOff, Zap, Gem, Gauge,
   Moon, Sun, Plus, PanelLeftClose, PanelLeftOpen, Menu, X,
 } from "lucide-react";
 import { ZiraMark } from "./brand";
@@ -49,7 +49,6 @@ const NAV_SECTIONS: NavSection[] = [
     heading: "Use",
     items: [
       { to: "/", label: "Console", icon: MessageSquare, end: true, desktopOnly: false },
-      { to: "/images", label: "Images", icon: ImageIcon, feature: null, desktopOnly: false },
       { to: "/marketplace", label: "Discover", icon: CircuitBoard, feature: "marketplace" as const, desktopOnly: false },
       { to: "/resonators", label: "Resonators", icon: Bot, feature: "resonators" as const, desktopOnly: false },
     ],
@@ -284,60 +283,25 @@ function EventsPlus() {
   );
 }
 
-// Connection-quality indicator: a small dot + latency label driven by the timed /rpc/stats probe in the
-// store. green < 150ms, amber < 600ms, red otherwise, and "offline" when the node is unreachable.
-function ConnectionDot({ quality, latencyMs }: { quality: ConnectionQuality; latencyMs: number | null }) {
-  const color = quality === "good" ? "var(--teal)" : quality === "fair" ? "var(--warn)" : quality === "poor" ? "var(--danger)" : "var(--text-faint)";
-  const label = quality === "offline" ? "offline" : `${latencyMs} ms`;
-  const title = quality === "offline"
-    ? "Node unreachable. Retrying on the poll loop."
-    : `Round-trip to the node: ${latencyMs} ms (${quality === "good" ? "good" : quality === "fair" ? "fair" : "poor"} connection).`;
-  return (
-    <span title={title} aria-label={`Connection ${quality}${quality === "offline" ? "" : `, ${latencyMs} milliseconds`}`}
-      className="hidden items-center gap-1.5 rounded-full border border-hairline bg-elevated px-2 py-0.5 text-[11px] text-muted sm:inline-flex">
-      <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: color }} aria-hidden />
-      <span className="mono">{label}</span>
-    </span>
-  );
-}
-
 type NodeStats = NetworkStats & { peers?: number; finalizedEpoch?: number; currentEpoch?: number };
 
-// The network/gateway connection state. It reads from BOTH the latest stats AND the live connection
-// probe (connQuality) so it never gets stuck on "Connecting": once the probe reports the node is
-// unreachable, this shows a clear "Unreachable" state with the gateway target, rather than spinning on
-// "Connecting" forever. When connected it shows connecting -> syncing -> connected with peers and epoch.
-function NetworkBadge({ stats, mode, quality, base }: { stats: NodeStats | null; mode: string | null; quality: ConnectionQuality; base: string }) {
-  if (mode !== "node") {
-    return <Badge tone="warn"><WifiOff size={12} /> Offline</Badge>;
-  }
-  // The probe says the gateway is not answering. Show a clear unreachable state, not an endless spinner.
+// A single, minimalist connection indicator. When connected it reads simply "Live" with a soft teal dot; the
+// non-connected states stay honest (Connecting / Reconnecting / Offline) but terse. Peers, epoch, and latency
+// are not shown here (they clutter the bar) and instead live in the tooltip and on the Dashboard/Explorer.
+function NetworkBadge({ stats, mode, quality, latencyMs, base }: { stats: NodeStats | null; mode: string | null; quality: ConnectionQuality; latencyMs: number | null; base: string }) {
+  if (mode !== "node") return <Badge tone="neutral"><WifiOff size={12} /> Offline</Badge>;
   if (quality === "offline" && !stats) {
     const host = (() => { try { return new URL(base).host; } catch { return base; } })();
-    return <Badge tone="danger" className="hidden sm:inline-flex" >
-      <WifiOff size={12} /> Can't reach gateway ({host})
-    </Badge>;
+    return <Badge tone="danger" title={`Cannot reach ${host}. Retrying.`}><WifiOff size={12} /> Offline</Badge>;
   }
-  // Probe is fine but no stats yet: a genuine, transient connecting state.
   if (!stats) return <Badge tone="neutral"><Radio size={12} /> Connecting</Badge>;
+  if (quality === "offline") return <Badge tone="warn"><Radio size={12} /> Reconnecting</Badge>;
   const peers = stats.peers ?? stats.activeNodes ?? 0;
   const finalized = stats.finalizedEpoch ?? 0;
-  const current = stats.currentEpoch ?? finalized;
-  // A healthy follower/gateway adopts the finality leader's checkpoints a small window behind the head, so a
-  // gap of a few dozen epochs is NORMAL and connected — not "syncing". Only a node genuinely far behind (a
-  // fresh join still catching up, hundreds of epochs back) should read as syncing. ~90 epochs ≈ 7.5 min.
-  const syncing = current - finalized > 90;
-  const degraded = peers < 3;
-  // If stats are present but the latest probe says offline, the gateway just dropped: show reconnecting.
-  if (quality === "offline") {
-    return <Badge tone="warn" className="hidden sm:inline-flex"><Radio size={12} /> Reconnecting</Badge>;
-  }
-  const tone = syncing || degraded ? "warn" : "teal";
-  const label = syncing ? "Syncing" : degraded ? "Degraded" : "Connected";
+  const title = `Live. ${peers} peer${peers === 1 ? "" : "s"}, epoch ${finalized.toLocaleString()}${latencyMs != null ? `, ${latencyMs} ms round trip` : ""}.`;
   return (
-    <Badge tone={tone} className="hidden sm:inline-flex">
-      {tone === "teal" ? <Wifi size={12} /> : <Radio size={12} />}
-      {label}: {peers} peers, epoch {finalized.toLocaleString()}
+    <Badge tone="teal" title={title}>
+      <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--teal)]" aria-hidden /> Live
     </Badge>
   );
 }
@@ -372,8 +336,7 @@ function TopBar({ title }: { title: string }) {
         )}
         <EventsPlus />
         <div className="hidden w-20 lg:block"><Meter value={userZti} /></div>
-        <ConnectionDot quality={connQuality} latencyMs={latencyMs} />
-        <NetworkBadge stats={stats as NodeStats | null} mode={mode} quality={connQuality} base={base} />
+        <NetworkBadge stats={stats as NodeStats | null} mode={mode} quality={connQuality} latencyMs={latencyMs} base={base} />
         {providerOn && <Badge tone="indigo"><Radio size={12} /> Providing</Badge>}
         <Badge tone="neutral">{phaseLabel(phase)}</Badge>
         <button
@@ -391,7 +354,7 @@ function TopBar({ title }: { title: string }) {
 
 const TITLES: Record<string, string> = {
   "/": "Console", "/wallet": "Wallet", "/resonators": "Resonators", "/marketplace": "Discover",
-  "/dashboard": "Dashboard", "/images": "Images", "/explorer": "Explorer", "/anchors": "Anchors", "/learn": "Learn", "/settings": "Settings",
+  "/dashboard": "Dashboard", "/explorer": "Explorer", "/anchors": "Anchors", "/learn": "Learn", "/settings": "Settings",
   "/founder": "Steward", "/styleguide": "Styleguide",
 };
 
