@@ -1160,20 +1160,26 @@ export class ModelService {
     };
   }
   knownModels(): { meta: ModelMeta; providers: number; targetHosts: number; distributionProgress: number; ready: boolean; local: boolean }[] {
-    // Field-ready means the model is no longer single-host: the authority node plus at least one
-    // storage-enabled peer can serve the bytes. Light peers sync metadata but should not force the
-    // heavy-byte readiness target upward.
+    // Field-usable ("ready") means the field can ANSWER with this model right now: at least one host holds
+    // and serves the bytes, or this very node holds it. A single serving host is enough to answer; a second
+    // host is REDUNDANCY, not a prerequisite. The old rule required 2 hosts, so a genuinely working
+    // single-host model (for example an image model held on one box) showed as "not ready" stuck at 50%
+    // forever even while it answered. targetHosts stays the replication goal and is surfaced separately as
+    // the "hosts" count, so the UI shows a full availability meter plus an honest "1/2 hosts" replica line.
     const targetHosts = 2;
     // Retired (deprecated) models are hidden from the field view: not shown in the chat picker, Discover, or
     // the models list, matching "retired means gone". They are still tracked internally (so serving nodes
     // stop selecting them and evict their bytes) but never surfaced to users.
     return [...this.registry.values()].filter((e) => !e.meta.deprecated).map((e) => {
       const providers = e.peerIds.size;
-      const distributionProgress = Math.max(0, Math.min(1, providers / targetHosts));
+      const ready = providers >= 1 || e.local; // usable now with one serving host, or held here
+      // Availability for the meter: full once usable, else how far toward the first holder. The replica
+      // count (providers/targetHosts) is shown separately, so this never sticks at a misleading 50%.
+      const distributionProgress = ready ? 1 : Math.max(0, Math.min(1, providers / targetHosts));
       // Surface the modality + routing domains on every model (defaulting legacy metas) so the picker
       // and routing always have a type+domain even for models signed before the type field existed.
       const meta = { ...e.meta, type: this.modelType(e.meta), domains: this.modelDomains(e.meta) };
-      return { meta, providers, targetHosts, distributionProgress, ready: providers >= targetHosts, local: e.local };
+      return { meta, providers, targetHosts, distributionProgress, ready, local: e.local };
     });
   }
 
