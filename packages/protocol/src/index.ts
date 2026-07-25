@@ -13,6 +13,7 @@ export * from "./reserve";
 // Text-to-image perceptual-hash agreement (2.9.0 Track A): fork-safe settler verification of non-bitwise
 // image outputs.
 export * from "./imageAgreement";
+export * from "./answerQuality";
 
 // Genesis and Proof of Resonance finality (the consensus spine)
 export * from "./genesis";

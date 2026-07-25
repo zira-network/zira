@@ -3,7 +3,7 @@
 // tip the contributors. The model source (the built in engine running a distributed model, or an
 // OpenAI compatible endpoint like Ollama) is decided by the mining settings, so this loop just asks
 // the model service whether it can serve and to generate an answer. Every answer is signed.
-import { sign as edSign, type Keypair, type Domain } from "@zira/protocol";
+import { sign as edSign, answerConfidence, type Keypair, type Domain } from "@zira/protocol";
 import type { ZiraNode } from "../core/ZiraNode.js";
 import { PROVIDER_SYSTEM_PROMPT } from "./inference.js";
 import { log } from "../log.js";
@@ -57,7 +57,9 @@ export function startMiner(node: ZiraNode, identity: Keypair, cfg: MinerConfig):
       const answer = await node.models.generate(messages, PROVIDER_SYSTEM_PROMPT, query.domain);
       const id = node.identityAddress() + ":" + query.id;
       const sig = edSign(query.id + "\n" + answer, identity.privateKey);
-      node.publishAnswer({ id, queryId: query.id, provider: identity.publicKey, answer, confidence: 0.75, sig, ts: Date.now() });
+      // Real per-answer confidence derived from the answer itself (replaces the old constant), plus the id of
+      // the serving model so consumers can drop answers from a retired model. Both are soft/off-root.
+      node.publishAnswer({ id, queryId: query.id, provider: identity.publicKey, answer, confidence: answerConfidence(answer), sig, ts: Date.now(), modelId: node.models.answerModelId() || undefined });
       markAnswered(query.id);
     } catch (e) { log.warn("field answer generation failed", (e as Error).message); }
   }

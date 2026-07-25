@@ -36,6 +36,9 @@ export interface AnswerMsg {
   confidence: number;
   sig: string;
   ts: number;
+  // The id of the model that produced this answer, so consumers can drop answers from a retired
+  // (deprecated) model without an app update. Optional for back-compat with older publishers.
+  modelId?: string;
 }
 
 // Everything that crosses the wire is one of these. Ledger events (tx, observation) feed the

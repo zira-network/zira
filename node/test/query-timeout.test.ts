@@ -34,6 +34,7 @@ function makeNode(answersFor: Map<string, any[]>) {
       answers: answersFor,
     },
     state: { accounts: new Map() },
+    models: { isDeprecated: () => false },
   };
 }
 

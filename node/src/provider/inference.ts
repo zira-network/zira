@@ -30,7 +30,7 @@ export async function chat(args: ChatArgs): Promise<string> {
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(args.apiKey ? { Authorization: `Bearer ${args.apiKey}` } : {}) },
-      body: JSON.stringify({ model: args.model, messages: args.messages, max_tokens: args.maxTokens ?? 256, stream: false }),
+      body: JSON.stringify({ model: args.model, messages: args.messages, max_tokens: args.maxTokens ?? 512, stream: false }),
       signal: ac.signal,
     });
     if (!res.ok) throw new Error(`local model not reachable at ${args.endpoint} (status ${res.status})`);

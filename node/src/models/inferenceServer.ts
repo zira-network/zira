@@ -16,7 +16,18 @@ import { availableParallelism, cpus } from "node:os";
 import { log } from "../log.js";
 
 const GEN_TIMEOUT_MS = Number(process.env.ZIRA_INFERENCE_TIMEOUT_MS) || 60_000;
-const DEFAULT_MAX_TOKENS = Number(process.env.ZIRA_INFERENCE_MAX_TOKENS) || 160;
+// A larger default budget so answers are complete, not clipped at a sentence. 512 tokens is a full paragraph
+// or two and still lands within the timeout on CPU; strong hardware overrides higher. Old default was 160,
+// which truncated real answers. Callers can still pass a smaller max_tokens per request.
+const DEFAULT_MAX_TOKENS = Number(process.env.ZIRA_INFERENCE_MAX_TOKENS) || 512;
+
+/** Context window to allocate. A larger window lets multi-turn history and long prompts fit without silent
+ *  truncation; a GPU can afford a deep one, a CPU stays modest to bound RAM. Explicit override always wins. */
+function resolveContextSize(hasGpu: boolean): number {
+  const env = Number(process.env.ZIRA_INFERENCE_CONTEXT);
+  if (Number.isFinite(env) && env >= 512) return Math.min(32_768, Math.floor(env));
+  return hasGpu ? 8192 : 4096;
+}
 
 /** GPU layers to offload. Auto (unset) offloads ALL layers (999) when a GPU is present, matching the prior
  *  hardcoded behavior; an explicit ZIRA_INFERENCE_GPU_LAYERS (passed from ModelService via mining.gpuLayers)
@@ -81,7 +92,7 @@ export async function runInferenceServer(modelPath: string, port: number): Promi
   // A small pool of sequences with explicit release per request. Each query is independent (fresh
   // session + sequence), so we MUST dispose the sequence afterwards or the context runs out of slots
   // ("No sequences left") after the first generation.
-  const context = await model.createContext({ contextSize: 4096, sequences });
+  const context = await model.createContext({ contextSize: resolveContextSize(hasGpu), sequences });
 
   // Bounded concurrency over the sequence pool: up to maxConcurrent generations run at once (each on its
   // own sequence), the rest queue. This replaces the old single serialized chain, where one stuck or slow
@@ -101,7 +112,17 @@ export async function runInferenceServer(modelPath: string, port: number): Promi
 
   async function generate(messages: { role: string; content: string }[], maxTokens: number, signal: AbortSignal): Promise<string> {
     const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
-    const user = messages.filter((m) => m.role === "user").map((m) => m.content).join("\n\n");
+    // Preserve MULTI-TURN context. The old code dropped every assistant turn and concatenated only the user
+    // turns, so follow-up questions lost the conversation. We keep the last user message as the actual prompt
+    // and fold the prior turns (both user and assistant) into a readable transcript prepended to it, so the
+    // model sees what it previously answered. This is template-neutral (no reliance on a specific engine
+    // history API), so it can never wedge the engine, and it is strictly better than discarding assistant turns.
+    const convo = messages.filter((m) => m.role === "user" || m.role === "assistant");
+    const lastUserIdx = (() => { for (let i = convo.length - 1; i >= 0; i--) if (convo[i]!.role === "user") return i; return -1; })();
+    const finalQuestion = lastUserIdx >= 0 ? convo[lastUserIdx]!.content : convo.map((m) => m.content).join("\n\n");
+    const prior = lastUserIdx > 0 ? convo.slice(0, lastUserIdx) : [];
+    const transcript = prior.map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`).join("\n");
+    const user = transcript ? `${transcript}\n\nUser: ${finalQuestion}` : finalQuestion;
     const seq = context.getSequence();
     const session = new mod.LlamaChatSession({ contextSequence: seq, systemPrompt: system || undefined });
     try {

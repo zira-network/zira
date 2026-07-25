@@ -2,7 +2,7 @@
 // The Console talks to a ZIRA Core node over its local RPC (HTTP) and WebSocket. The node is a
 // peer in the network, so the GUI is synced by peers. Pointing at your own node is trustless.
 import {
-  PROTOCOL, TASK_DELIVER_TIMEOUT_MS, addressFromPubKey, queryComplexityChars, queryTierMultiplier,
+  PROTOCOL, TASK_DELIVER_TIMEOUT_MS, addressFromPubKey, queryComplexityChars, queryTierMultiplier, looksLikeGarbage, isNearDuplicate,
   type ZiraClient, type Address, type PublicKey, type SignedTx, type SignedObservation, type Lock,
   type FieldNode, type Stream, type Bond, type Resonator, type SpendLimits, type Anchor,
   type NetworkStats, type AnswerReceipt, type Listing, type Task, type PendingQuery, type uZIR, type Domain,
@@ -140,14 +140,23 @@ export class NodeClient implements ZiraClient {
     // each loop, extending to the full window the moment one appears. Only a network that stays empty the
     // whole time returns the "still warming up" guidance.
     const start = Date.now();
-    const FULL_WAIT = 60000, EMPTY_FLOOR = 25000;
+    // EMPTY_FLOOR must exceed a CPU generation (~35s) so a single local miner whose provider announce has not
+    // landed yet is not abandoned mid-answer. FULL_WAIT gives a populated field time to converge.
+    const FULL_WAIT = 60000, EMPTY_FLOOR = 40000;
     let deadline = start + (providers.length === 0 ? EMPTY_FLOOR : FULL_WAIT);
     let answers: FieldAnswer[] = [];
     let recheck = 0;
+    // A usable answer is model-backed AND coherent (not the coordination placeholder, not garbage like
+    // "clock!!!!!!"). When the field has two or more providers we wait for agreement (a second coherent
+    // answer) rather than trusting a lone answerer, but the deadline still bounds the wait so a genuinely
+    // single-provider field returns its one answer.
+    const coherent = (a: FieldAnswer) => !isCoordinationFallback(a.answer) && !looksLikeGarbage(a.answer);
     while (Date.now() < deadline) {
       if (args.signal?.aborted) break;
       answers = await this.get<typeof answers>(`/query/answers?id=${id}`).catch(() => []);
-      if (answers.some((a) => !isCoordinationFallback(a.answer))) break;
+      const good = answers.filter(coherent);
+      const wantAgreement = providers.length >= 2;
+      if (good.length >= (wantAgreement ? 2 : 1)) break;
       // Every ~3s re-read providers; if one is now online, give it the full window to answer.
       if (++recheck % 6 === 0 && Date.now() - start < EMPTY_FLOOR) {
         const live = await this.get<OnlineProvider[]>("/providers").catch(() => [] as OnlineProvider[]);
@@ -156,7 +165,7 @@ export class NodeClient implements ZiraClient {
       await new Promise((r) => setTimeout(r, 500));
     }
 
-    const hasModelBacked = answers.some((a) => !isCoordinationFallback(a.answer));
+    const hasModelBacked = answers.some(coherent);
     if (!hasModelBacked) {
       // "Use this machine" backs up the field: if this machine can answer (own-task is on and a model is
       // loaded here), answer locally instead of returning an empty field result.
@@ -182,14 +191,25 @@ export class NodeClient implements ZiraClient {
       return { answer: msg, receipt: { contributors: [], domain, fusedConfidence: 0, challengeOpenUntil: Date.now(), proofAvailable: false, costUZIR: 0 } };
     }
 
-    // Coordinate: weight by provider domain ZTI times confidence.
-    const scored = answers.map((a) => {
+    // Coordinate: weight by provider domain ZTI times confidence, then boost by AGREEMENT so an answer that
+    // other models corroborate outranks a lone high-trust outlier. Garbage answers are dropped entirely.
+    const scored = answers.filter(coherent).map((a) => {
       const p = byKey.get(a.provider);
       const zti = Math.max(0.05, p?.zti ?? 0.05);
       return { ...a, zti, weight: zti * a.confidence, label: p?.label ?? a.provider.slice(0, 8), model: p?.model ?? "" };
     });
-    const modelBacked = scored.filter((a) => !isCoordinationFallback(a.answer));
-    const coordinatedPool = modelBacked.length ? modelBacked : scored;
+    // If every model-backed answer was garbage, fall back to whatever came back so the user still sees a
+    // result rather than an empty screen (rare: the collection loop already prefers coherent answers).
+    const coherentPool = scored.length ? scored : answers.map((a) => {
+      const p = byKey.get(a.provider);
+      const zti = Math.max(0.05, p?.zti ?? 0.05);
+      return { ...a, zti, weight: zti * a.confidence, label: p?.label ?? a.provider.slice(0, 8), model: p?.model ?? "" };
+    });
+    // Agreement bonus: each answer another answer largely repeats is corroborated, so scale its weight up.
+    const coordinatedPool = coherentPool.map((a) => {
+      const agree = coherentPool.filter((b) => b !== a && isNearDuplicate(a.answer, b.answer)).length;
+      return { ...a, weight: a.weight * (1 + 0.5 * agree) };
+    });
     const wsum = coordinatedPool.reduce((s, a) => s + a.weight, 0) || 1;
     coordinatedPool.forEach((a) => (a.weight = a.weight / wsum));
     coordinatedPool.sort((a, b) => b.weight - a.weight);

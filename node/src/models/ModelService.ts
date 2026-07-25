@@ -996,6 +996,13 @@ export class ModelService {
     if (this.mining.endpoint) return this.mining.endpointModel || "endpoint";
     return "";
   }
+  /** The id of the model this node is actively answering with, stamped onto each published answer so
+   * consumers can drop answers from a retired (deprecated) model. The subprocess-served model id when
+   * serving the built-in engine, else the configured endpoint model name (unknown ids are never treated
+   * as deprecated, so an endpoint name is harmless). Empty when nothing is serving. */
+  answerModelId(): string {
+    return this.servingId ?? (this.mining.endpoint ? (this.mining.endpointModel || "") : "");
+  }
   /** Answer with the built in engine or an inference endpoint. There is no canned fallback: a node that
    * cannot really generate stays silent so the field only ever carries real, model-backed answers. */
   async generate(messages: { role: "user" | "assistant"; content: string }[], system: string, domain?: Domain): Promise<string> {

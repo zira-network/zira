@@ -10,7 +10,7 @@ import { join, normalize, extname } from "node:path";
 import { connect } from "node:net";
 import { WebSocketServer, WebSocket } from "ws";
 import {
-  ANCHOR_CLASSES, TOTAL_ANCHOR_SEATS, MAINNET_ANCHOR_STEWARD, PROTOCOL, DOMAIN_META, addressFromPubKey, imagePriceUZIR, type Domain, type QueryFusion,
+  ANCHOR_CLASSES, TOTAL_ANCHOR_SEATS, MAINNET_ANCHOR_STEWARD, PROTOCOL, DOMAIN_META, addressFromPubKey, imagePriceUZIR, looksLikeGarbage, isNearDuplicate, type Domain, type QueryFusion,
 } from "@zira/protocol";
 import type { BootstrapSeedCandidate, ZiraNode } from "../core/ZiraNode.js";
 import type { AnswerMsg } from "../core/types.js";
@@ -718,7 +718,16 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
         idPrefix: "ru-",   // a paid query's id MUST start with this reserved namespace
       });
     }
-    case "GET /query/answers": return json(res, node.soft.answers.get(q.get("id") ?? "") ?? []);
+    case "GET /query/answers": {
+      // The Console/APK read this endpoint directly and do their own coordination, so the coherence gate
+      // MUST run here (not only in queryFusion, which the app never calls): drop incoherent/garbage answers
+      // ("clock!!!!!!!!!!" for "what is 4*5") and answers from a retired (deprecated) model, so a single
+      // broken or outdated serving node can never surface junk to a user. Coordination-fallback placeholders
+      // are coherent sentences, so they pass through and the client still handles them. Node-local, off-root.
+      const raw = node.soft.answers.get(q.get("id") ?? "") ?? [];
+      const clean = raw.filter((a) => !looksLikeGarbage(a.answer) && !(node.models?.isDeprecated?.((a as { modelId?: string }).modelId) ?? false));
+      return json(res, clean);
+    }
     case "GET /query/fusion": return json(res, queryFusion(node, q.get("id") ?? ""));
     case "GET /query/result": {
       // Bounded wait so asking NEVER hangs forever: wait up to timeoutMs for an answer, then return the
@@ -880,7 +889,7 @@ function queryFusion(node: ZiraNode, id: string): QueryFusion | { error: string 
   // Quality gate: drop incoherent/garbage answers (e.g. "clock!!!!!!!!!!") and answers produced by a
   // retired (deprecated) model, so a single broken or outdated serving node can never surface a junk
   // result. If nothing coherent remains, report no confident answer (the client retries) rather than junk.
-  const answers = rawAnswers.filter((a) => !looksLikeGarbage(a.answer) && !node.models.isDeprecated((a as { modelId?: string }).modelId));
+  const answers = rawAnswers.filter((a) => !looksLikeGarbage(a.answer) && !(node.models?.isDeprecated?.((a as { modelId?: string }).modelId) ?? false));
   if (answers.length === 0) return { error: "no coherent answer yet" };
   // ZIRA multi-intelligence fusion: many models/Resonators coordinate on one query. Weight each
   // contribution by its trust IN THIS DOMAIN (falling back to overall trust) times its self-reported
@@ -915,32 +924,6 @@ function queryFusion(node: ZiraNode, id: string): QueryFusion | { error: string 
     confidenceScore: Number(contributors.reduce((x, c) => x + c.weight * c.zti, 0).toFixed(2)),
     domain,
   };
-}
-
-/** Heuristic garbage/incoherence detector for a field answer. Catches the broken-model failure mode a user
- * saw ("clock!!!!!!!!!!!!" for "what is 4*5"): a long run of one repeated character, an answer dominated by
- * punctuation, or a long string with essentially no distinct words. Short factual answers ("20", "Paris")
- * pass. Pure/deterministic; used to drop junk before fusion so no single broken node surfaces it. */
-function looksLikeGarbage(s: string): boolean {
-  const t = (s || "").trim();
-  if (t.length < 1) return true;
-  if (/(.)\1{9,}/.test(t)) return true;                                   // 10+ of the same char in a row
-  const nonAlnum = t.replace(/[a-z0-9\s]/gi, "");
-  if (nonAlnum.length > 12 && nonAlnum.length / t.length > 0.5) return true; // punctuation spam
-  const words = new Set(t.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 1));
-  if (t.length > 24 && words.size <= 1) return true;                      // long but one/zero real words
-  return false;
-}
-
-/** True when two answers share most of their significant vocabulary, so fusion folds them by weight
- * instead of listing the same point twice. */
-function isNearDuplicate(a: string, b: string): boolean {
-  const words = (s: string) => new Set(s.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3));
-  const sa = words(a), sb = words(b);
-  if (sa.size === 0 || sb.size === 0) return false;
-  let shared = 0;
-  for (const w of sa) if (sb.has(w)) shared++;
-  return shared / Math.min(sa.size, sb.size) >= 0.8;
 }
 
 function resonatorStats(node: ZiraNode, id: string, window: string) {

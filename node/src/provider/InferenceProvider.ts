@@ -6,7 +6,7 @@
 //   2. polls the query relay for questions in its domains and answers them via the endpoint,
 //   3. signs every answer with the node identity.
 // Earnings come from query tips plus the inference emission share. ZTI tracks real quality.
-import { sign as edSign, type Keypair, type Domain, type ProviderConfig, type ProviderProfile } from "@zira/protocol";
+import { sign as edSign, answerConfidence, type Keypair, type Domain, type ProviderConfig, type ProviderProfile } from "@zira/protocol";
 import type { ZiraNode } from "../core/ZiraNode.js";
 import { buildProviderProfile } from "./profile.js";
 import { chat, PROVIDER_SYSTEM_PROMPT } from "./inference.js";
@@ -98,7 +98,9 @@ export class InferenceProvider {
       const answer = await this.answer(query);
       const id = this.identity.address + ":endpoint:" + query.id;
       const sig = edSign(query.id + "\n" + answer, this.identity.privateKey);
-      if (this.node.publishAnswer({ id, queryId: query.id, provider: this.identity.publicKey, answer, confidence: 0.78, sig, ts: Date.now() })) {
+      // Real per-answer confidence + the endpoint model name (harmless as a modelId: unknown ids are never
+      // treated as deprecated). Both soft/off-root.
+      if (this.node.publishAnswer({ id, queryId: query.id, provider: this.identity.publicKey, answer, confidence: answerConfidence(answer), sig, ts: Date.now(), modelId: this.config.endpointModel || undefined })) {
         this.answered.add(query.id);
         this.queriesAnswered++;
         // Bound the dedup set on a long-lived mining node that answers autonomous queries every cycle forever.
