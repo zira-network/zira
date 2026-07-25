@@ -1,6 +1,6 @@
 {
   "name": "@zira/protocol",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "description": "ZIRA protocol spine: crypto, types, Proof of Resonance, the ledger, and the client interface. Pure TypeScript, browser safe.",
   "type": "module",
   "main": "./dist/index.js",

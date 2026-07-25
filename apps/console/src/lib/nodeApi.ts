@@ -92,6 +92,11 @@ export interface MiningStatus {
   storageUsedBytes: number;
   storageDownloadingBytes: number;
   known: FieldModel[];
+  // Live bandwidth (per-second deltas) and the pooled-payout beneficiary this miner currently routes its
+  // field-participation rewards to. beneficiary is null (or the miner's own address) when earning directly.
+  // Both optional: older nodes and gateways do not send them.
+  bandwidth?: { rxBytesPerSec: number; txBytesPerSec: number };
+  beneficiary?: string | null;
 }
 export interface MiningPatch { enabled?: boolean; mode?: "auto" | "select"; modelId?: string | null; endpoint?: string; endpointModel?: string; gpuLayers?: number; threads?: number; useRecommendedHardware?: boolean; localTaskPermission?: boolean; ownTaskInference?: boolean; storageEnabled?: boolean; storageCapBytes?: number; storageLimitGb?: number }
 
@@ -223,6 +228,9 @@ export const NodeApi = {
     rpcPost<{ jobId?: string; paramsHash?: string; priceUZIR?: number; disabled?: boolean; reason?: string; error?: string }>("/image/submit", body),
   imageResult: (id: string) =>
     rpcGet<{ found: boolean; jobId?: string; settled?: boolean; providers?: string[]; canonicalHash?: string | null; commitments?: number }>(`/image/result?id=${encodeURIComponent(id)}`),
+  // B1 network delivery: fetch the settled job's delivered PNG (a data URL) once a serving provider uploaded it.
+  imagePng: (id: string) =>
+    rpcGet<{ found: boolean; dataUrl?: string }>(`/image/png?id=${encodeURIComponent(id)}`),
   // Own-machine image generation (Machine tier): whether this node is armed, and generate one image locally.
   imageReady: () => rpcGet<{ ready: boolean }>("/image/ready"),
   imageGenerate: (body: { prompt: string; seed?: number; params?: { width?: number; height?: number; steps?: number; cfg?: number; negativePrompt?: string } }) =>

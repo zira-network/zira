@@ -13,7 +13,7 @@ import {
   NETWORK_RESONATOR_SPECS, MAINNET_NETWORK_RESONATOR_OWNER, type NetworkResonatorSpec,
   anchorResonatorSpec, anchorResonatorOperatingFloatUZIR, type AnchorResonatorSpec, type Anchor,
   settleCoordination, addressFromPubKey, verify as edVerify,
-  convergenceAdjustedBudget, queryComplexityChars, queryTier, PRICING, imagePriceUZIR, type Address,
+  convergenceAdjustedBudget, queryComplexityChars, queryTier, PRICING, imagePriceUZIR, dHash, IMAGE_AGREEMENT, type Address,
 } from "@zira/protocol";
 import { settlementWalletsFor, treasuryWalletsFor } from "../genesis-docs.js";
 import { launchModelsFor } from "../launch-models.js";
@@ -24,10 +24,12 @@ import { weightedOutputs } from "./payout-split.js";
 import { SoftState } from "./SoftState.js";
 import { Checkpoints } from "./Checkpoints.js";
 import { Store } from "./Store.js";
+import { sampleTelemetry } from "./telemetry.js";
 import { ModelService } from "../models/ModelService.js";
 import { ImageCoordinator } from "../image/ImageCoordinator.js";
 import { ImageEngine } from "../image/ImageEngine.js";
 import { screenImagePrompt } from "../image/ImageSafety.js";
+import { decodePngToLuma } from "../image/pngLuma.js";
 import type { ImageParams } from "@zira/protocol";
 import type { MiningConfig } from "../models/types.js";
 import { FounderServices } from "./FounderServices.js";
@@ -89,7 +91,19 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "3.1.0";
+const NODE_RELEASE_VERSION = "3.1.1";
+
+/** Hamming distance between two equal-length hex strings (perceptual-hash comparison for image delivery).
+ *  Mismatched lengths return a large distance so the caller rejects them. */
+function hexHamming(a: string, b: string): number {
+  if (a.length !== b.length) return Number.MAX_SAFE_INTEGER;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) {
+    let x = parseInt(a[i]!, 16) ^ parseInt(b[i]!, 16);
+    while (x) { d += x & 1; x >>= 1; }
+  }
+  return d;
+}
 // Per-cycle coordination batch. Every funded+listed resonator is eligible; autonomousResonanceBatch picks
 // this many per 5-minute cycle by a DETERMINISTIC ZTI-WEIGHTED draw, so higher-trust resonators (anchors,
 // seeded 0.95/0.85/… by class) are driven most often and earn the most, while every other funded resonator
@@ -125,6 +139,13 @@ const SETTLER_NONCE_STUCK_MS = envMs("ZIRA_SETTLER_NONCE_STUCK_MS", 120_000);
 const EVENTS_COMPACT_THRESHOLD_BYTES = envInt("ZIRA_EVENTS_COMPACT_THRESHOLD_BYTES", 48 * 1024 * 1024);
 const EVENTS_KEEP_CUSHION_EPOCHS = envInt("ZIRA_EVENTS_KEEP_CUSHION_EPOCHS", 2000);
 const AUTONOMOUS_RESONANCE_TASK_UZIR = envInt("ZIRA_AUTONOMOUS_RESONANCE_TASK_UZIR", 200_000_000);     // 200 ZIR / driven resonator / cycle
+// FIXED per-cycle resonator-reward POOL (economic alignment for Tier 1). Total autonomous-coordination reward
+// minted per cycle is capped at this, split across the driven rounds: per-round = min(TASK, POOL/rounds). It is
+// a FIXED value (NOT derived from MAX_PER_CYCLE), = the current implied cap (8 x TASK = 1600 ZIR), so raising
+// ZIRA_AUTONOMOUS_RESONANCE_MAX_PER_CYCLE opens MORE rounds (more real miner work) WITHOUT minting more ZIR --
+// the pool just splits thinner. Byte-identical to today while rounds <= 8 (POOL/rounds >= TASK => min = TASK),
+// so it is root-neutral until MAX is raised (a coordinated all-masters lever). Bounds emission => no inflation.
+const AUTONOMOUS_RESONANCE_POOL_UZIR = envInt("ZIRA_AUTONOMOUS_RESONANCE_POOL_UZIR", 8 * 200_000_000);  // 1600 ZIR / cycle, fixed
 // Real per-query coordination reward paid by the steward/founder funding wallet to the providers that
 // contributed accepted answers to an autonomous-resonance query. This is the money path that makes a
 // MINING node actually earn ZIR via Proof of Resonance + coordination: when its accepted work converges
@@ -1232,13 +1253,124 @@ export class ZiraNode {
     }
   }
 
+  // ---- Network image byte delivery (B1) ----
+  // The ImageCoordinator settles on perceptual-hash AGREEMENT and holds no bytes. To hand the actual PNG to
+  // the asker (who runs no local engine), a serving provider that is in the settled agreeing set uploads its
+  // PNG here; the coordinator node caches it (bounded) and the asker fetches it by jobId. Off the state root,
+  // gated by the image feature flag, and dHash-verified against the settled canonical hash so a wrong image
+  // cannot be injected. Delivery through the public coordinator works even when serving miners are NAT'd.
+  //
+  // BOX SATURATION SAFETY: coordination + this relay are LIGHTWEIGHT and box-safe (the heavy SD generation
+  // runs on GPU serving miners / the founder machine, NEVER on the CPU-only boxes). The relay is bounded by a
+  // strict TOTAL BYTE budget (not a count) with a small per-image cap and a short TTL, so it can never grow
+  // enough to pressure a box's RAM or threaten finality.
+  private imagePngCache = new Map<string, { png: Buffer; at: number }>();
+  private imagePngCacheBytes = 0;
+  private static readonly IMG_CACHE_MAX_BYTES = 96 * 1024 * 1024; // hard total-memory ceiling for the relay
+  private static readonly IMG_MAX_BYTES = 8 * 1024 * 1024;        // per-image cap (a 1024px PNG is ~1-3 MB)
+  private static readonly IMG_CACHE_TTL_MS = 300_000;             // 5 min
+
+  /** A serving provider delivers the PNG for a SETTLED job it is an agreeing member of. Verified: job settled,
+   *  provider in the agreeing set, and the bytes' perceptual hash within threshold of the settled canonical
+   *  hash. Returns a plain result; never throws into the RPC path. */
+  async deliverImagePng(jobId: string, provider: string, pngBase64: string): Promise<{ ok: boolean; reason?: string }> {
+    if (!this.imageCoordinator.isEnabled()) return { ok: false, reason: "image generation is not enabled on this node" };
+    const job = this.imageCoordinator.getJob(jobId);
+    if (!job?.settlement?.agreed || !job.settlement.canonicalHash) return { ok: false, reason: "job is not settled" };
+    if (!job.settlement.agreeingProviders.includes(provider)) return { ok: false, reason: "provider is not in the agreeing set for this job" };
+    let png: Buffer;
+    try { png = Buffer.from(String(pngBase64), "base64"); } catch { return { ok: false, reason: "invalid image bytes" }; }
+    if (png.length === 0 || png.length > ZiraNode.IMG_MAX_BYTES) return { ok: false, reason: "image bytes empty or too large" };
+    // Verify the delivered bytes ARE the agreed image: decode + dHash and compare to the settled canonical
+    // hash within the same perceptual threshold used to settle. A temp file is used because decodePngToLuma
+    // reads a path; it is always removed.
+    const tmp = join(this.dataDir, "img-out", `deliver-${jobId.slice(0, 12)}-${png.length}.png`);
+    try {
+      try { mkdirSync(join(this.dataDir, "img-out"), { recursive: true }); } catch { /* */ }
+      writeFileSync(tmp, png);
+      const { luma, width, height } = decodePngToLuma(tmp);
+      const h = dHash(luma, width, height);
+      if (hexHamming(h, job.settlement.canonicalHash) > IMAGE_AGREEMENT.MAX_HAMMING) {
+        return { ok: false, reason: "delivered image does not match the settled result" };
+      }
+    } catch { return { ok: false, reason: "could not decode the delivered image" }; }
+    finally { try { rmSync(tmp, { force: true }); } catch { /* */ } }
+    // Cache with a strict TOTAL-BYTE budget so the relay can never pressure a box's RAM. Drop expired
+    // entries, replace any prior copy of this job, then evict oldest until we fit under the ceiling.
+    const now = Date.now();
+    for (const [id, e] of [...this.imagePngCache]) if (now - e.at > ZiraNode.IMG_CACHE_TTL_MS) this.evictImage(id);
+    this.evictImage(jobId); // replace an existing entry cleanly (keeps the byte counter exact)
+    while (this.imagePngCacheBytes + png.length > ZiraNode.IMG_CACHE_MAX_BYTES && this.imagePngCache.size > 0) {
+      const oldest = [...this.imagePngCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+      if (!oldest) break;
+      this.evictImage(oldest[0]);
+    }
+    if (png.length > ZiraNode.IMG_CACHE_MAX_BYTES) return { ok: false, reason: "image exceeds the relay budget" };
+    this.imagePngCache.set(jobId, { png, at: now });
+    this.imagePngCacheBytes += png.length;
+    return { ok: true };
+  }
+
+  private evictImage(jobId: string): void {
+    const e = this.imagePngCache.get(jobId);
+    if (!e) return;
+    this.imagePngCacheBytes -= e.png.length;
+    this.imagePngCache.delete(jobId);
+  }
+
+  /** Fetch a delivered PNG (as a data URL) for a settled job, or null if none has been delivered yet. */
+  getImagePng(jobId: string): { dataUrl: string } | null {
+    const e = this.imagePngCache.get(jobId);
+    if (!e) return null;
+    if (Date.now() - e.at > ZiraNode.IMG_CACHE_TTL_MS) { this.evictImage(jobId); return null; }
+    return { dataUrl: `data:image/png;base64,${e.png.toString("base64")}` };
+  }
+
+  // ---- Serving-node image job reaction (B2) ----
+  // A node with the SD engine armed (imageReady) GENERATES for an open job, commits its perceptual hash, and
+  // on settlement delivers the PNG into the relay. Generation is HEAVY and runs only where imageReady is true
+  // (a GPU serving miner / the founder machine), NEVER on the CPU-only boxes (which coordinate but hold no
+  // engine). Bounded concurrency so a serving node is never overwhelmed. Best-effort; never throws.
+  private imageServeInflight = 0;
+  private static readonly IMG_SERVE_MAX_INFLIGHT = 2;
+
+  async serveImageJob(jobId: string): Promise<void> {
+    if (!this.imageCoordinator.isEnabled() || !this.imageReady()) return; // only armed GPU nodes generate
+    if (this.imageServeInflight >= ZiraNode.IMG_SERVE_MAX_INFLIGHT) return;
+    const job = this.imageCoordinator.getJob(jobId);
+    if (!job) return;
+    if (!screenImagePrompt(job.prompt, job.params.negativePrompt).allowed) return; // G1 safety on the serve path
+    const modelPath = this.resolveSdModelPath();
+    if (!modelPath) return;
+    this.imageServeInflight++;
+    let pngPath: string | null = null;
+    try {
+      const outDir = join(this.dataDir, "img-out");
+      try { mkdirSync(outDir, { recursive: true }); } catch { /* */ }
+      const outPath = join(outDir, `serve-${jobId.slice(0, 12)}-${Date.now()}.png`);
+      const res = await this.imageEngine.generate({ prompt: job.prompt, params: job.params, seed: job.seed, modelPath, outPath }).catch(() => null);
+      if (!res) return;
+      pngPath = res.pngPath;
+      const provider = this.identity.address;
+      this.imageCoordinator.addCommitment(jobId, { provider, pHash: res.pHash, seed: job.seed, modelId: job.modelId, paramsHash: job.paramsHash }, Date.now());
+      if (this.imageCoordinator.getJob(jobId)?.settlement?.agreed) {
+        try { await this.deliverImagePng(jobId, provider, readFileSync(res.pngPath).toString("base64")); } catch { /* delivery best-effort */ }
+      }
+    } finally {
+      this.imageServeInflight--;
+      if (pngPath) { try { rmSync(pngPath, { force: true }); } catch { /* */ } }
+    }
+  }
+
   /** GET /rpc/status: the node + mining + provider view used by the Console Mine page. */
   async statusInfo(): Promise<{
     nodeConfig: { observeEnabled: boolean };
     providerConfig: ProviderConfig;
     providerStatus: { active: boolean; endpoint: string; reachable: boolean; queriesAnswered: number; earnedTodayUZIR: number };
-    mining: MiningStatus;
-    hardware: HardwareProfile | null;
+    // mining/hardware carry live telemetry (bandwidth, CPU/GPU/RAM utilization) so the Dashboard renders
+    // real node-health figures. Telemetry is observational only (never a consensus surface).
+    mining: MiningStatus & { bandwidth?: { rxBytesPerSec: number; txBytesPerSec: number }; beneficiary?: string | null };
+    hardware: (HardwareProfile & { cpuUtil?: number; gpuUtil?: number; ramUsedFrac?: number }) | null;
     isFounder: boolean;
     founderAddresses: string[];
     address: string;
@@ -1256,12 +1388,13 @@ export class ZiraNode {
       const isEarning = e.kind === "reward" || e.kind === "agent_spend" || e.kind === "pool_payout" || e.kind === "batch_transfer" || launchMiningSettlement;
       if (e.to === this.identity.address && isEarning && e.timestamp >= since) earnedTodayUZIR += e.amountUZIR;
     }
+    const t = sampleTelemetry();
     return {
       nodeConfig: { observeEnabled: this.opts.observeEnabled },
       providerConfig: this.opts.providerConfig,
       providerStatus: { ...ps, earnedTodayUZIR },
-      mining: await this.miningStatus(),
-      hardware: hw,
+      mining: { ...(await this.miningStatus()), bandwidth: { rxBytesPerSec: t.rxBytesPerSec, txBytesPerSec: t.txBytesPerSec }, beneficiary: this.state.beneficiaryFor(this.identity.address) },
+      hardware: hw ? { ...hw, cpuUtil: t.cpuUtil, gpuUtil: t.gpuUtil ?? undefined, ramUsedFrac: t.ramUsedFrac } : null,
       isFounder: this.isFounder(),
       founderAddresses: this.founderAddresses(),
       address: this.identity.address,
@@ -1368,6 +1501,23 @@ export class ZiraNode {
   // unfinalized window) can never turn the re-gossip into a CPU-saturating flood on a co-located master box.
   private static readonly REGOSSIP_UNFINALIZED_MAX = 150;
 
+  /** Re-broadcast ONLY the latest finalized checkpoint (the signed finalizing votes, a tiny payload) on every
+   *  tick. A NAT/CGNAT follower or Console node that misses the one-shot vote at finalization AND the sparse
+   *  every-4th-tick heavy re-gossip would otherwise drift to the ~20-epoch pull-follow tolerance and render as
+   *  "out of sync". Pushing the finalized checkpoint each second lets it converge to the leader in ~1s. Cheap
+   *  and consensus-neutral: re-sends existing signed votes only, de-duped by isVoteKnown on the receiver, so it
+   *  never changes a root or a vote. Skips when nothing is finalized or the epoch has not advanced since the
+   *  last push (so a quiet chain sends nothing). */
+  private lastBroadcastFinalized = -1;
+  private broadcastLatestFinalized(): void {
+    const fin = this.checkpoints.lastFinalizedEpoch;
+    if (fin < 0 || fin === this.lastBroadcastFinalized) return;
+    const votes = this.checkpoints.finalizingVotes(fin, this.checkpoints.lastFinalizedRoot);
+    if (!votes.length) return;
+    for (const vote of votes) this.publish(this.topics.consensus, { t: "checkpoint", data: vote });
+    this.lastBroadcastFinalized = fin;
+  }
+
   private tick(): void {
     const now = Date.now();
     const advanced = this.state.advance(now);
@@ -1375,6 +1525,7 @@ export class ZiraNode {
     this.maybeFollowFinality(now);  // finality-follow: pull the latest checkpoint so a follower tracks the leader in seconds
     this.maybeResyncOnStall(now);   // finality watchdog: self-heal if finalizedEpoch freezes behind the mesh
     this.maybeResyncOnDivergence(now); // state watchdog: self-heal if our applied state stops matching consensus
+    this.broadcastLatestFinalized();   // push the latest finalized checkpoint EVERY tick (1s) so NAT followers/clients that miss the sparse 4s re-gossip converge finality in ~1s instead of drifting to the pull tolerance. Tiny (a handful of signed votes), de-duped by isVoteKnown, consensus-neutral.
     this.soft.prune(now);
     // periodically re-gossip pending events so peers converge despite gossipsub mesh races and
     // late joiners. Cheap: the pool is small and drains every epoch.
@@ -1507,6 +1658,15 @@ export class ZiraNode {
   // Which vouched miners passed the STORAGE chunk challenge this window (address -> last-verified ms). A
   // subset of verifiedMiners; used to give storage-servers the payout bonus. Settler-local, consensus-safe.
   private storageServingMiners = new Map<string, number>();
+  // Which miners recently produced a CONVERGED inference answer (address -> last ms), from settleQueryCoordination's
+  // agreeing answerer set. This is the real-compute signal the work-weighted field payout pays the most for. Kept
+  // for a bucket-length window (answers are burstier than heartbeats); sealed into the master heartbeat as part of
+  // minerWork so every node sizes the payout deterministically. Settler/answer-observer local; consensus-safe.
+  private answeredMiners = new Map<string, number>();
+  // Rolling count of converged answers per miner within the freshness window (throughput / "machine power").
+  // Reset when its answeredMiners freshness entry is pruned. Sealed (graded) into minerWork; consensus-safe.
+  private answeredCount = new Map<string, number>();
+  private static readonly ANSWERED_FRESH_MS = 5 * 60_000; // ~5 min (one field-payout bucket)
   // Connect-then-probe cooldown (peerId -> last pre-dial ms): a master dials a model-serving miner it is not
   // connected to (resolving its relay/DHT addresses) so the reverse chunk challenge has a connection to ride,
   // reaching NAT/CGNAT miners on their current client. Cooldown so a peer that just failed is not re-hammered.
@@ -1593,6 +1753,7 @@ export class ZiraNode {
       // prune stale entries so the vouch set stays current and bounded
       for (const [a, ts] of this.verifiedMiners) if (now - ts > ZiraNode.VOUCH_FRESH_MS) this.verifiedMiners.delete(a);
       for (const [a, ts] of this.storageServingMiners) if (now - ts > ZiraNode.VOUCH_FRESH_MS) this.storageServingMiners.delete(a);
+      for (const [a, ts] of this.answeredMiners) if (now - ts > ZiraNode.ANSWERED_FRESH_MS) { this.answeredMiners.delete(a); this.answeredCount.delete(a); }
       if (live > 0 || stored > 0 || liveFail > 0 || this.pushVouch.size > 0) log.info(`vouch probe: ${livePeers.length} peers, ${live} live, ${liveFail} unreachable, ${stored} storage-serving, ${this.pushVouch.size} push-vouched -> vouching ${this.freshVouchedMiners(now).length} in heartbeat`);
     } finally {
       this.storageProbeBusy = false;
@@ -1613,6 +1774,32 @@ export class ZiraNode {
       out.push(v.address);
     }
     return [...new Set(out)];
+  }
+
+  /** Per-miner work weight (basis points) this master seals into its heartbeat for the WORK-WEIGHTED field
+   *  payout: a tier (answered converged inference > storage-serving > liveness-only) scaled by the miner's ZTI
+   *  (0.5x..1.5x). Inference/machine-compute dominates storage per policy. The payout takes the MEDIAN of the
+   *  masters' sealed weights per miner, so ZTI (soft per-node state) drives pay deterministically without ever
+   *  being read live into the state root. Master-only; the values ride the master's signed observation. */
+  private computeMinerWork(miners: string[], now: number): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const a of miners) {
+      const ans = this.answeredMiners.get(a);
+      const sto = this.storageServingMiners.get(a);
+      const answered = ans !== undefined && now - ans <= ZiraNode.ANSWERED_FRESH_MS;
+      const storage = sto !== undefined && now - sto <= ZiraNode.VOUCH_FRESH_MS;
+      // Answer tier scales with throughput (converged answers this window) up to a cap: more real inference =
+      // more pay ("machine power"), bounded so it can't run away. Storage/liveness are flat tiers.
+      let tierBp: number;
+      if (answered) {
+        const extra = Math.min(Math.max((this.answeredCount.get(a) ?? 1) - 1, 0), PROTOCOL.FIELD_ANSWER_THROUGHPUT_CAP);
+        tierBp = PROTOCOL.FIELD_WEIGHT_ANSWER_BP + extra * PROTOCOL.FIELD_ANSWER_THROUGHPUT_STEP_BP;
+      } else tierBp = storage ? PROTOCOL.FIELD_WEIGHT_STORAGE_BP : PROTOCOL.FIELD_WEIGHT_LIVENESS_BP;
+      const zti = Math.max(0, Math.min(1, this.state.accounts.get(a)?.zti ?? 0));
+      const ztiBp = Math.round(zti * PROTOCOL.FIELD_WORK_WEIGHT_SCALE);
+      out[a] = Math.max(1, Math.round(tierBp * (PROTOCOL.FIELD_ZTI_FLOOR_BP + ztiBp) / PROTOCOL.FIELD_WORK_WEIGHT_SCALE));
+    }
+    return out;
   }
 
   /**
@@ -1644,8 +1831,14 @@ export class ZiraNode {
   private lastHeartbeatBucket = -1;
   /** The reward a single driven resonator's owner earns per cycle (fixed pool, funded from the settler's base
    *  emission). Used for BOTH the owner payment and the task's displayed totalEarned, so they match. */
-  private cycleResonatorReward(_now: number): number {
-    return AUTONOMOUS_RESONANCE_TASK_UZIR;
+  /** Per-round resonator reward for a bucket: a FIXED per-cycle pool split across the rounds driven this bucket,
+   *  capped at the base per-round amount. Byte-identical to the old flat reward while rounds <= 8 (the current
+   *  MAX), and total minted per cycle never exceeds AUTONOMOUS_RESONANCE_POOL_UZIR — so raising MAX opens more
+   *  real miner work with NO extra emission. Settler-only path, so a single funder computes it deterministically. */
+  private resonatorRewardForBucket(bucket: number): number {
+    const rounds = this.autonomousResonanceBatch(this.autonomousResonanceDriven(this.autonomousResonanceEligible()), bucket).length;
+    if (rounds <= 0) return AUTONOMOUS_RESONANCE_TASK_UZIR;
+    return Math.min(AUTONOMOUS_RESONANCE_TASK_UZIR, Math.floor(AUTONOMOUS_RESONANCE_POOL_UZIR / rounds));
   }
 
   /**
@@ -1847,11 +2040,14 @@ export class ZiraNode {
     // A genesis master vouches (in this signed heartbeat) for the miners it has verified hold + serve the
     // model. runField credits any miner vouched by >= MIN_STORAGE_VOUCHERS masters in the converged Lock,
     // unlocking its heartbeat emission — deterministically, with no per-master ledger tx.
-    const vouchedMiners = this.state.isGenesisMaster(this.identity.address) ? this.freshVouchedMiners(now) : undefined;
+    const vouchedMiners = isMaster ? this.freshVouchedMiners(now) : undefined;
+    // Per-miner work weight (tier x ZTI) sealed alongside the vouch, so the work-weighted field payout can size
+    // each miner's share from the MEDIAN of the masters' sealed weights (deterministic; ZTI never read live).
+    const minerWork = isMaster && vouchedMiners && vouchedMiners.length > 0 ? this.computeMinerWork(vouchedMiners, now) : undefined;
     const body = buildObservationBody({
       type: "value", observer: this.identity.publicKey, timestamp: now,
       subject: FIELD_HEARTBEAT_SUBJECT, domain: "data", confidence: 0.9,
-      sourceHashes: ["field-heartbeat"], value: 1, storageGiB, vouchedMiners,
+      sourceHashes: ["field-heartbeat"], value: 1, storageGiB, vouchedMiners, minerWork,
     });
     const c = canonical(body);
     this.submitObservation({ ...body, id: hashHex(c), sig: edSign(c, this.identity.privateKey) });
@@ -1963,7 +2159,7 @@ export class ZiraNode {
    */
   private payResonatorReward(resonator: Resonator, bucket: number, now: number): void {
     if (!this.isNetworkSettler()) return;
-    const amt = this.cycleResonatorReward(now);
+    const amt = this.resonatorRewardForBucket(bucket);
     if (amt <= 0) return;
     const key = `${resonator.id}:${bucket}`;
     if (this.paidResonatorRewards.has(key)) return;
@@ -2285,7 +2481,7 @@ export class ZiraNode {
     // The network (settler) funds this reward from base emission, so it is NOT capped by the resonator's own
     // operating float — the resonator EARNS this, it does not spend it. The same amount is paid to the owner
     // (payResonatorReward), so the displayed totalEarned (credited from this gossiped task) matches the payout.
-    const budgetUZIR = this.cycleResonatorReward(now);
+    const budgetUZIR = this.resonatorRewardForBucket(bucket);
     return {
       id: taskId,
       client: this.genesis.founder,
@@ -3260,6 +3456,9 @@ export class ZiraNode {
     const fee = Math.max(PROTOCOL.BASE_FEE_UZIR, split.burnUZIR); // the §9 burn IS the fee (all burned)
     if (this.state.provisionalBalance(funder.address) < outSum + fee) return { ok: false, reason: "funding wallet has insufficient balance for the coordination payout" }; // provisional: don't over-commit across this tick's pooled payouts (a later overspend drop would still mark the query settled)
     const now = Date.now();
+    // These contributors produced a CONVERGED answer this settlement: mark them as recent real-compute
+    // answerers so the work-weighted field payout pays them the top tier (sealed into minerWork below).
+    for (const p of split.payouts) if (p.amountUZIR > 0 && /^zir1[0-9a-z]{6,}$/.test(p.address)) { this.answeredMiners.set(p.address, now); this.answeredCount.set(p.address, (this.answeredCount.get(p.address) ?? 0) + 1); }
     const tx = signTx({
       network: this.genesis.network, from: funder.address, fromPubKey: funder.publicKey, to: funder.address,
       amountUZIR: outSum, feeUZIR: fee, nonce: this.state.provisionalNonce(funder.address), kind: "batch_transfer",

@@ -89,6 +89,37 @@ export const PROTOCOL = {
   // miners that ONLY that master vouched — and by 24 epochs (~2 min) even that has converged. Field-heartbeat
   // observations are retained this long so the window is populated.
   FIELD_PAYOUT_OBS_LAG_EPOCHS: 24,
+  // Work-weighted field payout. The base field-participation pool is split among the converged payees WEIGHTED
+  // by real contribution instead of flat-per-peer, so a node that actually answers inference (real machine
+  // compute) earns the bulk, a storage host earns a minor share, and a node that is merely reachable
+  // (liveness ping only) earns a small keep-alive. Each master seals a per-miner weight (tier x its ZTI) into
+  // its signed heartbeat (minerWork); the payout uses the MEDIAN of the masters' sealed weights per miner, so
+  // ZTI (soft per-node state) drives pay deterministically without ever being read live into the root. Weights
+  // are basis points; inference dominates storage per policy (compute + machine power is the paid work).
+  // Dormant (0) => the existing flat split runs, byte-identical to today. ARMED for 3.1.1 at the SAME epoch as
+  // pooled payouts, so both earning changes go live together after the coordinated all-masters 3.1.1 deploy;
+  // the window before this epoch is the live shadow proof (dormant, root-identical). If the deploy cannot
+  // complete before it, push the epoch out and rebuild rather than risk a mixed-version activation.
+  WORK_WEIGHTED_FIELD_PAYOUT_ACTIVATION_EPOCH: 357040358,
+  FIELD_WEIGHT_ANSWER_BP: 300,               // answered converged inference (1 answer): real compute, the bulk of pay
+  // Throughput scaling of the answer tier: each ADDITIONAL converged answer a miner produced in the window
+  // adds STEP bp up to CAP, so a machine that answers more real queries earns more ("machine power" rewarded).
+  // Sealed into minerWork per master and median-combined, so it stays deterministic and needs no box compute.
+  FIELD_ANSWER_THROUGHPUT_STEP_BP: 60,
+  FIELD_ANSWER_THROUGHPUT_CAP: 8,            // max additional answers counted (300 + 8*60 = 780 bp ceiling)
+  FIELD_WEIGHT_STORAGE_BP: 50,               // storage-serving (byte-challenge passed): minor, not the point
+  FIELD_WEIGHT_LIVENESS_BP: 10,              // reachable only (liveness ping): small keep-alive share
+  FIELD_ZTI_FLOOR_BP: 5000,                  // ZTI multiplier floor: weight = tierBP * (5000 + zti*10000)/10000
+  FIELD_WORK_WEIGHT_SCALE: 10000,            // fixed-point denominator for the ZTI multiplier (basis of 10000)
+  // Anchor earning weight (upcoming anchor features). When active, a payee that owns an anchor seat has its
+  // field-payout weight scaled by its best-owned anchor's CLASS standing (A 0.95 .. F 0.45), which is already
+  // root-committed (the anchor leaf's zti), so the 512 anchors carry real, dynamic earning weight. Read LIVE
+  // from the root anchor state at payout: deterministic, no sealing, and zero load on the light master boxes.
+  // Multiplier = 1 + classZti * FIELD_ANCHOR_BONUS_BP/10000 (A ~= 1.95x, F ~= 1.45x at BONUS_BP 10000), bounded
+  // so anchors tilt earnings without dominating real work. Dormant (0) => multiplier 1.0 for everyone (neutral,
+  // byte-identical). Arms alongside the broader anchor activation.
+  FIELD_ANCHOR_WEIGHT_ACTIVATION_EPOCH: 0,
+  FIELD_ANCHOR_BONUS_BP: 10000,
   // Cadence (epochs) at which validator-registry membership is re-sealed from converged state, so every
   // node commits an identical set on the same boundaries. ~1 hour at 5s epochs.
   VALIDATOR_SEAL_INTERVAL: 720,
@@ -180,6 +211,19 @@ export const PROTOCOL = {
   // batch_transfer, so it is fork-safe. Discover hides unsigned anchors under the same predicate. 0 =
   // dormant (every anchor resonator earns exactly as today, byte-identical). Set to a chosen epoch to arm.
   SIGNED_ANCHOR_EARNING_ACTIVATION_EPOCH: 0,
+
+  // Pooled payouts (mine in a pool). A miner submits a signed set_beneficiary tx naming a pool address; the
+  // pure-epoch field payout then credits that miner's share to the beneficiary instead of the miner, so a
+  // pool can collect and redistribute by contribution. The beneficiary map is root-committed (folded into
+  // computeStateRoot, absent/byte-identical while empty) and set_beneficiary is REJECTED before this epoch,
+  // so the map stays empty and the root + payouts are byte-identical to today until it is armed. 0 = dormant.
+  // ARMED for 3.1.1: activates at this epoch. It is set safely AFTER the coordinated all-masters 3.1.1
+  // deploy window, so every finalizing node understands set_beneficiary before the first one can be applied
+  // (a mixed 3.1.0/3.1.1 electorate past this epoch would fork on the first accepted set_beneficiary). Until
+  // the epoch, set_beneficiary is still rejected and the beneficiary map stays empty, so the root is
+  // byte-identical to today. If the coordinated deploy cannot complete before this epoch, push it out and
+  // rebuild rather than risk a mixed-version activation.
+  POOL_BENEFICIARY_ACTIVATION_EPOCH: 357040358,
 
   // Storage-weighted emission. Hosting the field's authorized model weights is real, costly work, so a
   // contributor that serves more model data earns a bounded bonus on its emission split. The bonus is a

@@ -88,21 +88,26 @@ export function startMiner(node: ZiraNode, identity: Keypair, cfg: MinerConfig):
   // Serve-baseline retry (opt-in, self-guarded no-op otherwise): keep trying to fetch + serve the baseline
   // model until this node can answer, so a node that booted before peers were reachable still comes up serving.
   const baseIv = setInterval(() => { if (!node.models.canServe()) void node.models.reconcileServeBaseline(); }, 30_000);
-  // Full-utilization keepalive (STRICTLY opt-in via ZIRA_FULL_UTILIZATION): when there are no in-flight queries
-  // for several checks, run one short throwaway warmup generation (result DISCARDED, never published, never
-  // settled) so the accelerator stays warm. Cheap and fork-safe; the interval is not even created when off.
-  const fullUtilization = process.env.ZIRA_FULL_UTILIZATION === "1" || process.env.ZIRA_FULL_UTILIZATION?.toLowerCase() === "true";
+  // Utilization keepalive: keep the accelerator ENGAGED whenever mining is ON, so a node that opted into
+  // contributing compute actually uses its GPU/CPU instead of idling between field queries (the reactive
+  // answer loop above only runs when a query is open, so a quiet field left the hardware doing nothing). When
+  // idle for a few checks it runs ONE short warmup generation whose result is DISCARDED (never published,
+  // never settled), so it is fully fork-safe and off the state root; real distributed inference still comes
+  // from answering field queries. Default ON (gated by canServe(), which is false unless mining is enabled);
+  // opt out with ZIRA_FULL_UTILIZATION=0 (e.g. a battery laptop that should idle when no real query needs it).
+  const fuEnv = process.env.ZIRA_FULL_UTILIZATION?.toLowerCase();
+  const keepaliveOff = fuEnv === "0" || fuEnv === "false" || fuEnv === "off";
   const KEEPALIVE_IDLE_CHECKS = 4;   // consecutive idle checks (~20s) before warming
   let idleChecks = 0;
   let keepaliveRunning = false;
-  const kaIv = fullUtilization ? setInterval(() => {
+  const kaIv = keepaliveOff ? null : setInterval(() => {
     if (stopped || keepaliveRunning) return;
-    if (!node.models.canServe() || inFlight.size > 0) { idleChecks = 0; return; }
+    if (!node.models.canServe() || inFlight.size > 0) { idleChecks = 0; return; } // canServe() => mining is on + a model is servable
     if (++idleChecks < KEEPALIVE_IDLE_CHECKS) return;
     idleChecks = 0;
     keepaliveRunning = true;
     void node.models.warmupKeepalive().finally(() => { keepaliveRunning = false; });
-  }, 5000) : null;
+  }, 5000);
   // Keep the serve-health probe fresh (probeServable self-throttles to ~5 min); announce() only advertises
   // this node once it has PROVEN it can generate, so a broken model/endpoint never becomes a phantom provider.
   const probeIv = setInterval(() => { void node.models.probeServable(Date.now()); }, 60_000);

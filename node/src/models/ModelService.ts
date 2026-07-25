@@ -3,7 +3,7 @@
 // signed enters the field. Any node that holds the file may serve it to others (so distribution is
 // still peer to peer and scalable), but not just anyone can introduce a model. For miners, this
 // loads a model into the inference engine to answer the field.
-import { readFileSync, writeFileSync, existsSync, statfsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, statfsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { freemem, totalmem, cpus } from "node:os";
 import http from "node:http";
@@ -68,6 +68,9 @@ export class ModelService {
     this.founderAddresses = typeof founderAddresses === "function" ? founderAddresses : () => [founderAddresses];
     this.store = new ModelStore(dataDir);
     this.miningPath = join(dataDir, "mining.json");
+    this.gpuDisabledPath = join(dataDir, "gpu-disabled");
+    this.gpuForcedOff = existsSync(this.gpuDisabledPath);   // a prior GPU crash/hang persisted this: stay on CPU
+    if (this.gpuForcedOff) log.warn("GPU inference disabled from a prior crash/hang (gpu-disabled marker); serving on CPU. Delete the gpu-disabled file in the data dir to retry the GPU.");
     this.mining = this.loadMining();
   }
   private founderAddresses: () => Address[];
@@ -549,6 +552,13 @@ export class ModelService {
   // endpoint). Used to tier answer concurrency on real acceleration rather than on mining.gpuLayers, which can
   // be 0 on a real GPU. Purely local scheduling; never touches consensus.
   private subprocessHasGpu = false;
+  // GPU crash-loop breaker (AMD/any vendor). If the serving subprocess crashed or hung during GPU init, we
+  // attribute it to the GPU backend (not the model), force CPU, and persist a marker so future starts skip the
+  // GPU that just failed, so a bad accelerator degrades a miner to CPU instead of crash-looping it. Cleared on
+  // a clean GPU start. Reset by deleting the marker file. Purely local health; never a consensus surface.
+  private gpuDisabledPath = "";
+  private gpuForcedOff = false;
+  private cpuOnlyModels = new Set<string>();
   // Capability tier from hardware detection (gpu-heavy / gpu-strong / ...), set by ZiraNode when it detects
   // hardware. Lets a stronger accelerator run more generations in parallel. Soft/local only.
   private hwTier: string | null = null;
@@ -568,6 +578,21 @@ export class ModelService {
   private markServeFailure(id: string): void {
     this.serveFailures.set(id, Date.now());
     log.warn(`model ${id.slice(0, 12)} failed to serve; skipping it locally for ~30m and falling back to the next servable model`);
+  }
+  /** A serving subprocess died or never became ready. If it was a GPU attempt, blame the GPU (not the model):
+   *  force CPU, persist the crash-loop breaker, and let the next reconcile tick respawn the SAME model on CPU,
+   *  so any card that crashes/hangs (AMD/Intel/Nvidia) degrades a miner to CPU instead of wedging it. Only when
+   *  a CPU attempt also fails is the model itself marked unservable. */
+  private onSubprocessLoadFailed(id: string, wasGpuAttempt: boolean): void {
+    if (wasGpuAttempt && !this.cpuOnlyModels.has(id)) {
+      this.gpuForcedOff = true;
+      this.cpuOnlyModels.add(id);
+      try { writeFileSync(this.gpuDisabledPath, String(Date.now())); } catch { /* */ }
+      this.serveFailures.delete(id);   // don't penalize the model for a GPU fault: allow the immediate CPU retry
+      log.warn(`GPU inference failed for model ${id.slice(0, 12)}; disabling GPU and falling back to CPU (persisted crash-loop breaker)`);
+    } else {
+      this.markServeFailure(id);       // failed even on CPU => genuinely unservable model here
+    }
   }
 
   private async ensureSubprocessInference(id: string): Promise<void> {
@@ -596,8 +621,14 @@ export class ModelService {
     const explicitGpuCap = this.mining.useRecommendedHardware === false
       || (process.env.ZIRA_GPU_LAYERS !== undefined && process.env.ZIRA_GPU_LAYERS !== "");
     const gpuLayersEnv = explicitGpuCap ? { ZIRA_INFERENCE_GPU_LAYERS: String(Math.max(0, Math.floor(Number(this.mining.gpuLayers) || 0))) } : {};
+    // Crash-loop breaker: if the GPU already failed (this run or persisted from a prior run), force this
+    // subprocess to pure CPU so a bad accelerator can never wedge the miner. Otherwise attempt GPU.
+    const forceCpu = this.gpuForcedOff || this.cpuOnlyModels.has(id);
+    const wasGpuAttempt = !forceCpu;
+    const gpuOffEnv = forceCpu ? { ZIRA_GPU_BACKEND: "false", ZIRA_INFERENCE_GPU_LAYERS: "0" } : {};
+    if (forceCpu) log.info(`serving model ${id.slice(0, 12)} on CPU (GPU disabled by crash-loop breaker)`);
     const proc = spawn(process.execPath, [entry], {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", ZIRA_INFERENCE_SERVER: "1", ZIRA_INFERENCE_MODEL: gguf, ZIRA_INFERENCE_PORT: String(port), ZIRA_RESET: "0", ZIRA_BOOTSTRAP: "", ...gpuLayersEnv },
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", ZIRA_INFERENCE_SERVER: "1", ZIRA_INFERENCE_MODEL: gguf, ZIRA_INFERENCE_PORT: String(port), ZIRA_RESET: "0", ZIRA_BOOTSTRAP: "", ...gpuLayersEnv, ...gpuOffEnv },
       stdio: "ignore",
       windowsHide: true,
     });
@@ -608,9 +639,10 @@ export class ModelService {
     proc.on("error", (e) => { log.warn(`inference subprocess spawn error: ${(e as Error).message}`); this.markServeFailure(id); if (this.inferenceProc === proc) this.inferenceProc = null; });
     proc.on("exit", (code) => {
       log.warn(`inference subprocess exited (code ${code})`);
-      // Exited before it ever served this model => the model failed to load here (e.g. an incompatible arch).
-      // Record it so selection skips it and falls back to the next servable model instead of respawn-looping.
-      if (!becameReady) this.markServeFailure(id);
+      // Exited before it ever served this model => load failed here (incompatible arch, OR a GPU crash). Blame
+      // the GPU first (retry CPU) and only mark the model unservable if CPU also fails, so an AMD/GPU crash
+      // degrades to CPU instead of dropping the model.
+      if (!becameReady) this.onSubprocessLoadFailed(id, wasGpuAttempt);
       process.removeListener("exit", killChild);
       if (this.inferenceProc === proc) {
         this.inferenceProc = null;
@@ -628,10 +660,13 @@ export class ModelService {
         this.endpointIsSubprocess = true;
         this.servingId = id;
         this.subprocessHasGpu = await this.fetchSubprocessGpu(port);
+        // A clean GPU start proves the accelerator works here: clear any crash-loop breaker so the machine
+        // uses its GPU again (e.g. after a driver fix). A working CPU-only start leaves the marker in place.
+        if (this.subprocessHasGpu) { this.gpuForcedOff = false; this.cpuOnlyModels.delete(id); try { rmSync(this.gpuDisabledPath, { force: true }); } catch { /* */ } }
         log.info(`inference subprocess ready; serving via ${this.mining.endpoint} (gpu=${this.subprocessHasGpu})`);
       } else if (!ok) {
-        log.warn("inference subprocess did not become ready; staying in field-coordinator mode");
-        this.markServeFailure(id); // never became ready => skip this model and fall back to the next servable one
+        log.warn("inference subprocess did not become ready; a GPU hang or slow load, retrying on CPU if it was a GPU attempt");
+        this.onSubprocessLoadFailed(id, wasGpuAttempt); // hang/never-ready => blame GPU first, else mark model
         killChild();
         if (this.inferenceProc === proc) this.inferenceProc = null;
       }

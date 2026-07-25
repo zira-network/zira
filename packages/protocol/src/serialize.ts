@@ -47,6 +47,7 @@ export function buildObservationBody(input: {
   type: ObservationType; observer: PublicKey; timestamp: number;
   subject: string; domain: Domain; value?: number; proofRef?: Hex;
   confidence: number; sourceHashes: Hex[]; storageGiB?: number; vouchedMiners?: string[];
+  minerWork?: Record<string, number>;
 }): ObservationBody {
   const body: ObservationBody = {
     type: input.type,
@@ -65,6 +66,17 @@ export function buildObservationBody(input: {
   // when empty => identical hash to before.
   if (input.vouchedMiners && input.vouchedMiners.length > 0) {
     body.vouchedMiners = [...new Set(input.vouchedMiners)].filter((a) => /^zir1[0-9a-z]{6,}$/.test(a)).sort().slice(0, 64);
+  }
+  // Per-miner work weights (master-only): sanitized to valid addresses with finite positive integer weights,
+  // bounded, and rebuilt with SORTED keys so the canonical form is deterministic across nodes. Absent when
+  // empty => identical hash to before.
+  if (input.minerWork) {
+    const entries = Object.entries(input.minerWork)
+      .filter(([a, w]) => /^zir1[0-9a-z]{6,}$/.test(a) && Number.isFinite(w) && w > 0)
+      .map(([a, w]) => [a, Math.floor(w)] as [string, number])
+      .sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))
+      .slice(0, 64);
+    if (entries.length > 0) body.minerWork = Object.fromEntries(entries);
   }
   return body;
 }

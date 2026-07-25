@@ -61,7 +61,3 @@ dist-*/
 *.tmp/
 .cache/
 apps/desktop/llama-bundle/
-
-# stable-diffusion + llama engine binaries (provided at build time, never committed)
-sd-bundle/
-llama-bundle/

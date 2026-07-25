@@ -134,6 +134,13 @@ export interface ObservationBody {
   // vouched by >= PROTOCOL.MIN_STORAGE_VOUCHERS distinct masters in the sealed Lock earns heartbeat emission.
   // Absent on non-master / no-vouch observations => identical canonical form to before.
   vouchedMiners?: Address[];
+  // Master-only work weights: for each vouched miner, this observer's (a genesis master's) computed
+  // contribution weight in basis points = tier (answered-inference > storage > liveness) x its ZTI. Part of
+  // the signed body and gossiped, so the WORK-WEIGHTED field payout can size each miner's share from the
+  // MEDIAN of the masters' sealed weights — deterministic, and it lets ZTI (soft per-node state) drive pay
+  // without being read live into the root. Absent on non-master / pre-feature observations => the payout
+  // falls back to the flat split (identical canonical form to before).
+  minerWork?: Record<Address, number>;
 }
 export interface SignedObservation extends ObservationBody { id: Hex; sig: Signature; }
 
@@ -161,7 +168,13 @@ export type TxKind =
   // committed validator — can keep miners paid when the primary settler (box1) is down. Rejected before the
   // decentralization activation epoch, only accepted from the root-committed {masters ∪ validators} set, and
   // idempotent per bucket via a root-committed watermark, so two racing settlers can never double-pay.
-  | "pool_payout";
+  | "pool_payout"
+  // Pooled payouts: a miner signs this to route its field-participation rewards to a pool. `to` is the pool
+  // beneficiary address (or the miner's own address to clear it and go back to direct earning). The
+  // beneficiary is recorded in a root-committed map and the pure-epoch field payout credits the pool
+  // instead of the miner. Rejected before POOL_BENEFICIARY_ACTIVATION_EPOCH, so it is dormant/root-neutral
+  // until armed. Signed by the miner (from), so only the miner can redirect its own rewards.
+  | "set_beneficiary";
 export interface TxBody {
   network: NetworkId; from: Address; fromPubKey: PublicKey; to: Address;
   amountUZIR: uZIR; feeUZIR: uZIR; nonce: number; kind: TxKind;

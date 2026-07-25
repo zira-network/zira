@@ -411,8 +411,9 @@ const PUBLIC_GET_ROUTES = new Set<string>([
   // events status (read), own-task STATUS read (does not run inference), governance/objects reads
   "/events/status", "/own-task/status",
   "/governance/proposals", "/objects", "/agreements", "/recommendations",
-  // text-to-image (2.9.0, dormant unless ZIRA_IMAGE_ENABLE=1): poll a submitted image job's status/result.
-  "/image/result",
+  // text-to-image (2.9.0, dormant unless ZIRA_IMAGE_ENABLE=1): poll a submitted image job's status/result,
+  // and fetch the delivered PNG (B1 byte delivery) once a serving provider has uploaded it.
+  "/image/result", "/image/png",
 ]);
 // Public POST submits: already IP-rate-limited (F5) and consensus-validated; safe for anonymous web/mobile
 // clients. These are the ask/observe/answer paths plus signed-tx submission (a tx must carry a valid
@@ -429,8 +430,9 @@ const PUBLIC_POST_ROUTES = new Set<string>([
   "/anchors/event",
   // publishing soft-state resonators/tasks is signed + validated like the field gossip it mirrors.
   "/resonator", "/task",
-  // text-to-image (2.9.0, dormant unless ZIRA_IMAGE_ENABLE=1): submit an image job; ingest a provider commitment.
-  "/image/submit", "/image/commit",
+  // text-to-image (2.9.0, dormant unless ZIRA_IMAGE_ENABLE=1): submit an image job; ingest a provider
+  // commitment; deliver the generated PNG (B1) for a settled job (dHash-verified against the settled hash).
+  "/image/submit", "/image/commit", "/image/deliver",
 ]);
 
 async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: ServerResponse, q: URLSearchParams, opts: RpcOptions): Promise<void> {
@@ -624,6 +626,9 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
         { prompt: String(b.prompt ?? ""), params: b.params, modelId: String(b.modelId ?? ""), seed: (Number(b.seed) || 0) | 0, asker: String(b.asker ?? "") },
         Date.now());
       if (!job) return json(res, { error: "could not open image job (disabled or at capacity)" }, 400);
+      // B2: if this node has the SD engine armed, generate + commit + deliver in the background (heavy work,
+      // only where imageReady is true — a GPU serving node, never a box). Fire-and-forget; the asker polls.
+      void node.serveImageJob(job.jobId).catch(() => {});
       return json(res, { jobId: job.jobId, paramsHash: job.paramsHash, priceUZIR: imagePriceUZIR(job.params) });
     }
     case "GET /image/result": {
@@ -647,6 +652,16 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
     case "POST /image/generate": { const b = await body(req);
       const out = await node.generateImageLocal({ prompt: String(b.prompt ?? ""), params: b.params, seed: (Number(b.seed) || 0) | 0 });
       return json(res, out, out.ok ? 200 : 200);
+    }
+    // B1 network image delivery: a serving provider uploads its PNG for a settled job it agreed on; the asker
+    // then fetches it by jobId. dHash-verified against the settled canonical hash so a wrong image is rejected.
+    case "POST /image/deliver": { const b = await body(req);
+      const out = await node.deliverImagePng(String(b.jobId ?? ""), String(b.provider ?? ""), String(b.png ?? b.pngBase64 ?? ""));
+      return json(res, out, 200);
+    }
+    case "GET /image/png": {
+      const out = node.getImagePng(q.get("id") ?? q.get("jobId") ?? "");
+      return out ? json(res, { found: true, ...out }) : json(res, { found: false });
     }
 
     // ---- providers + query fusion ----

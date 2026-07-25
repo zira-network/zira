@@ -51,16 +51,33 @@ export async function runInferenceServer(modelPath: string, port: number): Promi
   // node-llama-cpp is an optional native dependency loaded dynamically, the same way the in-process
   // path loads it; here it is the only thing this process does.
   const mod = (await import("node-llama-cpp" as string)) as {
-    getLlama: () => Promise<{ loadModel: (o: { modelPath: string; gpuLayers?: number }) => Promise<LlamaModelLike>; gpu?: string }>;
+    getLlama: (o?: { gpu?: string | boolean }) => Promise<{ loadModel: (o: { modelPath: string; gpuLayers?: number }) => Promise<LlamaModelLike>; gpu?: string }>;
     LlamaChatSession: LlamaChatSessionCtor;
   };
-  const llama = await mod.getLlama();
+  // Cross-vendor GPU with a clean CPU fallback so no card (AMD/Intel/Nvidia/Apple) ever bricks a miner: the
+  // parent forces ZIRA_GPU_BACKEND=false after a GPU crash/hang (crash-loop breaker), and even absent that a
+  // GPU init failure here degrades to CPU rather than exiting. "false" => straight to CPU.
+  const pref = process.env.ZIRA_GPU_BACKEND;
+  const gpuReq: string | boolean = pref === "false" ? false : (pref || "auto");
+  let llama = await mod.getLlama({ gpu: gpuReq }).catch(async () => mod.getLlama({ gpu: false }));
   const hasGpu = !!llama.gpu && llama.gpu !== "none" && llama.gpu !== "false";
   const sequences = contextSequences(hasGpu);
   const maxConcurrent = autoConcurrency(hasGpu, sequences);
-  const gpuLayers = resolveGpuLayers();
+  let gpuLayers = resolveGpuLayers();
   log.info(`inference engine ready (gpu=${llama.gpu || "none"}, gpuLayers=${gpuLayers}, sequences=${sequences}, concurrency=${maxConcurrent}); loading ${modelPath}`);
-  const model = await llama.loadModel({ modelPath, gpuLayers });
+  let model: LlamaModelLike;
+  try {
+    model = await llama.loadModel({ modelPath, gpuLayers });
+  } catch (e) {
+    // GPU offload failed at load (unsupported backend here / insufficient VRAM). Retry on pure CPU so the
+    // miner still serves instead of exiting and being marked a bad model by the parent.
+    if (hasGpu && gpuLayers !== 0) {
+      log.warn(`GPU model load failed (${(e as Error).message.slice(0, 90)}); retrying on CPU`);
+      gpuLayers = 0;
+      llama = await mod.getLlama({ gpu: false });
+      model = await llama.loadModel({ modelPath, gpuLayers: 0 });
+    } else throw e;
+  }
   // A small pool of sequences with explicit release per request. Each query is independent (fresh
   // session + sequence), so we MUST dispose the sequence afterwards or the context runs out of slots
   // ("No sequences left") after the first generation.

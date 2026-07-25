@@ -219,33 +219,53 @@ function parseFileProposals(content: string): { files: ProposedFile[]; prose: st
 // coming soon. The paid, multi-provider network path is staged on top of this.
 function ImageStudio({ open, onClose }: { open: boolean; onClose: () => void }) {
   const toast = useToast();
+  const { address } = useZira();
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
   const [img, setImg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   async function generate() {
     const p = prompt.trim();
     if (!p || busy) return;
-    setBusy(true); setErr(null); setImg(null);
+    setBusy(true); setErr(null); setImg(null); setStatus("");
     try {
-      const r = await NodeApi.imageGenerate({ prompt: p });
-      if (r.ok && r.dataUrl) setImg(r.dataUrl);
-      else { setErr(r.reason || "Generation failed."); if (r.refused) toast.push("That prompt is refused by the content-safety policy.", "warn"); }
+      // 1) If THIS machine has the image engine armed, generate locally (instant, private, free).
+      const local = await NodeApi.imageGenerate({ prompt: p }).catch(() => null);
+      if (local?.ok && local.dataUrl) { setImg(local.dataUrl); return; }
+      if (local?.refused) { setErr(local.reason || "That prompt is refused by the content-safety policy."); toast.push("Prompt refused by content-safety policy.", "warn"); return; }
+      // 2) No local engine: ask the NETWORK, like a field answer — a serving miner generates it and delivers
+      //    the image back, so you need no model of your own.
+      setStatus("Asking the field for an image...");
+      const sub = await NodeApi.imageSubmit({ prompt: p, modelId: "sdxl-base-1.0", asker: address ?? "" });
+      if (sub.disabled || !sub.jobId) { setErr(sub.reason || "No image machine is online yet. Try again once a serving node is up."); return; }
+      const jobId = sub.jobId;
+      const started = Date.now();
+      while (Date.now() - started < 90_000) {
+        await new Promise((r) => setTimeout(r, 2500));
+        const res = await NodeApi.imageResult(jobId).catch(() => null);
+        if (res?.settled) {
+          setStatus("The field agreed. Fetching your image...");
+          const png = await NodeApi.imagePng(jobId).catch(() => null);
+          if (png?.found && png.dataUrl) { setImg(png.dataUrl); return; }
+        }
+      }
+      setErr("The field agreed on an image but no machine delivered it in time. Try again.");
     } catch (e) { setErr(e instanceof Error ? e.message : "Generation failed."); }
-    finally { setBusy(false); }
+    finally { setBusy(false); setStatus(""); }
   }
   return (
     <Modal open={open} onClose={onClose} title="Generate an image">
       <div className="space-y-3">
         <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={3}
           onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void generate(); } }}
-          placeholder="Describe the image. Runs privately on your machine. Cmd/Ctrl+Enter to generate."
+          placeholder="Describe the image. Runs on your machine if armed, otherwise the field generates it for you. Cmd/Ctrl+Enter to generate."
           className="w-full resize-none rounded-lg border border-hairline bg-base p-3 text-sm text-text placeholder:text-faint outline-none focus:border-[var(--accent)]" />
         <div className="flex items-center justify-between">
-          <span className="text-[11px] text-faint">Runs on your machine. No ZIR, nothing uploaded.</span>
+          <span className="text-[11px] text-faint">Your machine if it can, otherwise the network makes it. No model of your own needed.</span>
           <Button variant="primary" onClick={() => void generate()} disabled={!prompt.trim() || busy}>{busy ? "Generating..." : "Generate"}</Button>
         </div>
-        {busy && <div className="flex items-center gap-2 text-sm text-muted"><Spinner /> The engine is drawing. The first run can take a while.</div>}
+        {busy && <div className="flex items-center gap-2 text-sm text-muted"><Spinner /> {status || "The engine is drawing. The first run can take a while."}</div>}
         {err && <div className="rounded-lg border border-hairline bg-base p-2 text-sm text-[var(--danger)]">{err}</div>}
         {img && (
           <div>

@@ -67,7 +67,10 @@ export class ImageCoordinator {
     this.maxJobs = opts.maxJobs ?? DEFAULTS.maxJobs;
     this.maxCommitmentsPerJob = opts.maxCommitmentsPerJob ?? DEFAULTS.maxCommitmentsPerJob;
     this.ttlMs = opts.ttlMs ?? DEFAULTS.ttlMs;
-    this.minAgree = opts.minAgree ?? DEFAULTS.minAgree;
+    // minAgree is env-tunable so a first deployment can run a single trusted generator (the founder's own GPU
+    // machine, never a box) with ZIRA_IMAGE_MIN_AGREE=1; the default keeps the 2-provider agreement guarantee.
+    const envMin = Number(process.env.ZIRA_IMAGE_MIN_AGREE);
+    this.minAgree = opts.minAgree ?? (envMin >= 1 ? envMin : DEFAULTS.minAgree);
     this.maxHamming = opts.maxHamming ?? DEFAULTS.maxHamming;
   }
 

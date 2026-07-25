@@ -27,7 +27,7 @@ export interface SupplyState {
  * supply totals. Two honest nodes with the same applied history compute the same root. This is
  * what checkpoints sign, so finality is over state, not over a chain of blocks.
  */
-export function computeStateRoot(accounts: AccountLeaf[], supply: SupplyState, founders: Address[] = [], anchors: Anchor[] = [], validators: Address[] = [], poolPayoutBucket = 0): Hex {
+export function computeStateRoot(accounts: AccountLeaf[], supply: SupplyState, founders: Address[] = [], anchors: Anchor[] = [], validators: Address[] = [], poolPayoutBucket = 0, beneficiaries: Array<[Address, Address]> = []): Hex {
   const leaves = accounts
     .filter((a) => a.balance !== 0 || a.nonce !== 0)
     .map((a) => ({ a: a.address, b: a.balance, n: a.nonce }))
@@ -48,7 +48,13 @@ export function computeStateRoot(accounts: AccountLeaf[], supply: SupplyState, f
   // => undefined => dropped by canonical => byte-identical to the pre-cutover root. Committed so a
   // fast-synced node knows which buckets are already paid and cannot re-accept an old one.
   const poolBucketLeaf = poolPayoutBucket > 0 ? poolPayoutBucket : undefined;
-  return hashHex(canonical({ accounts: leaves, anchors: anchorLeaves, founders: founderLeaves, supply: { e: supply.emitted, b: supply.burned, r: supply.reserve }, validators: validatorLeaves, poolBucket: poolBucketLeaf }));
+  // Pooled-payout beneficiary map (miner -> pool address). Empty => undefined => dropped by canonical =>
+  // BYTE-IDENTICAL to the pre-beneficiary root. set_beneficiary is rejected before activation, so this stays
+  // empty (root-neutral) until armed; then every node commits the same sorted map -> same root.
+  const beneficiaryLeaves = beneficiaries.length > 0
+    ? beneficiaries.map(([m, b]) => ({ m, b })).sort((x, y) => (x.m < y.m ? -1 : x.m > y.m ? 1 : 0))
+    : undefined;
+  return hashHex(canonical({ accounts: leaves, anchors: anchorLeaves, founders: founderLeaves, supply: { e: supply.emitted, b: supply.burned, r: supply.reserve }, validators: validatorLeaves, poolBucket: poolBucketLeaf, beneficiaries: beneficiaryLeaves }));
 }
 
 /**

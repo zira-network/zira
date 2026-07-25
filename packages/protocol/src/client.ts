@@ -64,6 +64,9 @@ export interface ZiraClient {
   // founder only, gated by a signed challenge proving the genesis key
   grantReserve(grantTx: SignedTx, reason: string, challenge: string, challengeSig: string): Promise<{ accepted: boolean; reason?: string }>;
   getReserveGrants(limit?: number): Promise<SignedTx[]>;
+  // pooled payouts: route this miner's field-participation rewards to a pool address (or the miner's own
+  // address to clear it and earn directly). Rejected by the node until pooled payouts activate on the network.
+  setBeneficiary(poolAddress: Address): Promise<{ accepted: boolean; reason?: string }>;
 }
 
 // REST mapping the coordinator implements. All POST bodies and GET responses are JSON.

@@ -93,6 +93,12 @@ export class State {
   // the emission pool). Advanced only by applied pool_payout txs; a bucket <= this is rejected, so two racing
   // settlers can never double-pay a cycle. 0 while dormant (no pool_payout exists) => dropped from the root.
   private lastPoolPayoutBucket = 0;
+  // Pooled payouts (mine in a pool): miner address -> pool beneficiary address. A set_beneficiary tx adds
+  // an entry; setting the beneficiary to the miner's own address removes it (back to direct earning). EMPTY
+  // until POOL_BENEFICIARY_ACTIVATION_EPOCH (set_beneficiary is rejected before it), so it is dropped from
+  // the state root and payouts are byte-identical to today. Folded into computeStateRoot when non-empty, so
+  // every node commits the identical map. Persisted in the snapshot; drives distributeFieldParticipation.
+  private beneficiaries = new Map<Address, Address>();
 
   private txPool = new Map<string, SignedTx>();
   private obsPool = new Map<string, SignedObservation>();
@@ -148,6 +154,17 @@ export class State {
   // Pure-epoch field-participation payout activation. Dormant (0) by default => root-neutral. Env override is a
   // TEST-ONLY seam (never set on live nodes, or they would disagree on when the payout mechanism changes).
   private readonly fieldPayoutActivationEpoch: number;
+  // Pooled payouts (set_beneficiary + payout routing) activation. Dormant (0) by default => root-neutral.
+  // Env override is a TEST-ONLY seam (never set on live nodes, or they would disagree on WHEN routing turns
+  // on and fork); real arming ships the constant in a release, coordinated-deployed to every node at once.
+  private readonly poolBeneficiaryActivationEpoch: number;
+  // Work-weighted field payout. Dormant (0) => flat split (byte-identical to today). When active, the base
+  // pool is split by each payee's converged work weight (median of the masters' sealed minerWork) instead of
+  // flat-per-peer. Env override is a TEST-ONLY seam; real arming ships the constant, coordinated-deployed.
+  private readonly workWeightedFieldPayoutActivationEpoch: number;
+  // Anchor earning weight. Dormant (0) => multiplier 1.0 (neutral). When active, a payee's field weight is
+  // scaled by its best-owned anchor class standing (root-committed). Env override is a TEST-ONLY seam.
+  private readonly anchorWeightActivationEpoch: number;
   // Single-finalizer (leader) finality. Dormant (0) => classic quorum. Env overrides are TEST/OPS seams:
   // the activation epoch ships in a release (never per-node, or nodes disagree on WHEN); the leader index is
   // the managed-failover lever — set identically on all surviving nodes to promote another genesis master.
@@ -163,6 +180,12 @@ export class State {
     this.txGapTtlEpochs = Number.isFinite(ttlOverride) && ttlOverride > 0 ? Math.floor(ttlOverride) : State.TX_GAP_TTL_EPOCHS;
     const fpo = Number(process.env.ZIRA_FIELD_PAYOUT_ACTIVATION_EPOCH);
     this.fieldPayoutActivationEpoch = Number.isFinite(fpo) && fpo > 0 ? Math.floor(fpo) : PROTOCOL.FIELD_PAYOUT_PURE_ACTIVATION_EPOCH;
+    const pba = Number(process.env.ZIRA_POOL_BENEFICIARY_ACTIVATION_EPOCH);
+    this.poolBeneficiaryActivationEpoch = Number.isFinite(pba) && pba > 0 ? Math.floor(pba) : PROTOCOL.POOL_BENEFICIARY_ACTIVATION_EPOCH;
+    const wwf = Number(process.env.ZIRA_WORK_WEIGHTED_FIELD_PAYOUT_ACTIVATION_EPOCH);
+    this.workWeightedFieldPayoutActivationEpoch = Number.isFinite(wwf) && wwf > 0 ? Math.floor(wwf) : PROTOCOL.WORK_WEIGHTED_FIELD_PAYOUT_ACTIVATION_EPOCH;
+    const awe = Number(process.env.ZIRA_FIELD_ANCHOR_WEIGHT_ACTIVATION_EPOCH);
+    this.anchorWeightActivationEpoch = Number.isFinite(awe) && awe > 0 ? Math.floor(awe) : PROTOCOL.FIELD_ANCHOR_WEIGHT_ACTIVATION_EPOCH;
     const sfa = Number(process.env.ZIRA_SINGLE_FINALIZER_ACTIVATION_EPOCH);
     this.singleFinalizerActivationEpoch = Number.isFinite(sfa) && sfa > 0 ? Math.floor(sfa) : PROTOCOL.SINGLE_FINALIZER_ACTIVATION_EPOCH;
     const fli = Number(process.env.ZIRA_FINALITY_LEADER_INDEX);
@@ -573,6 +596,17 @@ export class State {
       // Authorization + activation + idempotency are re-checked at APPLY time (they depend on the epoch and
       // evolving state); ingest only validates the static shape so a malformed tx never enters the pool.
     }
+    if (tx.kind === "set_beneficiary") {
+      // Dormant until POOL_BENEFICIARY_ACTIVATION_EPOCH. REJECT while dormant so a 3.1.1 node behaves
+      // byte-identically to a 3.1.0 node (which does not know this kind and also rejects it): it never enters
+      // the pool and never advances a nonce, so the state root stays identical until every node is on 3.1.1
+      // and the epoch is reached (a coordinated deploy). Introducing a new applied tx before then would fork.
+      if (!this.poolBeneficiaryActive(this.lastProcessedEpoch)) return { ok: false, isNew: false, reason: "pooled payouts are not active yet" };
+      // Signed by the miner (verifyTx above checked from's signature), so only the miner can redirect its
+      // own rewards. `to` is the pool beneficiary (or the miner's own address to clear). No value moves.
+      if (tx.amountUZIR !== 0) return { ok: false, isNew: false, reason: "set_beneficiary amount must be zero" };
+      if (!tx.to.startsWith("zir1")) return { ok: false, isNew: false, reason: "beneficiary address is invalid" };
+    }
     // Do NOT reject a tx whose epoch is already processed. A tx that arrives late (gossip delay, or
     // after the empty-epoch fast-forward raced lastProcessedEpoch ahead) must still be pooled; it is
     // applied at the next processed epoch (processEpoch applies every pooled tx whose epoch is <= the one
@@ -769,6 +803,22 @@ export class State {
     return this.fieldPayoutActivationEpoch > 0 && this.lastProcessedEpoch >= this.fieldPayoutActivationEpoch;
   }
 
+  /** Pooled payouts (set_beneficiary + payout routing) are live only at/after the activation epoch. Pure
+   *  function of epoch, so every node flips at the same boundary. Dormant (0) => never => root-neutral. */
+  private poolBeneficiaryActive(epoch: number): boolean {
+    return this.poolBeneficiaryActivationEpoch > 0 && epoch >= this.poolBeneficiaryActivationEpoch;
+  }
+
+  /** Resolve where a miner's field-payout share should land: its pool beneficiary if it set one and pooled
+   *  payouts are active, otherwise the miner itself. Deterministic (reads the root-committed map). */
+  private beneficiaryOf(miner: Address, epoch: number): Address {
+    if (!this.poolBeneficiaryActive(epoch)) return miner;
+    return this.beneficiaries.get(miner) ?? miner;
+  }
+
+  /** Read-only view of the pooled-payout beneficiary map (for RPC/status). */
+  beneficiaryFor(miner: Address): Address | null { return this.beneficiaries.get(miner) ?? null; }
+
   /** Converged, settle-lagged set of vouched miners eligible for the pure-epoch field payout. Reads the SAME
    *  settled observation window runField uses (SETTLE_ROUNDS back), so every node derives the identical set — no
    *  per-node peer view, no wall-clock. Sorted + bounded for a deterministic distribution. */
@@ -792,6 +842,53 @@ export class State {
       .slice(0, PROTOCOL.FIELD_PAYOUT_MAX_PAYEES);
   }
 
+  /** Per-miner work weight for the WORK-WEIGHTED field payout: the MEDIAN of the masters' sealed minerWork
+   *  values (tier x ZTI) for each miner, read from the SAME settled heartbeat window as sealedFieldPayees. The
+   *  median is a pure function of the converged observations, so every node derives the identical weight — this
+   *  is what lets soft per-node ZTI drive pay without ever entering the state root live. Miners with no sealed
+   *  weight (e.g. vouched only by a pre-feature master) default to the liveness weight at the call site. */
+  private sealedFieldWorkWeights(epoch: number): Map<string, number> {
+    const head = epoch - PROTOCOL.FIELD_PAYOUT_OBS_LAG_EPOCHS;
+    const minEpoch = head - WINDOW_ROUNDS + 1;
+    const latestPerMaster = new Map<string, SignedObservation>();
+    for (const o of this.obsPool.values()) {
+      if (o.subject !== PROTOCOL.FIELD_HEARTBEAT_SUBJECT) continue;
+      const e = epochOf(o.timestamp);
+      if (e < minEpoch || e > head) continue;
+      if (!this.isGenesisMaster(addressFromPubKey(o.observer))) continue;
+      const prev = latestPerMaster.get(o.observer);
+      if (!prev || o.timestamp > prev.timestamp) latestPerMaster.set(o.observer, o);
+    }
+    const perMiner = new Map<string, number[]>();
+    for (const o of latestPerMaster.values()) {
+      const mw = o.minerWork;
+      if (!mw) continue;
+      for (const [a, w] of Object.entries(mw)) {
+        if (!Number.isFinite(w) || w <= 0) continue;
+        const arr = perMiner.get(a) ?? [];
+        arr.push(Math.floor(w));
+        perMiner.set(a, arr);
+      }
+    }
+    const out = new Map<string, number>();
+    for (const [a, arr] of perMiner) {
+      arr.sort((x, y) => x - y);                                        // integer median (deterministic)
+      const mid = Math.floor(arr.length / 2);
+      const med = arr.length % 2 ? arr[mid]! : Math.floor((arr[mid - 1]! + arr[mid]!) / 2);
+      out.set(a, Math.max(1, med));
+    }
+    return out;
+  }
+
+  /** The best (highest) anchor CLASS standing owned by an address, from root-committed anchor state (A 0.95 ..
+   *  F 0.45), or 0 if it owns no seat. Pure function of the root, so every node reads the identical value — this
+   *  is why anchors can dynamically weight earning with no sealing and no load on the light master boxes. */
+  private bestAnchorZti(addr: string): number {
+    let best = 0;
+    for (const a of this.anchors.values()) if (a.owner === addr && a.zti > best) best = a.zti;
+    return best;
+  }
+
   /** Pure-epoch field-participation payout: at each bucket boundary distribute the fixed pool from the emission
    *  pool (this.settler) to the converged sealedFieldPayees, equal-split via largest-remainder for exact sums.
    *  NO gossiped tx: every node computes the identical credit, so payout balances can never fork on propagation
@@ -806,14 +903,45 @@ export class State {
     const pool = PROTOCOL.FIELD_PAYOUT_POOL_UZIR;
     const funder = this.acct(this.settler);
     if (funder.balance < pool) return;                                  // pool not yet accrued: defer, do not advance
-    const base = Math.floor(pool / payees.length);
-    let remainder = pool - base * payees.length;                       // largest-remainder: earliest-sorted take +1
+    // Amount per payee (aligned to the sorted payees). WORK-WEIGHTED when armed: split the pool proportional to
+    // each payee's converged work weight (median of the masters' sealed minerWork) so a node that answers
+    // inference earns the bulk, a storage host a minor share, and a mere-liveness node a small keep-alive.
+    // Dormant => the flat equal split, byte-identical to before. Both use integer largest-remainder for an
+    // exact pool sum, and both are a pure function of converged state, so every node computes the same credits.
+    let amounts: number[];
+    if (this.workWeightedFieldPayoutActivationEpoch > 0 && epoch >= this.workWeightedFieldPayoutActivationEpoch) {
+      const wmap = this.sealedFieldWorkWeights(epoch);
+      let weights = payees.map((a) => wmap.get(a) ?? PROTOCOL.FIELD_WEIGHT_LIVENESS_BP);
+      // Anchor earning weight (upcoming): scale a payee's weight by its best-owned anchor class standing, read
+      // live from root-committed anchor state (deterministic, no box load). Neutral (x1) while dormant.
+      if (this.anchorWeightActivationEpoch > 0 && epoch >= this.anchorWeightActivationEpoch) {
+        weights = weights.map((w, i) => {
+          const cz = this.bestAnchorZti(payees[i]!);
+          if (cz <= 0) return w;
+          return Math.max(1, Math.floor((w * (PROTOCOL.FIELD_WORK_WEIGHT_SCALE + Math.round(cz * PROTOCOL.FIELD_ANCHOR_BONUS_BP))) / PROTOCOL.FIELD_WORK_WEIGHT_SCALE));
+        });
+      }
+      const totalW = weights.reduce((s, w) => s + w, 0);
+      if (totalW <= 0) return;                                          // defensive: no weight to split by
+      amounts = weights.map((w) => Math.floor((pool * w) / totalW));
+      let rem = pool - amounts.reduce((s, a) => s + a, 0);
+      // distribute the remainder to the largest fractional parts, tie-break by sorted-payee index (deterministic)
+      const frac = payees.map((_, i) => ({ i, f: (pool * weights[i]!) % totalW }));
+      frac.sort((x, y) => y.f - x.f || x.i - y.i);
+      for (let k = 0; k < frac.length && rem > 0; k++, rem--) { const idx = frac[k]!.i; amounts[idx] = (amounts[idx] ?? 0) + 1; }
+    } else {
+      const base = Math.floor(pool / payees.length);
+      const remainder = pool - base * payees.length;                   // largest-remainder: earliest-sorted take +1
+      amounts = payees.map((_, i) => base + (i < remainder ? 1 : 0));
+    }
     funder.balance = subUZIR(funder.balance, pool, "field payout pool debit");
     const outputs: [string, number][] = [];
-    for (const a of payees) {
-      const amt = base + (remainder > 0 ? 1 : 0);
-      if (remainder > 0) remainder--;
-      if (amt > 0) { this.acct(a).balance = addUZIR(this.acct(a).balance, amt, "field payout credit"); outputs.push([a, amt]); }
+    for (let i = 0; i < payees.length; i++) {
+      const amt = amounts[i]!;
+      // Pooled payouts: work attribution stays by miner (sealedFieldPayees), but the credit is routed to the
+      // miner's pool beneficiary when one is set (root-committed map), so a pool collects and redistributes.
+      // Byte-identical to today while the map is empty (dormant). The display output records the payee.
+      if (amt > 0) { const payee = this.beneficiaryOf(payees[i]!, epoch); this.acct(payee).balance = addUZIR(this.acct(payee).balance, amt, "field payout credit"); outputs.push([payee, amt]); }
     }
     this.lastPoolPayoutBucket = bucket;                                 // advance the root-committed watermark
     // Off-root display record: one pooled entry, so wallets/explorer decompose per-miner slices exactly as today.
@@ -864,6 +992,22 @@ export class State {
       if (!this.isAuthorizedFounder(tx.from) || tx.amountUZIR !== 0 || !tx.to.startsWith("zir1") || tx.to === this.founder) return;
       this.authorizedFounders.delete(tx.to);
       this.authorizedFounders.add(this.founder);
+      sender.nonce += 1;
+      if (!sender.pubkey) sender.pubkey = tx.fromPubKey;
+      this.record({ ...tx, committedEpoch: epoch });
+      return;
+    }
+
+    if (tx.kind === "set_beneficiary") {
+      // Pooled payouts: record the miner's pool beneficiary in the root-committed map. Setting the
+      // beneficiary to the miner's own address clears it (back to direct earning). No value moves; the nonce
+      // advances so the tx is spent. Gated defensively (ingest already rejects while dormant): a no-op that
+      // does not even advance the nonce before activation, so it stays byte-identical to a 3.1.0 node.
+      if (!this.poolBeneficiaryActive(epoch)) return;
+      if (tx.amountUZIR !== 0 || !tx.to.startsWith("zir1")) return;
+      if (tx.to === tx.from) this.beneficiaries.delete(tx.from);
+      else this.beneficiaries.set(tx.from, tx.to);
+      this.acct(tx.to); // ensure the beneficiary account exists so a later credit has somewhere to land
       sender.nonce += 1;
       if (!sender.pubkey) sender.pubkey = tx.fromPubKey;
       this.record({ ...tx, committedEpoch: epoch });
@@ -1187,7 +1331,7 @@ export class State {
   stateRoot(): string {
     // `this.validators` is empty and `lastPoolPayoutBucket` is 0 (=> both omitted, root-neutral) until the
     // decentralization activation epoch, so the root is byte-identical to before the cutover shipped.
-    return computeStateRoot(this.accountLeaves(), this.supply, this.activeFounderAddresses(), this.anchorSeats(), this.validators, this.lastPoolPayoutBucket);
+    return computeStateRoot(this.accountLeaves(), this.supply, this.activeFounderAddresses(), this.anchorSeats(), this.validators, this.lastPoolPayoutBucket, [...this.beneficiaries.entries()]);
   }
 
   /**
@@ -1504,6 +1648,7 @@ export class State {
       anchors: this.anchorSeats(),
       validators: this.validators,   // sealed validator registry (empty while dormant); part of the root when active
       lastPoolPayoutBucket: this.lastPoolPayoutBucket,   // pool-payout idempotency watermark (0 while dormant)
+      beneficiaries: [...this.beneficiaries.entries()],  // pooled-payout map (empty while dormant); part of the root when active
     };
   }
   loadSnapshot(snap: any): void {
@@ -1533,6 +1678,11 @@ export class State {
     this.validators = Array.isArray(snap.validators) ? [...snap.validators] : [];
     this.validatorSet = new Set(this.validators);
     this.lastPoolPayoutBucket = typeof snap.lastPoolPayoutBucket === "number" ? snap.lastPoolPayoutBucket : 0;
+    // Restore the pooled-payout beneficiary map (part of the state root when active). Absent on
+    // pre-beneficiary snapshots => empty => root-neutral.
+    this.beneficiaries = new Map(Array.isArray(snap.beneficiaries)
+      ? snap.beneficiaries.filter((e: unknown): e is [Address, Address] => Array.isArray(e) && e.length === 2 && typeof e[0] === "string" && typeof e[1] === "string")
+      : []);
     // Re-assert the genesis master quorum after replacing accounts, so a restored node always knows the
     // bootstrap finality set even if an older snapshot predated it. Root-neutral; idempotent.
     this.seedGenesisMasters();

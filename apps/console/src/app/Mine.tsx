@@ -12,7 +12,7 @@ import { HexField } from "../components/brand";
 import { ResonanceField } from "../components/ResonanceField";
 import { NodeApi, type ModelRecommendation, type FieldModel, type MiningStatus, type Pricing } from "../lib/nodeApi";
 import { canonical, DOMAIN_META, PROTOCOL, type Domain, type HardwareProfile, type SignedTx } from "@zira/protocol";
-import { formatZir, timeAgo } from "../lib/format";
+import { formatZir, timeAgo, shortAddress } from "../lib/format";
 import { cn } from "../lib/cn";
 import { useZira } from "../store/useZira";
 import { loadReconciledHistory } from "../lib/history";
@@ -619,22 +619,71 @@ function YourMachine({
   );
 }
 
-// External mining pool (dormant preview, aligned to pools.html). Today mining pays each miner directly to
-// their own wallet. A later release will let you point your mining at a pool: paste the pool's ZIR address
-// and the pool collects and distributes rewards by contribution, while your machine does the same work.
+// External mining pool. A signed payout-beneficiary: you keep your own key and name a pool address, and the
+// network routes your field-participation rewards to that pool so it can distribute to members by
+// contribution. set_beneficiary is a signed tx; before the network's pooled-payout activation epoch the node
+// rejects it and returns a clear reason, which this surfaces, so the control is honest either way.
 function PoolSection() {
+  const { client, address, mining, refreshStatus } = useZira();
+  const requestUnlock = useUnlock((s) => s.request);
+  const toast = useToast();
+  const [pool, setPool] = useState("");
+  const [busy, setBusy] = useState(false);
+  // The address this miner currently routes to (null / own address means earning directly to own wallet).
+  const current = mining?.beneficiary && mining.beneficiary !== address ? mining.beneficiary : null;
+
+  async function connect() {
+    const dest = pool.trim();
+    if (!/^zir1[0-9a-z]{6,}$/.test(dest)) { toast.push("Enter a valid pool ZIR address (zir1...).", "warn"); return; }
+    if (dest === address) { toast.push("That is your own address. Use Earn directly instead.", "warn"); return; }
+    if (!client) return;
+    if (!(await requestUnlock())) return;
+    setBusy(true);
+    try {
+      const res = await client.setBeneficiary(dest);
+      if (res.accepted) { toast.push("Connected. Your mining rewards now route to the pool."); setPool(""); await refreshStatus(); }
+      else toast.push(res.reason || "Pooled payouts are not active on the network yet.", "warn");
+    } catch (e) { toast.push(e instanceof Error ? e.message : "could not connect to pool", "danger"); }
+    finally { setBusy(false); }
+  }
+
+  async function disconnect() {
+    if (!client || !address) return;
+    if (!(await requestUnlock())) return;
+    setBusy(true);
+    try {
+      const res = await client.setBeneficiary(address); // routing to self clears the pool: earn directly again
+      if (res.accepted) { toast.push("Disconnected. You are earning directly again."); await refreshStatus(); }
+      else toast.push(res.reason || "could not update", "warn");
+    } catch (e) { toast.push(e instanceof Error ? e.message : "could not disconnect", "danger"); }
+    finally { setBusy(false); }
+  }
+
   return (
     <Card>
       <div className="mb-2 flex items-center gap-2">
-        <Badge tone="neutral">Coming soon</Badge>
+        <Badge tone={current ? "teal" : "neutral"}>{current ? "Connected" : "Optional"}</Badge>
         <h3 className="text-sm font-semibold">Mine in a pool</h3>
       </div>
-      <p className="mb-3 text-xs text-muted">Today you mine directly and earn ZIR straight to your own wallet, no pool needed. Later you will be able to point your mining at a pool: paste a pool&apos;s ZIR address and the pool collects everyone&apos;s rewards and shares them out by contribution. Your machine keeps doing the same work; only where the reward lands changes.</p>
-      <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
-        <Input placeholder="Pool ZIR address (zir1...)" disabled className="mono opacity-60" />
-        <Button variant="secondary" disabled title="Pool mining is coming in a later release">Connect to pool</Button>
-      </div>
-      <p className="mt-1 text-[11px] text-faint">Direct earning stays available and is the default. Pool mining is opt-in and arrives in a later release.</p>
+      {current ? (
+        <>
+          <p className="mb-3 text-xs text-muted">Your field-participation rewards route to the pool below, which distributes to members by contribution. You keep your own key and your machine does the same work.</p>
+          <div className="mb-2 flex items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2">
+            <Link2 size={14} className="text-faint" />
+            <span className="mono text-xs">{shortAddress(current)}</span>
+          </div>
+          <Button variant="secondary" onClick={disconnect} disabled={busy}>{busy ? "Working..." : "Earn directly instead"}</Button>
+        </>
+      ) : (
+        <>
+          <p className="mb-3 text-xs text-muted">Earn directly to your own wallet, or name a pool: enter its ZIR address and the network routes your rewards there, so the pool distributes to members by contribution. You keep your own key and your machine does the same work; only where the reward lands changes.</p>
+          <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+            <Input value={pool} onChange={(e) => setPool(e.target.value)} placeholder="Pool ZIR address (zir1...)" className="mono" disabled={busy} />
+            <Button variant="secondary" onClick={connect} disabled={busy || !pool.trim()}>{busy ? "Working..." : "Connect to pool"}</Button>
+          </div>
+          <p className="mt-1 text-[11px] text-faint">Direct earning stays the default. Pool mining is opt-in, and you can switch back any time.</p>
+        </>
+      )}
     </Card>
   );
 }

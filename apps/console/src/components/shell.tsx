@@ -338,7 +338,9 @@ function TopBar({ title }: { title: string }) {
         <div className="hidden w-20 lg:block"><Meter value={userZti} /></div>
         <NetworkBadge stats={stats as NodeStats | null} mode={mode} quality={connQuality} latencyMs={latencyMs} base={base} />
         {providerOn && <Badge tone="indigo"><Radio size={12} /> Providing</Badge>}
-        <Badge tone="neutral">{phaseLabel(phase)}</Badge>
+        {/* The phase badge is only informative before mainnet is Live (Formation / First release).
+            On Live it just repeats the NetworkBadge "Live", so hide it to avoid a duplicate "Live". */}
+        {phase !== "live" && <Badge tone="neutral">{phaseLabel(phase)}</Badge>}
         <button
           className="rounded-full border border-hairline p-1.5 text-muted transition-colors hover:bg-elevated hover:text-text"
           title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}

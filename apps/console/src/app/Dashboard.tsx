@@ -127,6 +127,10 @@ export function Dashboard() {
   const { mode } = useZira();
   const [status, setStatus] = useState<StatusInfo | null>(null);
   const [stats, setStats] = useState<ExtendedStats | null>(null);
+  // Local node /stats, kept alongside the network view so sync is measured as "how far is my finalized
+  // head behind the network's finalized head" rather than "how far is finalized behind wall-clock" (the
+  // latter always shows the inherent settle-window lag and reads as a false "out of sync").
+  const [local, setLocal] = useState<ExtendedStats | null>(null);
   const [net, setNet] = useState<NetInfo | null>(null);
   const [series, setSeries] = useState<Series>(EMPTY_SERIES);
   const [refreshedAt, setRefreshedAt] = useState<number | null>(null);
@@ -136,18 +140,21 @@ export function Dashboard() {
 
   usePoll(() => {
     void (async () => {
-      const [stRes, nsRes, netRes] = await Promise.allSettled([
+      const [stRes, nsRes, lsRes, netRes] = await Promise.allSettled([
         NodeApi.status(),
         NodeApi.networkStats().catch(() => NodeApi.stats()),
+        NodeApi.stats(),
         NodeApi.net(),
       ]);
       const st = stRes.status === "fulfilled" ? stRes.value : null;
       const ns = nsRes.status === "fulfilled" ? nsRes.value : null;
+      const ls = lsRes.status === "fulfilled" ? lsRes.value : null;
       const ni = netRes.status === "fulfilled" ? netRes.value : null;
       if (st) { setStatus(st); setErr(""); } else if (stRes.status === "rejected") {
         setErr(stRes.reason instanceof Error ? stRes.reason.message : "node unreachable");
       }
       if (ns) setStats(ns);
+      if (ls) setLocal(ls);
       if (ni) setNet(ni);
 
       // Accumulate the rolling series from whatever we got (node does not store history).
@@ -156,7 +163,10 @@ export function Dashboard() {
       const pstat = (st?.providerStatus ?? null) as LiveProviderStatus | null;
       const peers = ni?.peers ?? ns?.peers ?? undefined;
       const providers = ns?.providersOnline ?? undefined;
-      const lag = ns && ns.currentEpoch !== undefined && ns.finalizedEpoch >= 0 ? Math.max(0, ns.currentEpoch - ns.finalizedEpoch) : undefined;
+      // How far the local node's finalized head trails the network's finalized head. Both carry the same
+      // settle-window offset from wall-clock, so it cancels: a caught-up node reads ~0, only a genuinely
+      // lagging node grows. On public mode local === network, so this is 0.
+      const lag = ns && ls && ns.finalizedEpoch >= 0 && ls.finalizedEpoch >= 0 ? Math.max(0, ns.finalizedEpoch - ls.finalizedEpoch) : undefined;
       const earnedTodayZir = pstat ? pstat.earnedTodayUZIR / 1_000_000 : undefined;
       const gpuUtil = typeof hw?.gpuUtil === "number" ? hw.gpuUtil : undefined;
       const cpuUtil = typeof hw?.cpuUtil === "number" ? hw.cpuUtil : undefined;
@@ -211,7 +221,7 @@ export function Dashboard() {
 
   const peers = net?.peers ?? stats?.peers ?? 0;
   const providers = stats?.providersOnline ?? 0;
-  const lag = stats && stats.currentEpoch !== undefined && stats.finalizedEpoch >= 0 ? Math.max(0, stats.currentEpoch - stats.finalizedEpoch) : -1;
+  const lag = stats && local && stats.finalizedEpoch >= 0 && local.finalizedEpoch >= 0 ? Math.max(0, stats.finalizedEpoch - local.finalizedEpoch) : -1;
   const nodeReachable = status !== null;
 
   // Composite node health: the primary lens. Driven by reachability, sync lag, and peer/provider presence.
@@ -441,7 +451,7 @@ export function Dashboard() {
               <div className="grid grid-cols-1 gap-3">
                 <SmallStat label="Peers" value={String(peers)} sub={peersBaseline !== null ? `avg ${peersBaseline.toFixed(1)}` : "collecting"} />
                 <SmallStat label="Providers online" value={String(providers)} sub="answering now" />
-                <SmallStat label="Sync lag" value={lag < 0 ? "..." : `${lag} epochs`} sub={stats ? `finalized ${stats.finalizedEpoch} / current ${stats.currentEpoch ?? "-"}` : undefined} />
+                <SmallStat label="Sync lag" value={lag < 0 ? "..." : lag === 0 ? "in sync" : `${lag} epochs`} sub={stats && local ? `local ${local.finalizedEpoch} / network ${stats.finalizedEpoch}` : undefined} />
               </div>
             </div>
           </DetailPanel>

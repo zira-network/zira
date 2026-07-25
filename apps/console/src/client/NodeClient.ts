@@ -348,6 +348,17 @@ export class NodeClient implements ZiraClient {
 
   listAnchors() { return this.get<Anchor[]>("/anchors"); }
   getStats() { return this.get<NetworkStats>("/stats"); }
+
+  /** Pooled payouts: route this miner's field-participation rewards to a pool address (or pass the miner's
+   *  own address to clear it and go back to direct earning). Signed locally by the unlocked wallet; the node
+   *  rejects it until pooled payouts activate, so the caller should surface that reason. */
+  async setBeneficiary(poolAddress: Address): Promise<{ accepted: boolean; reason?: string }> {
+    const from = Wallet.unlockedAddress();
+    if (!from) throw new Error("wallet is locked");
+    const stats = await this.getStats();
+    const nonce = await this.getNonce(from);
+    return this.submitTx(makeSignedTx({ network: stats.network, to: poolAddress, amountUZIR: 0, feeUZIR: 0, nonce, kind: "set_beneficiary", memo: "" }));
+  }
   async grantReserve(grantTx: SignedTx, _reason: string, _challenge: string, _challengeSig: string) {
     // the ledger enforces founder only: a reserve_grant not from the founder is rejected by all nodes
     return this.submitTx(grantTx);
