@@ -875,8 +875,13 @@ function providers(node: ZiraNode) {
 function queryFusion(node: ZiraNode, id: string): QueryFusion | { error: string } {
   const query = node.soft.queries.get(id);
   const domain = query?.domain ?? "general";
-  const answers = node.soft.answers.get(id) ?? [];
-  if (answers.length === 0) return { error: "no answers for this query" };
+  const rawAnswers = node.soft.answers.get(id) ?? [];
+  if (rawAnswers.length === 0) return { error: "no answers for this query" };
+  // Quality gate: drop incoherent/garbage answers (e.g. "clock!!!!!!!!!!") and answers produced by a
+  // retired (deprecated) model, so a single broken or outdated serving node can never surface a junk
+  // result. If nothing coherent remains, report no confident answer (the client retries) rather than junk.
+  const answers = rawAnswers.filter((a) => !looksLikeGarbage(a.answer) && !node.models.isDeprecated((a as { modelId?: string }).modelId));
+  if (answers.length === 0) return { error: "no coherent answer yet" };
   // ZIRA multi-intelligence fusion: many models/Resonators coordinate on one query. Weight each
   // contribution by its trust IN THIS DOMAIN (falling back to overall trust) times its self-reported
   // confidence — domain ZTI x confidence — so the most domain-credible voices dominate. Keep only the
@@ -910,6 +915,21 @@ function queryFusion(node: ZiraNode, id: string): QueryFusion | { error: string 
     confidenceScore: Number(contributors.reduce((x, c) => x + c.weight * c.zti, 0).toFixed(2)),
     domain,
   };
+}
+
+/** Heuristic garbage/incoherence detector for a field answer. Catches the broken-model failure mode a user
+ * saw ("clock!!!!!!!!!!!!" for "what is 4*5"): a long run of one repeated character, an answer dominated by
+ * punctuation, or a long string with essentially no distinct words. Short factual answers ("20", "Paris")
+ * pass. Pure/deterministic; used to drop junk before fusion so no single broken node surfaces it. */
+function looksLikeGarbage(s: string): boolean {
+  const t = (s || "").trim();
+  if (t.length < 1) return true;
+  if (/(.)\1{9,}/.test(t)) return true;                                   // 10+ of the same char in a row
+  const nonAlnum = t.replace(/[a-z0-9\s]/gi, "");
+  if (nonAlnum.length > 12 && nonAlnum.length / t.length > 0.5) return true; // punctuation spam
+  const words = new Set(t.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 1));
+  if (t.length > 24 && words.size <= 1) return true;                      // long but one/zero real words
+  return false;
 }
 
 /** True when two answers share most of their significant vocabulary, so fusion folds them by weight

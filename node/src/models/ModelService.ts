@@ -410,6 +410,14 @@ export class ModelService {
     return [...this.registry.values()].map((e) => e.meta).filter((m) => !m.deprecated).sort((a, b) => (b.version ?? 0) - (a.version ?? 0) || b.ts - a.ts);
   }
 
+  /** Whether a model id is retired (deprecated by the launch authority). Undefined/unknown ids are treated as
+   * NOT deprecated so answers/records without a model tag are never dropped. Used by the answer-quality gate to
+   * reject a result produced by a retired model, and by callers hiding retired models from user views. */
+  isDeprecated(id: string | undefined | null): boolean {
+    if (!id) return false;
+    return !!this.registry.get(id)?.meta.deprecated;
+  }
+
   /** Models that can serve a query in `domain`, ranked so the domain's preferred TYPE comes first (a
    * code query routes to code models, vision to image, etc.), then other matching-domain models, then
    * text/other generalists. Used to route a field query/task to the right kind of model. */
@@ -773,6 +781,15 @@ export class ModelService {
    * their models look under-replicated again and surviving peers re-fetch them. */
   async reconcileStorage(): Promise<void> {
     this.enforceStorageCap();
+    // Retired models are deleted from disk: drop the bytes of any deprecated model this node holds (except one
+    // it is actively serving), so a retired/incompatible model stops occupying storage and can never be served
+    // again. The tiny signed manifest sibling is kept so the model stays field-known (and re-fetchable if the
+    // launch authority ever reinstates it), only the heavy bytes go.
+    for (const e of this.registry.values()) {
+      if (e.meta.deprecated && e.meta.id !== this.servingId && this.store.has(e.meta.id)) {
+        if (this.store.remove(e.meta.id)) log.info(`evicted retired model ${e.meta.name} (${e.meta.id.slice(0, 12)})`);
+      }
+    }
     // A MINING node must hold at least one servable model so it actually ANSWERS (not just coordinates) and puts
     // the hardware to work. This is ensured on "Mine on" EVEN WHEN the full storage role is off — otherwise a
     // miner heartbeats and coordinates but never serves an answer. With storage off it fetches ONLY that one
@@ -1140,7 +1157,10 @@ export class ModelService {
     // storage-enabled peer can serve the bytes. Light peers sync metadata but should not force the
     // heavy-byte readiness target upward.
     const targetHosts = 2;
-    return [...this.registry.values()].map((e) => {
+    // Retired (deprecated) models are hidden from the field view: not shown in the chat picker, Discover, or
+    // the models list, matching "retired means gone". They are still tracked internally (so serving nodes
+    // stop selecting them and evict their bytes) but never surfaced to users.
+    return [...this.registry.values()].filter((e) => !e.meta.deprecated).map((e) => {
       const providers = e.peerIds.size;
       const distributionProgress = Math.max(0, Math.min(1, providers / targetHosts));
       // Surface the modality + routing domains on every model (defaulting legacy metas) so the picker
