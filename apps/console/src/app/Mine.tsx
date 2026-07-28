@@ -676,12 +676,12 @@ function PoolSection() {
         </>
       ) : (
         <>
-          <p className="mb-3 text-xs text-muted">Earn directly to your own wallet, or name a pool: enter its ZIR address and the network routes your rewards there, so the pool distributes to members by contribution. You keep your own key and your machine does the same work; only where the reward lands changes.</p>
+          <p className="mb-3 text-xs text-muted">You earn directly to your own wallet by default. To join a pool, paste its ZIR address, any pool can integrate ZIR, and your rewards route there. Your key stays yours; only where rewards land changes.</p>
           <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
             <Input value={pool} onChange={(e) => setPool(e.target.value)} placeholder="Pool ZIR address (zir1...)" className="mono" disabled={busy} />
-            <Button variant="secondary" onClick={connect} disabled={busy || !pool.trim()}>{busy ? "Working..." : "Connect to pool"}</Button>
+            <Button variant="secondary" onClick={connect} disabled={busy || !pool.trim()}>{busy ? "Working..." : "Connect"}</Button>
           </div>
-          <p className="mt-1 text-[11px] text-faint">Direct earning stays the default. Pool mining is opt-in, and you can switch back any time.</p>
+          <p className="mt-1 text-[11px] text-faint">Optional and reversible.</p>
         </>
       )}
     </Card>

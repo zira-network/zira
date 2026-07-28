@@ -21,7 +21,7 @@ import type { NetworkStats } from "@zira/protocol";
 import { formatZir } from "../lib/format";
 import { phaseLabel, featureEnabled } from "../lib/phase";
 import { isDesktop } from "../lib/platform";
-import { APP_VERSION } from "../lib/version";
+import { APP_VERSION, checkForUpdate } from "../lib/version";
 import { formatNodeVersion } from "../lib/version-compat";
 import type { ConnectionQuality } from "../lib/connection";
 
@@ -199,9 +199,16 @@ function Sidebar() {
 // nodes that do not yet report one on /rpc/stats; that is expected and never an error.
 function SidebarFooter() {
   const nodeVersion = useZira((s) => s.nodeVersion);
+  const [upd, setUpd] = useState<{ updateAvailable: boolean; url: string } | null>(null);
+  // Best-effort update check on mount: the app has no auto-updater, so this is how a user learns a newer
+  // build exists. Never blocks; failure/offline simply shows nothing.
+  useEffect(() => { let live = true; checkForUpdate().then((u) => { if (live) setUpd(u); }).catch(() => {}); return () => { live = false; }; }, []);
   return (
     <div className="border-t border-hairline px-5 py-4 text-[11px] leading-relaxed text-faint">
       Run by its users. Your keys, your node, your AI.
+      {upd?.updateAvailable && (
+        <a href={upd.url} target="_blank" rel="noopener noreferrer" className="mt-1.5 block font-medium text-[var(--teal)] hover:underline">A newer build is available &mdash; update</a>
+      )}
       {(() => {
         const nodeVer = formatNodeVersion(nodeVersion);
         // The node reports a bare "2.6.4" while APP_VERSION carries a "v" prefix ("v2.6.4"), so compare with
