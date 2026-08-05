@@ -734,6 +734,12 @@ export class ModelService {
    */
   private enforceStorageCap(): void {
     const cap = this.storageCapBytes();
+    // (1) Reclaim disk no model owns FIRST: abandoned URL-import temps (dl-*.part past the grace window),
+    // stray files at the models root, and whole dirs for ids that are neither registry-known nor actively
+    // downloading. This is what stops a failed/partial download from leaking disk the cap never sees.
+    try { this.store.sweepOrphans(new Set(this.registry.keys()), new Set(this.storageFetches)); }
+    catch (e) { log.debug("orphan sweep skipped", (e as Error).message); }
+    const unlimited = this.mining.storageEnabled && cap <= 0; // cap 0 = "Unlimited": keep everything
     // Cached models we actually hold bytes for, with their meta, newest first by recency for keeping.
     const cached = [...this.registry.values()]
       .filter((e) => this.store.hasValidGguf(e.meta.id))
@@ -742,18 +748,21 @@ export class ModelService {
     const evictable = cached
       .filter((c) => !this.isEssentialModel(c.id))
       .sort((a, b) => (b.providers - a.providers) || (a.ts - b.ts));
-    let used = this.store.totalBytes();
-    const overCap = () => used > cap;
+    // (2) Enforce against ACTUAL bytes on disk (finalized + partials + anything the sweep left), not just
+    // finalized meta, so on-disk usage can never sit above the cap. Loop evicting until real disk <= cap.
+    let used = this.store.diskBytes();
     for (const c of evictable) {
       if (!this.mining.storageEnabled) {
         if (this.store.remove(c.id)) { used -= c.size; this.registry.get(c.id)!.local = false; log.info(`storage disabled: evicted cached model ${c.id.slice(0, 12)} (${(c.size / 1e9).toFixed(2)} GB)`); }
         continue;
       }
-      if (!overCap()) break;
+      if (unlimited) break;
+      if (used <= cap) break;
       if (this.store.remove(c.id)) { used -= c.size; this.registry.get(c.id)!.local = false; log.info(`storage cap reached (${(cap / 1e9).toFixed(2)} GB): evicted cached model ${c.id.slice(0, 12)} (${(c.size / 1e9).toFixed(2)} GB)`); }
     }
-    if (this.mining.storageEnabled && overCap()) {
-      log.warn(`storage usage ${(used / 1e9).toFixed(2)} GB still over the ${(cap / 1e9).toFixed(2)} GB cap; remaining cached models are in use and were kept. Raise the cap to store more.`);
+    if (this.mining.storageEnabled && !unlimited) {
+      const disk = this.store.diskBytes();
+      if (disk > cap) log.warn(`storage usage ${(disk / 1e9).toFixed(2)} GB still over the ${(cap / 1e9).toFixed(2)} GB cap; remaining cached models are in use and were kept. Raise the cap to store more.`);
     }
   }
 
@@ -767,7 +776,10 @@ export class ModelService {
       const size = e.meta.sizeBytes ?? 0;
       if (this.store.remove(e.meta.id)) { e.local = false; cleared++; freedBytes += size; }
     }
-    if (cleared) log.info(`storage cleared on request: freed ${cleared} model(s), ${(freedBytes / 1e9).toFixed(2)} GB`);
+    // Also reclaim any orphaned temp/partial/untracked bytes on disk, so "Empty stored models" truly
+    // empties the folder down to the essential model, not just the registry-tracked models.
+    try { freedBytes += this.store.sweepOrphans(new Set([...this.registry.keys()].filter((id) => this.isEssentialModel(id))), new Set(this.storageFetches)); } catch { /* best-effort */ }
+    if (cleared || freedBytes) log.info(`storage cleared on request: freed ${cleared} model(s), ${(freedBytes / 1e9).toFixed(2)} GB`);
     return { cleared, freedBytes };
   }
 
@@ -834,7 +846,7 @@ export class ModelService {
         // An assigned model is fetched even when well replicated: the steward wants it on the whole network.
         if (wellReplicated && !needServing && !entry.meta.assigned) continue; // else spread, don't clone covered
       }
-      if (this.projectedStorageBytes() + (entry.meta.sizeBytes ?? 0) > cap) {
+      if (cap > 0 && this.projectedStorageBytes() + (entry.meta.sizeBytes ?? 0) > cap) {
         log.debug(`storage peer skipped ${entry.meta.name}: would exceed the storage cap`);
         continue;
       }
@@ -857,9 +869,12 @@ export class ModelService {
   /** Bytes currently held plus the projected size of in-flight fetches, so two concurrent reconciles (or a
    * fetch already running) cannot blow past the cap before they finalize. */
   private projectedStorageBytes(): number {
-    let n = this.store.totalBytes();
-    for (const id of this.storageFetches) n += this.registry.get(id)?.meta.sizeBytes ?? 0;
-    return n;
+    const finalized = this.store.totalBytes();
+    let inflight = 0;
+    for (const id of this.storageFetches) inflight += this.registry.get(id)?.meta.sizeBytes ?? 0;
+    // Eventual usage once in-flight fetches finalize, vs ACTUAL bytes on disk right now (which already
+    // includes written .part bytes); take the larger so the cap guard never under-counts.
+    return Math.max(this.store.diskBytes(), finalized + inflight);
   }
 
   /** Free bytes on the volume holding the data dir. If it cannot be determined (older runtime/platform), return
@@ -1132,17 +1147,17 @@ export class ModelService {
 
   /** Generate an answer for the USER'S OWN task using local inference only. Throws if local inference is
    * off or no local model/endpoint is available. Never touches the field, never publishes, never earns. */
-  async generateOwnTask(messages: { role: "user" | "assistant"; content: string }[], system: string): Promise<string> {
+  async generateOwnTask(messages: { role: "user" | "assistant"; content: string }[], system: string, onToken?: (t: string) => void): Promise<string> {
     if (!this.mining.ownTaskInference) throw new Error("local inference for your own tasks is off. Turn on \"My tasks only\" on the Mine page.");
     await this.ensureOwnTaskModel();
-    if (this.inference.loadedModel()) return this.inference.generate(system, messages);
+    if (this.inference.loadedModel()) return this.inference.generate(system, messages, onToken);
     if (this.mining.endpoint) {
       return chat({ endpoint: this.mining.endpoint, model: this.mining.endpointModel || "qwen2.5-coder:14b", messages: [{ role: "system", content: system }, ...messages] });
     }
     throw new Error("no local model is available yet. Load an authorized model on this node (storage peer) or set a local endpoint like Ollama.");
   }
 
-  async status(): Promise<{ mining: MiningConfig; engineAvailable: boolean; loadedModel: string | null; serving: boolean; serveHealthy: boolean; serveHealth: { healthy: boolean; lastProbeMs: number; lastOkMs: number; lastError: string | null }; ownTaskReady: boolean; ownTaskLabel: string; isFounder: boolean; local: ModelMeta[]; storageBytes: number; storageDownloadingBytes: number; known: { meta: ModelMeta; providers: number; targetHosts: number; distributionProgress: number; ready: boolean; local: boolean }[] }> {
+  async status(): Promise<{ mining: MiningConfig; engineAvailable: boolean; loadedModel: string | null; serving: boolean; serveHealthy: boolean; serveHealth: { healthy: boolean; lastProbeMs: number; lastOkMs: number; lastError: string | null }; ownTaskReady: boolean; ownTaskLabel: string; isFounder: boolean; local: ModelMeta[]; storageBytes: number; storageDownloadingBytes: number; storageDiskBytes: number; known: { meta: ModelMeta; providers: number; targetHosts: number; distributionProgress: number; ready: boolean; local: boolean }[] }> {
     return {
       mining: this.mining,
       engineAvailable: await this.inference.isAvailable(),
@@ -1156,6 +1171,7 @@ export class ModelService {
       local: this.store.list(),
       storageBytes: this.store.totalBytes(),
       storageDownloadingBytes: this.store.downloadingBytes(),
+      storageDiskBytes: this.store.diskBytes(),
       known: this.knownModels(),
     };
   }
@@ -1238,7 +1254,7 @@ export class ModelService {
     // /storage RPC); ZIRA_STORAGE_GB stays as a coarse alias. A persisted storageLimitGb (older state)
     // upgrades into storageCapBytes so the byte cap is always present and authoritative.
     if (process.env.ZIRA_STORAGE_BYTES) loaded.storageCapBytes = Number(process.env.ZIRA_STORAGE_BYTES) || loaded.storageCapBytes;
-    else if (process.env.ZIRA_STORAGE_GB) loaded.storageCapBytes = (Number(process.env.ZIRA_STORAGE_GB) || 1) * 1024 ** 3;
+    else if (process.env.ZIRA_STORAGE_GB !== undefined) { const g = Number(process.env.ZIRA_STORAGE_GB); if (Number.isFinite(g) && g >= 0) loaded.storageCapBytes = g * 1024 ** 3; } // 0 = unlimited
     else if (loaded.storageCapBytes === undefined && loaded.storageLimitGb !== undefined) loaded.storageCapBytes = loaded.storageLimitGb * 1024 ** 3;
     return ModelService.normalizeStorage(loaded);
   }
@@ -1247,11 +1263,15 @@ export class ModelService {
    * Cap floor is 1 byte; the GB mirror is at least 1 GB so the older UI never shows 0. */
   private static normalizeStorage(m: MiningConfig): MiningConfig {
     const MAX_CAP_BYTES = 4096 * 1024 ** 3; // 4 TiB ceiling, matches the prior 4096 GB bound
-    let cap = Number(m.storageCapBytes);
-    if (!Number.isFinite(cap) || cap <= 0) cap = STORAGE_DEFAULT_CAP_BYTES;
-    cap = Math.max(1, Math.min(MAX_CAP_BYTES, Math.floor(cap)));
-    m.storageCapBytes = cap;
-    m.storageLimitGb = Math.max(1, Math.round(cap / 1024 ** 3));
+    const cap = Number(m.storageCapBytes);
+    // Explicit 0 = "Unlimited": keep everything the node holds, no eviction (enforceStorageCap treats cap<=0
+    // as no limit). Distinguished from unset/invalid, which fall back to the 8 GiB default.
+    if (cap === 0) { m.storageCapBytes = 0; m.storageLimitGb = 0; return m; }
+    let c = cap;
+    if (!Number.isFinite(c) || c < 0) c = STORAGE_DEFAULT_CAP_BYTES;
+    c = Math.max(1, Math.min(MAX_CAP_BYTES, Math.floor(c)));
+    m.storageCapBytes = c;
+    m.storageLimitGb = Math.max(1, Math.round(c / 1024 ** 3));
     return m;
   }
 
@@ -1264,9 +1284,11 @@ export class ModelService {
   /** Bytes currently held in the local heavy-storage cache (cached model GGUFs). */
   storageUsedBytes(): number { return this.store.totalBytes(); }
 
-  /** GET /storage view: the soft-infra storage state. Consensus-neutral; not ledger state. */
-  storageState(): { enabled: boolean; capBytes: number; usedBytes: number } {
-    return { enabled: Boolean(this.mining.storageEnabled), capBytes: this.storageCapBytes(), usedBytes: this.storageUsedBytes() };
+  /** GET /storage view: the soft-infra storage state. Consensus-neutral; not ledger state. usedBytes is the
+   * rewarded (finalized-model) figure; diskBytes is the true on-disk footprint (incl partials/orphans) so the
+   * UI can show both honestly (downloaded == shown). capBytes 0 = Unlimited. */
+  storageState(): { enabled: boolean; capBytes: number; usedBytes: number; diskBytes: number } {
+    return { enabled: Boolean(this.mining.storageEnabled), capBytes: this.storageCapBytes(), usedBytes: this.storageUsedBytes(), diskBytes: this.store.diskBytes() };
   }
 
   /** POST /storage: set the storage toggle and/or byte cap. Persists across restarts and re-enforces

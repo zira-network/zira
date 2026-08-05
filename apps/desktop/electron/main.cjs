@@ -33,6 +33,40 @@ let nodeProc = null;
 let win = null;
 let consoleLoaded = false; // true once the window is showing the live Console (not the splash)
 
+// ---- storage / data directory (user-relocatable) ----
+// The node's data dir (wallet identity, ledger, and the heavy model cache) defaults to
+// userData/zira-data/<network>, but a user can move it to another drive (model caches are large). The
+// chosen path is persisted in a tiny desktop config and applied to the node's ZIRA_DATA_DIR at spawn.
+// app.getPath is only valid after 'ready', so these are functions, never module-level constants.
+function desktopConfigPath() { return path.join(app.getPath("userData"), "zira-desktop.json"); }
+function readDesktopConfig() { try { return JSON.parse(fs.readFileSync(desktopConfigPath(), "utf8")) || {}; } catch { return {}; } }
+function writeDesktopConfig(patch) { try { const c = { ...readDesktopConfig(), ...patch }; fs.writeFileSync(desktopConfigPath(), JSON.stringify(c, null, 2)); return c; } catch { return readDesktopConfig(); } }
+function defaultDataDir() { return path.join(app.getPath("userData"), "zira-data", NETWORK); }
+function resolveDataDir() {
+  const override = readDesktopConfig().dataDir;
+  if (override && typeof override === "string") {
+    try { fs.mkdirSync(override, { recursive: true }); return override; } catch { /* unwritable: fall back */ }
+  }
+  return defaultDataDir();
+}
+// Carry the small identity + ledger state (NOT the multi-GB models dir) into a new data dir so relocating
+// storage never loses the wallet/node identity; the model cache simply re-fills in the new location.
+function migrateSmallState(oldDir, newDir) {
+  const names = [
+    "identity.json", "peer-key.bin", "genesis-id", "mining.json", "provider.json",
+    "storage-peers.json", "founder-backups.json", "peers.json",
+    "events.jsonl", "snapshot.json", "zti-history.jsonl", "settler-progress.json",
+  ];
+  try { fs.mkdirSync(newDir, { recursive: true }); } catch { /* */ }
+  for (const name of names) {
+    try {
+      const src = path.join(oldDir, name);
+      const dst = path.join(newDir, name);
+      if (fs.existsSync(src) && !fs.existsSync(dst)) fs.copyFileSync(src, dst);
+    } catch { /* best-effort per file */ }
+  }
+}
+
 // Find the bundled core. In a packaged app it sits in resources/core; in dev it is node/dist.
 function coreEntry() {
   const packaged = path.join(process.resourcesPath || "", "core", "index.js");
@@ -50,7 +84,7 @@ function startNode() {
     showFatalInWindow("ZIRA Core not built", msg);
     return;
   }
-  const dataDir = path.join(app.getPath("userData"), "zira-data", NETWORK);
+  const dataDir = resolveDataDir();
   // On devnet the desktop app runs as the genesis steward by default, so a single founder machine
   // coordinates the network and seeds the field for testing. On mainnet set ZIRA_STEWARD only on
   // the founder's machine with the real genesis key.
@@ -289,7 +323,7 @@ function stopNode() { quitting = true; if (nodeProc) { try { nodeProc.kill(); } 
 // (env ZIRA_DEEP_RESET=1, or the Settings "Reset ZIRA" button which always deep-resets).
 async function fullReset(deep = process.env.ZIRA_DEEP_RESET === "1") {
   try {
-    const dataDir = path.join(app.getPath("userData"), "zira-data", NETWORK);
+    const dataDir = resolveDataDir();
     const resetNames = [
       "events.jsonl", "snapshot.json", "mining.json", "provider.json", "storage-peers.json",
       "founder-backups.json", "zti-history.jsonl", "peers.json", "identity.json", "peer-key.bin",
@@ -310,7 +344,7 @@ async function fullReset(deep = process.env.ZIRA_DEEP_RESET === "1") {
 // user should reach for first, and what an in-app "your local balance disagrees with the network" prompt runs.
 async function resyncLedger() {
   try {
-    const dataDir = path.join(app.getPath("userData"), "zira-data", NETWORK);
+    const dataDir = resolveDataDir();
     const ledgerNames = ["events.jsonl", "snapshot.json", "zti-history.jsonl", "settler-progress.json"];
     for (const name of ledgerNames) fs.rmSync(path.join(dataDir, name), { recursive: true, force: true });
   } catch { /* */ }
@@ -334,6 +368,139 @@ ipcMain.handle("zira:reset", async () => {
   app.relaunch();
   app.exit(0);
   return true;
+});
+
+// Settings -> storage folder. Report the current + default data dir so the UI can show where models live.
+ipcMain.handle("zira:getStoragePath", async () => {
+  return { dataDir: resolveDataDir(), default: defaultDataDir(), isCustom: !!readDesktopConfig().dataDir };
+});
+
+// Settings -> "Choose folder": open a native directory picker. Returns the chosen absolute path, or null
+// if the user cancelled. Does NOT apply it (the UI confirms, then calls zira:setStoragePath).
+ipcMain.handle("zira:chooseStoragePath", async () => {
+  try {
+    const res = await dialog.showOpenDialog(win, {
+      title: "Choose ZIRA storage folder",
+      properties: ["openDirectory", "createDirectory"],
+      defaultPath: resolveDataDir(),
+    });
+    if (res.canceled || !res.filePaths || !res.filePaths[0]) return null;
+    return res.filePaths[0];
+  } catch { return null; }
+});
+
+// Settings -> apply a new storage folder. Carries the small wallet/identity/ledger state into the new
+// location (the heavy model cache re-fills there per the cap), persists the choice, and relaunches so the
+// node runs on the new ZIRA_DATA_DIR. Wallet + node identity are preserved; funds live on chain regardless.
+ipcMain.handle("zira:setStoragePath", async (_e, dir) => {
+  try {
+    if (!dir || typeof dir !== "string") return { ok: false, error: "no folder chosen" };
+    const target = path.resolve(dir);
+    fs.mkdirSync(target, { recursive: true });
+    // writable check
+    try { const probe = path.join(target, ".zira-write-test"); fs.writeFileSync(probe, "ok"); fs.rmSync(probe, { force: true }); }
+    catch { return { ok: false, error: "that folder is not writable" }; }
+    const current = resolveDataDir();
+    if (path.resolve(current) === target) return { ok: true, dataDir: target, unchanged: true };
+    // Preserve identity + ledger unless the target already holds a ZIRA identity (pointing at an existing dir).
+    if (!fs.existsSync(path.join(target, "identity.json"))) migrateSmallState(current, target);
+    writeDesktopConfig({ dataDir: target });
+    try { stopNode(); } catch { /* */ }
+    app.relaunch();
+    app.exit(0);
+    return { ok: true, dataDir: target };
+  } catch (err) { return { ok: false, error: String((err && err.message) || err) }; }
+});
+
+// ---- build-agent workspace bridge (desktop only) ----
+// The Console build-agent works inside a folder the user explicitly opens. Everything below is scoped to
+// that one root: reads, writes, and command execution all resolve against it and refuse to escape it. The
+// renderer gates every write and every command behind explicit user approval; the main process enforces the
+// hard sandbox (path containment, output caps, timeouts) so a model can never touch anything outside the
+// chosen workspace. This is the native-execution surface that makes ZIRA usable for building real projects.
+let workspaceRoot = null;                    // absolute path of the opened folder, or null
+const AGENT_SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", ".next", ".cache", "target", ".venv", "__pycache__"]);
+const AGENT_MAX_FILES = 4000;                // bound the tree walk so a huge repo cannot hang the UI
+const AGENT_MAX_READ_BYTES = 1024 * 1024;    // 1 MB per file read into model context
+const AGENT_CMD_TIMEOUT_MS = 180000;         // 3 min per command
+const AGENT_CMD_MAX_OUTPUT = 200 * 1024;     // cap captured stdout+stderr at 200 KB
+
+// Resolve a workspace-relative path and REFUSE anything that escapes the root (path traversal, absolute
+// paths, symlink games are contained by the realpath-prefix check at call sites that create files).
+function agentResolve(rel) {
+  if (!workspaceRoot) throw new Error("no workspace is open");
+  const abs = path.resolve(workspaceRoot, rel || ".");
+  const root = path.resolve(workspaceRoot);
+  if (abs !== root && !abs.startsWith(root + path.sep)) throw new Error("path escapes the workspace");
+  return abs;
+}
+function agentWalk(dir, root, out, depth) {
+  if (out.length >= AGENT_MAX_FILES || depth > 12) return;
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    if (out.length >= AGENT_MAX_FILES) return;
+    if (e.name.startsWith(".") && e.name !== ".env.example") { if (e.isDirectory() && AGENT_SKIP_DIRS.has(e.name)) continue; }
+    if (e.isDirectory() && AGENT_SKIP_DIRS.has(e.name)) continue;
+    const abs = path.join(dir, e.name);
+    const rel = path.relative(root, abs).split(path.sep).join("/");
+    if (e.isDirectory()) { out.push({ path: rel, dir: true }); agentWalk(abs, root, out, depth + 1); }
+    else { let size = 0; try { size = fs.statSync(abs).size; } catch { /* */ } out.push({ path: rel, dir: false, size }); }
+  }
+}
+
+ipcMain.handle("agent:openWorkspace", async () => {
+  try {
+    const res = await dialog.showOpenDialog(win, { title: "Open a project folder", properties: ["openDirectory"] });
+    if (res.canceled || !res.filePaths || !res.filePaths[0]) return null;
+    workspaceRoot = path.resolve(res.filePaths[0]);
+    return workspaceRoot;
+  } catch { return null; }
+});
+ipcMain.handle("agent:workspace", async () => workspaceRoot);
+ipcMain.handle("agent:listFiles", async () => {
+  if (!workspaceRoot) return { root: null, files: [] };
+  const out = [];
+  agentWalk(workspaceRoot, workspaceRoot, out, 0);
+  return { root: workspaceRoot, files: out, truncated: out.length >= AGENT_MAX_FILES };
+});
+ipcMain.handle("agent:readFile", async (_e, rel) => {
+  try {
+    const abs = agentResolve(rel);
+    const st = fs.statSync(abs);
+    if (st.isDirectory()) return { ok: false, error: "that path is a directory" };
+    if (st.size > AGENT_MAX_READ_BYTES) return { ok: false, error: `file too large (${st.size} bytes; limit ${AGENT_MAX_READ_BYTES})` };
+    return { ok: true, content: fs.readFileSync(abs, "utf8") };
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+});
+ipcMain.handle("agent:writeFile", async (_e, rel, content) => {
+  try {
+    const abs = agentResolve(rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, typeof content === "string" ? content : String(content ?? ""));
+    return { ok: true, path: path.relative(workspaceRoot, abs).split(path.sep).join("/") };
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+});
+// Run a command inside the workspace. The RENDERER must have shown the exact command to the user for
+// approval first; the main process enforces cwd containment, a timeout, and an output cap. Uses the platform
+// shell so "npm test", "pytest", etc. work as typed. Never runs when no workspace is open.
+ipcMain.handle("agent:runCommand", async (_e, command) => {
+  if (!workspaceRoot) return { ok: false, error: "no workspace is open" };
+  if (!command || typeof command !== "string" || !command.trim()) return { ok: false, error: "empty command" };
+  return await new Promise((resolve) => {
+    let out = "", done = false;
+    const shell = process.platform === "win32" ? "cmd.exe" : "/bin/sh";
+    const shellArgs = process.platform === "win32" ? ["/d", "/s", "/c", command] : ["-c", command];
+    let child;
+    try { child = spawn(shell, shellArgs, { cwd: workspaceRoot, env: process.env, windowsHide: true }); }
+    catch (e) { return resolve({ ok: false, error: String((e && e.message) || e) }); }
+    const append = (b) => { if (out.length < AGENT_CMD_MAX_OUTPUT) out += b.toString(); };
+    child.stdout?.on("data", append);
+    child.stderr?.on("data", append);
+    const timer = setTimeout(() => { if (!done) { done = true; try { child.kill("SIGKILL"); } catch { /* */ } resolve({ ok: true, code: null, timedOut: true, output: out.slice(0, AGENT_CMD_MAX_OUTPUT) + "\n[timed out]" }); } }, AGENT_CMD_TIMEOUT_MS);
+    child.on("error", (err) => { if (!done) { done = true; clearTimeout(timer); resolve({ ok: false, error: String(err.message || err) }); } });
+    child.on("exit", (code) => { if (!done) { done = true; clearTimeout(timer); resolve({ ok: true, code, timedOut: false, output: out.slice(0, AGENT_CMD_MAX_OUTPUT) }); } });
+  });
 });
 
 // Plain relaunch (no wipe): used after importing a wallet so the node reloads its new identity.json.

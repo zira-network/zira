@@ -275,6 +275,51 @@ export class NodeClient implements ZiraClient {
     onToken: (t: string) => void; signal?: AbortSignal;
   }): Promise<{ answer: string; receipt: AnswerReceipt }> {
     const messages = [...args.history.map((h) => ({ role: h.role, content: h.content })), { role: "user" as const, content: args.question }];
+    const receipt: AnswerReceipt = {
+      contributors: [], domain: classify(args.question), fusedConfidence: 0,
+      challengeOpenUntil: Date.now(), proofAvailable: false, costUZIR: 0,
+    };
+    // Prefer REAL token streaming: the node emits Server-Sent Events as the local model generates, so the
+    // user sees live tokens (not a post-hoc word replay). An explicit server error is surfaced; a transport
+    // failure (no SSE support / older node) falls back to the plain JSON path below so behavior never regresses.
+    try {
+      const r = await fetch(this.rpc("/own-task/generate"), {
+        method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        body: JSON.stringify({ messages, stream: true }), signal: args.signal,
+      });
+      if (r.ok && r.body) {
+        const reader = r.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "", answer = "", streamed = false, serverError: string | null = null;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const parts = buf.split("\n\n"); buf = parts.pop() ?? "";
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line.startsWith("data:")) continue;
+            try {
+              const j = JSON.parse(line.slice(5).trim()) as { token?: string; done?: boolean; answer?: string; error?: string };
+              if (j.error) { serverError = j.error; }
+              else if (typeof j.token === "string") { streamed = true; answer += j.token; args.onToken(j.token); }
+              else if (j.done) { streamed = true; if (typeof j.answer === "string" && j.answer.length >= answer.length) answer = j.answer; }
+            } catch { /* ignore a partial/non-JSON frame */ }
+          }
+          if (args.signal?.aborted) { try { await reader.cancel(); } catch { /* */ } break; }
+        }
+        if (serverError) throw new Error(serverError);           // real error: do not silently retry
+        if (streamed) return { answer: answer.trim(), receipt };  // streamed successfully
+        // streamed nothing and no error: fall through to the JSON path
+      } else if (r.status && r.status !== 200) {
+        let m = r.statusText; try { m = ((await r.json()) as { error?: string }).error ?? m; } catch { /* */ } throw new Error(m);
+      }
+    } catch (e) {
+      if (args.signal?.aborted) throw e;
+      if (e instanceof Error && !/fetch|network|Failed to fetch|SSE|body/i.test(e.message)) throw e; // surface a real model error
+      // otherwise a transport issue: fall back to the non-stream path
+    }
+    // Fallback: plain JSON response, revealed progressively (older node or no SSE).
     const r = await fetch(this.rpc("/own-task/generate"), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ messages }), signal: args.signal,
@@ -284,10 +329,6 @@ export class NodeClient implements ZiraClient {
     let emitted = "";
     for (const w of answer.split(/(\s+)/)) { if (args.signal?.aborted) break; args.onToken(w); emitted += w; await new Promise((res) => setTimeout(res, 8)); }
     if (args.signal?.aborted) answer = emitted;
-    const receipt: AnswerReceipt = {
-      contributors: [], domain: classify(args.question), fusedConfidence: 0,
-      challengeOpenUntil: Date.now(), proofAvailable: false, costUZIR: 0,
-    };
     return { answer, receipt };
   }
 
@@ -355,10 +396,9 @@ export class NodeClient implements ZiraClient {
       status: "assigned", createdAt: now, assignedAt: now, expiresAt: now + TASK_DELIVER_TIMEOUT_MS,
     };
     await this.post("/task", { task });
-    // mark progress locally over time by re-publishing (any node will gossip it)
-    setTimeout(() => this.post("/task", { task: { ...task, status: "delivered", resultRef: "ref" } }).catch(() => {}), 2500);
-    setTimeout(() => this.post("/task", { task: { ...task, status: "verified" } }).catch(() => {}), 5000);
-    setTimeout(() => this.post("/task", { task: { ...task, status: "released" } }).catch(() => {}), 7500);
+    // The task stays "assigned" until the Resonator actually delivers and the result is verified on the
+    // ledger. We do NOT fabricate a delivered/verified/released progression: showing fake completion for
+    // work that has not happened would be dishonest. Real delivery advances the status via gossiped updates.
     return task;
   }
   getTask(id: string) { return this.get<Task | null>(`/task?id=${encodeURIComponent(id)}`); }

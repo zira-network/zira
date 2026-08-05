@@ -91,7 +91,7 @@ const AUTONOMOUS_RESONANCE_CYCLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_CYCLE_MS"
 const AUTONOMOUS_RESONANCE_SETTLE_MS = envMs("ZIRA_AUTONOMOUS_RESONANCE_SETTLE_MS", 30_000);
 const AUTONOMOUS_RESONANCE_MIN_ANSWERS = envInt("ZIRA_AUTONOMOUS_RESONANCE_MIN_ANSWERS", 2);
 // Release version reported by /rpc/stats (feature negotiation + "which build am I on"). Bump per release.
-const NODE_RELEASE_VERSION = "3.2.0";
+const NODE_RELEASE_VERSION = "3.3.0";
 
 /** Hamming distance between two equal-length hex strings (perceptual-hash comparison for image delivery).
  *  Mismatched lengths return a large distance so the caller rejects them. */
@@ -292,6 +292,7 @@ export interface MiningStatus {
   storageLimitGb: number;
   storageUsedBytes: number;
   storageDownloadingBytes: number;
+  storageDiskBytes: number;
   known: { meta: import("../models/types.js").ModelMeta; providers: number; targetHosts: number; distributionProgress: number; ready: boolean; local: boolean }[];
 }
 
@@ -1429,6 +1430,7 @@ export class ZiraNode {
       storageLimitGb: s.mining.storageLimitGb ?? Math.max(1, Math.round(this.models.storageCapBytes() / 1024 ** 3)),
       storageUsedBytes: s.storageBytes,
       storageDownloadingBytes: s.storageDownloadingBytes,
+      storageDiskBytes: s.storageDiskBytes,
       known: s.known,
     };
   }
@@ -1440,7 +1442,7 @@ export class ZiraNode {
   }
 
   /** GET /storage: the user-controllable peer-to-peer storage state (soft infra, not ledger state). */
-  storageState(): { enabled: boolean; capBytes: number; usedBytes: number } {
+  storageState(): { enabled: boolean; capBytes: number; usedBytes: number; diskBytes: number } {
     return this.models.storageState();
   }
 
@@ -1455,8 +1457,8 @@ export class ZiraNode {
    * "My tasks only" path. It is fully decoupled from mining: the field provider/answer loop is not
    * involved, nothing is published to the field, no one else is answered, and nothing is earned.
    */
-  async generateOwnTask(messages: { role: "user" | "assistant"; content: string }[], system: string): Promise<string> {
-    return this.models.generateOwnTask(messages, system);
+  async generateOwnTask(messages: { role: "user" | "assistant"; content: string }[], system: string, onToken?: (t: string) => void): Promise<string> {
+    return this.models.generateOwnTask(messages, system, onToken);
   }
   /** Whether own-task local inference can answer right now (engine loaded or endpoint set). */
   ownTaskReady(): Promise<boolean> { return this.models.ownTaskReady(); }

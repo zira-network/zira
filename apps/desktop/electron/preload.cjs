@@ -16,4 +16,18 @@ contextBridge.exposeInMainWorld("zira", {
   relaunchApp: () => ipcRenderer.invoke("zira:relaunch"),
   // Live machine telemetry for the Mine page (hardware names + CPU/RAM utilization). Desktop only.
   hardware: () => ipcRenderer.invoke("zira:hardware"),
+  // Storage folder controls (desktop only): where the node keeps its wallet, ledger, and model cache.
+  getStoragePath: () => ipcRenderer.invoke("zira:getStoragePath"),
+  chooseStoragePath: () => ipcRenderer.invoke("zira:chooseStoragePath"),
+  setStoragePath: (dir) => ipcRenderer.invoke("zira:setStoragePath", dir),
+  // Build-agent workspace bridge (desktop only). Sandboxed to a user-opened folder: recursive listing,
+  // scoped file read/write, and approved command/test execution. The UI gates writes + commands.
+  agent: {
+    openWorkspace: () => ipcRenderer.invoke("agent:openWorkspace"),
+    workspace: () => ipcRenderer.invoke("agent:workspace"),
+    listFiles: () => ipcRenderer.invoke("agent:listFiles"),
+    readFile: (rel) => ipcRenderer.invoke("agent:readFile", rel),
+    writeFile: (rel, content) => ipcRenderer.invoke("agent:writeFile", rel, content),
+    runCommand: (command) => ipcRenderer.invoke("agent:runCommand", command),
+  },
 });

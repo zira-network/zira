@@ -18,7 +18,7 @@ import { useZira } from "../store/useZira";
 import { loadReconciledHistory } from "../lib/history";
 import { useUnlock } from "../store/useUnlock";
 import { Wallet } from "../lib/keys";
-import { isDesktop, getHardwareTelemetry, type HardwareTelemetry } from "../lib/platform";
+import { isDesktop, getHardwareTelemetry, type HardwareTelemetry, getStoragePath, chooseStoragePath, setStoragePath, type StoragePathInfo } from "../lib/platform";
 
 function formatBytes(n: number): string {
   if (!n || n < 1) return "0 B";
@@ -598,11 +598,13 @@ function YourMachine({
           <Toggle on={storageEnabled} onClick={() => onUpdateStorage(!storageEnabled)} disabled={busy} />
         </div>
         <div className="mt-2 grid gap-2 sm:grid-cols-2">
-          <Field label="Storage cap" hint="GB. The node never holds more than this. When full it keeps serving what fits and stops taking new bytes.">
+          <Field label="Storage cap" hint="GB. The node never holds more than this on disk. Set 0 for Unlimited. When full it evicts what no longer earns and stops taking new bytes.">
             <Input className="mono" value={storageLimit} onChange={(e) => setStorageLimit(e.target.value)} onBlur={() => onUpdateStorage(storageEnabled)} disabled={busy} />
           </Field>
-          <Stat label="Used of cap" value={<span className="text-sm">{formatBytes(usedBytes)} / {formatBytes(capBytes)}{(mining?.storageDownloadingBytes ?? 0) > 0 ? <span className="text-faint"> (+{formatBytes(mining?.storageDownloadingBytes ?? 0)} downloading)</span> : null}</span>} />
+          <Stat label="On disk / cap" value={<span className="text-sm">{formatBytes(mining?.storageDiskBytes ?? usedBytes)} / {capBytes > 0 ? formatBytes(capBytes) : "Unlimited"}{(mining?.storageDownloadingBytes ?? 0) > 0 ? <span className="text-faint"> (+{formatBytes(mining?.storageDownloadingBytes ?? 0)} downloading)</span> : null}</span>} />
         </div>
+        <div className="mt-1 text-[11px] text-faint">Rewarded storage: {formatBytes(usedBytes)}. On disk includes in-flight downloads; the node auto-removes anything past the cap so downloaded matches what is shown.</div>
+        <StorageFolder busy={busy} />
         {usedBytes > 0 && (
           <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-faint">
             <span>Free the disk without turning storage off. The node re-fills from the field up to your cap, and the model it is actively serving is kept.</span>
@@ -616,6 +618,39 @@ function YourMachine({
         )}
       </div>
     </Card>
+  );
+}
+
+// Storage folder (desktop only): where the node keeps its wallet, ledger, and model cache. Users move it to
+// a bigger drive for the model cache. Changing it carries the wallet + identity over and relaunches the app.
+function StorageFolder({ busy }: { busy: boolean }) {
+  const { push } = useToast();
+  const [info, setInfo] = useState<StoragePathInfo | null>(null);
+  const [working, setWorking] = useState(false);
+  useEffect(() => {
+    let live = true;
+    const p = getStoragePath();
+    if (p) void p.then((i) => { if (live) setInfo(i); }).catch(() => { /* not desktop */ });
+    return () => { live = false; };
+  }, []);
+  if (!isDesktop() || !info) return null;
+  const change = async () => {
+    try {
+      setWorking(true);
+      const picked = await chooseStoragePath();
+      if (!picked) { setWorking(false); return; }
+      const ok = window.confirm(`Move ZIRA storage to:\n${picked}\n\nYour wallet and ledger move with it; the model cache re-fills in the new folder. The app will restart.`);
+      if (!ok) { setWorking(false); return; }
+      const res = await setStoragePath(picked);
+      if (res && !res.ok) { push("Could not change folder: " + (res.error || "unknown error")); setWorking(false); }
+      // On success the app relaunches, so no further UI update is needed.
+    } catch (e) { push("Could not change folder: " + String((e as Error).message || e)); setWorking(false); }
+  };
+  return (
+    <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-faint">
+      <span className="min-w-0"><span className="text-muted">Storage folder:</span> <span className="mono break-all">{info.dataDir}</span></span>
+      <Button variant="ghost" onClick={change} disabled={busy || working} className="shrink-0 text-xs">{working ? "..." : "Change folder"}</Button>
+    </div>
   );
 }
 

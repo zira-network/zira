@@ -91,6 +91,7 @@ export interface MiningStatus {
   storageLimitGb: number;
   storageUsedBytes: number;
   storageDownloadingBytes: number;
+  storageDiskBytes?: number;
   known: FieldModel[];
   // Live bandwidth (per-second deltas) and the pooled-payout beneficiary this miner currently routes its
   // field-participation rewards to. beneficiary is null (or the miner's own address) when earning directly.

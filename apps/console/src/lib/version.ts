@@ -1,7 +1,7 @@
 // apps/console/src/lib/version.ts
 // Bump this when you cut a new build so you can confirm at a glance which build is running
 // (shown in the sidebar footer). If the app does not show this version, you are on an older build.
-export const APP_VERSION = "v3.2.0";
+export const APP_VERSION = "v3.3.0";
 
 // ---- update check (the app has no auto-updater; this is a lightweight "update available" signal) ----
 // Best-effort: asks GitHub for the latest published release tag and compares it to APP_VERSION. Purely a

@@ -15,6 +15,9 @@ import { defaultDomainsForModelType, type ModelType } from "@zira/protocol";
 type ImportOpts = {
   arch?: string; quant?: string; url?: string;
   type?: ModelType; domains?: ModelMeta["domains"]; tags?: string[]; version?: number; assigned?: boolean;
+  /** Hard cap headroom for a URL import: refuse/abort if the download would exceed this many bytes.
+   * <=0 or unset means the caller enforces the cap and this download is unbounded here. */
+  maxBytes?: number;
 };
 /** Fill in a model's modality + routing domains so every stored model is type+domain addressable.
  * Models registered without a type default to "text"; without domains, to the type's default domains. */
@@ -75,6 +78,61 @@ export class ModelStore {
       }
     } catch { /* models dir not readable yet */ }
     return n;
+  }
+
+  /** ACTUAL bytes on disk under the models dir: finalized models + in-flight .part + dl-*.part +
+   * any orphaned/stray files. This is what the storage cap MUST be enforced against. totalBytes()
+   * counts only finalized models, so real disk can overshoot the cap by the in-flight/orphan amount. */
+  diskBytes(): number { return ModelStore.dirSize(this.dir); }
+  private static dirSize(dir: string): number {
+    let n = 0;
+    let entries: string[] = [];
+    try { entries = readdirSync(dir); } catch { return 0; }
+    for (const e of entries) {
+      const p = join(dir, e);
+      try {
+        const st = statSync(p);
+        if (st.isDirectory()) n += ModelStore.dirSize(p);
+        else n += st.size;
+      } catch { /* vanished mid-scan */ }
+    }
+    return n;
+  }
+
+  /** Reclaim disk that no model owns: abandoned URL-import temps (dl-*.part older than the grace
+   * window), stray non-model files at the models root, and whole model dirs whose id is neither a
+   * known model (keepIds) nor an active download (activeIds). Never touches a kept or downloading
+   * model. Returns bytes reclaimed. This is what keeps a failed/partial download from leaking disk
+   * forever (importUrl/finalize can die mid-flight and totalBytes never sees those bytes). */
+  sweepOrphans(keepIds: Set<string>, activeIds: Set<string>, tmpGraceMs = 60 * 60 * 1000): number {
+    let freed = 0;
+    let entries: string[] = [];
+    try { entries = readdirSync(this.dir); } catch { return 0; }
+    const now = Date.now();
+    for (const entry of entries) {
+      const p = join(this.dir, entry);
+      try {
+        const st = statSync(p);
+        if (!st.isDirectory()) {
+          // stray file at the models root. URL-import temps (dl-*.part) get a grace window in case a
+          // download is in progress; anything else at the root is junk and reclaimed immediately.
+          const isTmp = entry.startsWith("dl-") && entry.endsWith(".part");
+          if (isTmp && (now - st.mtimeMs) < tmpGraceMs) continue;
+          freed += st.size; rmSync(p, { force: true });
+          continue;
+        }
+        // model dir keyed by content id === entry name.
+        if (keepIds.has(entry) || activeIds.has(entry)) continue;
+        // NEVER sweep a dir that holds a real finalized model, even if the caller did not list it in keepIds
+        // (a node can hold a valid model that is not in the registry map, e.g. a freshly-imported fixture or
+        // a model held before its announce is processed). Cap eviction (enforceStorageCap) is what removes
+        // real over-cap models; the sweep only reclaims genuine junk (partials/temps/unknown dirs).
+        if (this.hasValidGguf(entry)) continue;
+        freed += ModelStore.dirSize(p);
+        rmSync(p, { recursive: true, force: true });
+      } catch { /* skip an entry that vanished mid-scan */ }
+    }
+    return freed;
   }
 
   /** Evict a cached model's heavy bytes (and any partial download) to free storage. Keeps the tiny
@@ -157,59 +215,78 @@ export class ModelStore {
    */
   async importUrl(url: string, name: string, opts: ImportOpts = {}): Promise<ModelMeta> {
     const tmp = join(this.dir, `dl-${Date.now()}.part`);
-    const h = createHash("sha256");
-    let size = 0;
-    let preview = Buffer.alloc(0);
-    const head = await fetch(url, { method: "HEAD" });
-    const expectedSize = Number(head.headers.get("content-length") ?? 0);
-    const acceptsRanges = (head.headers.get("accept-ranges") ?? "").toLowerCase().includes("bytes");
+    let promoted = false;
+    try {
+      const h = createHash("sha256");
+      let size = 0;
+      let preview = Buffer.alloc(0);
+      // Optional cap headroom guard: if the announced size already exceeds what the caller says is
+      // free under the cap, refuse before downloading a single byte (defends the hard cap against a
+      // download that would overshoot it). maxBytes<=0 means "no limit here" (caller enforces).
+      const head = await fetch(url, { method: "HEAD" });
+      const expectedSize = Number(head.headers.get("content-length") ?? 0);
+      const acceptsRanges = (head.headers.get("accept-ranges") ?? "").toLowerCase().includes("bytes");
+      if (opts.maxBytes && opts.maxBytes > 0 && expectedSize > 0 && expectedSize > opts.maxBytes) {
+        throw new Error(`model is ${expectedSize} bytes but only ${opts.maxBytes} bytes fit under the storage cap`);
+      }
 
-    if (head.ok && expectedSize > 0 && acceptsRanges) {
-      const fd = openSync(tmp, "w");
-      try {
-        for (let start = 0; start < expectedSize; start += DOWNLOAD_RANGE_BYTES) {
-          const end = Math.min(start + DOWNLOAD_RANGE_BYTES - 1, expectedSize - 1);
-          const res = await fetch(url, { headers: { range: `bytes=${start}-${end}` } });
-          if (res.status !== 206) throw new Error(`could not download model range ${start}-${end} (status ${res.status})`);
-          const buf = Buffer.from(await res.arrayBuffer());
-          if (preview.length < 4096) preview = Buffer.concat([preview, buf]).subarray(0, 4096);
-          h.update(buf);
-          writeSync(fd, buf, 0, buf.length, start);
-          size += buf.length;
+      if (head.ok && expectedSize > 0 && acceptsRanges) {
+        const fd = openSync(tmp, "w");
+        try {
+          for (let start = 0; start < expectedSize; start += DOWNLOAD_RANGE_BYTES) {
+            const end = Math.min(start + DOWNLOAD_RANGE_BYTES - 1, expectedSize - 1);
+            const res = await fetch(url, { headers: { range: `bytes=${start}-${end}` } });
+            if (res.status !== 206) throw new Error(`could not download model range ${start}-${end} (status ${res.status})`);
+            const buf = Buffer.from(await res.arrayBuffer());
+            if (preview.length < 4096) preview = Buffer.concat([preview, buf]).subarray(0, 4096);
+            h.update(buf);
+            writeSync(fd, buf, 0, buf.length, start);
+            size += buf.length;
+            // mid-download hard-cap abort (covers a wrong/absent content-length that under-projected).
+            if (opts.maxBytes && opts.maxBytes > 0 && size > opts.maxBytes) {
+              throw new Error(`download exceeded the storage cap headroom (${opts.maxBytes} bytes)`);
+            }
+          }
+        } finally {
+          closeSync(fd);
         }
-      } finally {
-        closeSync(fd);
-      }
-    } else {
-      const res = await fetch(url);
-      if (!res.ok || !res.body) throw new Error(`could not download model (status ${res.status})`);
-      const ws = createWriteStream(tmp);
-      const reader = (res.body as ReadableStream<Uint8Array>).getReader();
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (preview.length < 4096) preview = Buffer.concat([preview, Buffer.from(value)]).subarray(0, 4096);
-          h.update(value);
-          size += value.length;
-          if (!ws.write(Buffer.from(value))) await new Promise<void>((r) => ws.once("drain", () => r()));
+      } else {
+        const res = await fetch(url);
+        if (!res.ok || !res.body) throw new Error(`could not download model (status ${res.status})`);
+        const ws = createWriteStream(tmp);
+        const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (preview.length < 4096) preview = Buffer.concat([preview, Buffer.from(value)]).subarray(0, 4096);
+            h.update(value);
+            size += value.length;
+            if (opts.maxBytes && opts.maxBytes > 0 && size > opts.maxBytes) {
+              throw new Error(`download exceeded the storage cap headroom (${opts.maxBytes} bytes)`);
+            }
+            if (!ws.write(Buffer.from(value))) await new Promise<void>((r) => ws.once("drain", () => r()));
+          }
+        } finally {
+          await new Promise<void>((r) => ws.end(() => r()));
         }
-      } finally {
-        await new Promise<void>((r) => ws.end(() => r()));
       }
+      ModelStore.assertGgufPreview(preview, url);
+      const id = h.digest("hex");
+      const { type, domains } = normalizeModelType(opts);
+      const meta: ModelMeta = {
+        id, name, arch: opts.arch, quant: opts.quant, url, type, domains, tags: opts.tags, version: opts.version, assigned: opts.assigned,
+        sizeBytes: size, chunkSize: MODEL_CHUNK_BYTES, chunkCount: Math.ceil(size / MODEL_CHUNK_BYTES), ts: Date.now(),
+      };
+      mkdirSync(this.modelDir(id), { recursive: true });
+      if (!this.has(id)) { renameSync(tmp, this.dataPath(id)); promoted = true; }
+      writeFileSync(this.metaPath(id), JSON.stringify(meta, null, 2));
+      return meta;
+    } finally {
+      // Guarantee the temp never leaks: on any throw, or when the id was already cached (dedup), the
+      // tmp was never promoted, so reclaim it here. A successful rename leaves nothing to remove.
+      if (!promoted) { try { rmSync(tmp, { force: true }); } catch { /* */ } }
     }
-    try { ModelStore.assertGgufPreview(preview, url); }
-    catch (e) { try { rmSync(tmp, { force: true }); } catch { /* */ } throw e; }
-    const id = h.digest("hex");
-    const { type, domains } = normalizeModelType(opts);
-    const meta: ModelMeta = {
-      id, name, arch: opts.arch, quant: opts.quant, url, type, domains, tags: opts.tags, version: opts.version, assigned: opts.assigned,
-      sizeBytes: size, chunkSize: MODEL_CHUNK_BYTES, chunkCount: Math.ceil(size / MODEL_CHUNK_BYTES), ts: Date.now(),
-    };
-    mkdirSync(this.modelDir(id), { recursive: true });
-    if (!this.has(id)) renameSync(tmp, this.dataPath(id));
-    writeFileSync(this.metaPath(id), JSON.stringify(meta, null, 2));
-    return meta;
   }
 
   readChunk(id: string, index: number): Buffer {

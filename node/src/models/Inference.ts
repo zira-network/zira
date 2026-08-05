@@ -56,7 +56,7 @@ export class Inference {
     log.info(`inference engine loaded model ${modelId.slice(0, 12)} backend=${this.llama?.gpu ?? "?"} gpuLayers=${gpuLayers} threads=${opts.threads}`);
   }
 
-  async generate(system: string, messages: { role: "user" | "assistant"; content: string }[]): Promise<string> {
+  async generate(system: string, messages: { role: "user" | "assistant"; content: string }[], onToken?: (t: string) => void): Promise<string> {
     if (!this.context) throw new Error("no model loaded");
     const mod: any = await import("node-llama-cpp" as string);
     // Capture and dispose the context sequence per call, or the slot pool exhausts ("No sequences left")
@@ -69,7 +69,12 @@ export class Inference {
       for (const m of messages.slice(0, -1)) {
         if (m.role === "user") await session.prompt(m.content, { maxTokens: 1 }).catch(() => {});
       }
-      const answer = await session.prompt(last?.content ?? "", { temperature: 0.6, maxTokens: 512 });
+      // Stream tokens to the caller as they are produced (real generation, not post-hoc replay). onTextChunk
+      // is a side channel: prompt() still returns the full text, so if the engine ignores the option we
+      // simply fall back to returning the complete answer. Callers pass onToken only when they want live tokens.
+      const promptOpts: Record<string, unknown> = { temperature: 0.6, maxTokens: 512 };
+      if (onToken) promptOpts.onTextChunk = (chunk: string) => { try { onToken(String(chunk)); } catch { /* */ } };
+      const answer = await session.prompt(last?.content ?? "", promptOpts);
       return String(answer ?? "").trim();
     } finally {
       try { session.dispose?.(); } catch { /* */ }

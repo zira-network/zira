@@ -756,6 +756,20 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
       const b = await body(req);
       const messages = Array.isArray(b.messages) ? b.messages : [];
       const system = typeof b.system === "string" && b.system ? b.system : OWN_TASK_SYSTEM_PROMPT;
+      // Real token streaming: when the client asks (stream:true) emit Server-Sent Events as the local model
+      // produces tokens, then a final {done,answer}. Same-origin (the app serves the Console), so no CORS. If
+      // the client does not ask, keep the plain JSON response (unchanged for older callers).
+      if (b.stream) {
+        res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" });
+        try {
+          const answer = await node.generateOwnTask(messages, system, (t) => { try { res.write(`data: ${JSON.stringify({ token: t })}\n\n`); } catch { /* client gone */ } });
+          res.write(`data: ${JSON.stringify({ done: true, answer })}\n\n`);
+        } catch (e) {
+          try { res.write(`data: ${JSON.stringify({ error: (e as Error).message })}\n\n`); } catch { /* */ }
+        }
+        try { res.end(); } catch { /* */ }
+        return;
+      }
       try {
         const answer = await node.generateOwnTask(messages, system);
         return json(res, { answer });

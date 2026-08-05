@@ -14,6 +14,8 @@ import { useZira } from "../store/useZira";
 import { useUi } from "../store/useUi";
 import { formatZir, shortHash, shortAddress, formatNum, timeAgo } from "../lib/format";
 import { isLocalNode } from "../client/createClient";
+import { agentBridge } from "../lib/platform";
+import { runBuildAgent } from "../lib/buildAgent";
 
 const STORE = "zira.conversations";
 type ConsoleAnswerMode = "field" | "local";
@@ -342,17 +344,15 @@ export function Console() {
   // It applies in BOTH modes: Field (plain chat) and Local (work inside a chosen folder).
   type ComputeTier = "zir" | "machine";
   const [computeTier, setComputeTier] = useState<ComputeTier>(() => {
-    // The retired "free" tier is gone: network answers come from independent miners running the
-    // inference on their hardware, paid in ZIR. Machine is "coming soon" and not selectable, so any
-    // stored "free" or "machine" preference migrates to ZIR (persisted by the effect below).
-    return "zir";
+    // Two tiers: ZIR (independent miners run the inference on their hardware, paid in ZIR) and Machine
+    // (your OWN hardware answers via the node's local model, private, no ZIR). The retired "free" tier
+    // migrates to ZIR. Machine is selectable when the node has a local model; send() gracefully offers to
+    // turn on own-task inference, and falls back to the field if this machine has no model yet.
+    return localStorage.getItem("zira.console.computeTier") === "machine" ? "machine" : "zir";
   });
   useEffect(() => { localStorage.setItem("zira.console.computeTier", computeTier); }, [computeTier]);
   const useLocalInference = computeTier === "machine";
-  function setTier(t: ComputeTier) {
-    if (t === "machine") return; // Machine tier is coming soon; not selectable yet.
-    setComputeTier(t);
-  }
+  function setTier(t: ComputeTier) { setComputeTier(t); }
   const [coordinationProfile, setCoordinationProfile] = useState<CoordinationProfile>(() => (localStorage.getItem("zira.console.coordinationProfile") as CoordinationProfile) || "balanced");
   const { simpleMode } = useUi();
   const [attachments, setAttachments] = useState<WorkspaceAttachment[]>([]);
@@ -774,6 +774,48 @@ export function Console() {
     const ctrl = new AbortController();
     abortMap.current.set(convoId, ctrl);
     try {
+      // Desktop build-agent: in Local mode with the sandboxed workspace bridge present, run the ITERATIVE
+      // agent (it reads the files it asks for, proposes writes, and runs approved commands/tests, observing
+      // each result) instead of a one-shot answer. This is what lets a user actually BUILD inside a folder.
+      // Writes and commands are gated by the user; on web (no bridge) we fall through to the normal path.
+      const buildBridge = agentBridge();
+      if (answerMode === "local" && buildBridge) {
+        let acc = "";
+        const render = (t: string) => { acc += t; update(convoId, (c) => ({ ...c, messages: c.messages.map((m) => m.id === asstMsg.id ? { ...m, content: acc } : m) })); };
+        let root = await buildBridge.workspace();
+        if (!root) root = await buildBridge.openWorkspace();
+        if (!root) {
+          update(convoId, (c) => ({ ...c, messages: c.messages.map((m) => m.id === asstMsg.id ? { ...m, content: "Open a project folder to build in, then send your task again.", streaming: false } : m) }));
+          return;
+        }
+        render(`Building in \`${root}\`\n\n`);
+        const ask = async (prompt: string, system: string): Promise<string> => {
+          if (useLocalInference && client instanceof NodeClient) {
+            const r = await client.askLocal({ question: `${system}\n\n${prompt}`, history: [], onToken: () => {}, signal: ctrl.signal });
+            return r.answer;
+          }
+          const r = await client!.askField({ question: `${system}\n\n${prompt}`, history: [], asker: address ?? "zir1coordination", pay: computeTier === "zir", onToken: () => {}, signal: ctrl.signal });
+          return r.answer;
+        };
+        await runBuildAgent({
+          goal: question, ask, signal: ctrl.signal, maxSteps: 20,
+          approver: {
+            approveWrite: async (p, content) => window.confirm(`Write ${content.length} bytes to:\n${p}\n\ninside ${root}?`),
+            approveCommand: async (cmd) => window.confirm(`Run this command in the project folder?\n\n${cmd}`),
+          },
+          onEvent: (e) => {
+            if (e.type === "assistant") render(e.text + "\n\n");
+            else if (e.type === "status") render(`_${e.text}_\n\n`);
+            else if (e.type === "read") render(`Read \`${e.path}\`${e.ok ? "" : ` (failed: ${e.error})`}\n\n`);
+            else if (e.type === "write") render(`${e.ok ? "Wrote" : "Skipped"} \`${e.path}\`${e.error ? ` (${e.error})` : ""}\n\n`);
+            else if (e.type === "command") render("```\n$ " + e.command + "\n" + (e.output || e.error || "") + "\n```\n\n");
+            else if (e.type === "done") render(`\n**${e.text}**\n`);
+            else if (e.type === "error") render(`\n${e.text}\n`);
+          },
+        });
+        update(convoId, (c) => ({ ...c, messages: c.messages.map((m) => m.id === asstMsg.id ? { ...m, streaming: false } : m) }));
+        return;
+      }
       // If a resonator persona is selected, answer in its character. The displayed question stays as
       // typed; the persona is added to what the field receives.
       // Poll/plan gating: a clicked poll option or plan step arrives via overrideText, so those turns get
@@ -1043,9 +1085,8 @@ export function Console() {
               <button role="tab" aria-selected={computeTier === "zir"} onClick={() => setTier("zir")} title="The network answers; independent miners run the inference on their hardware and you pay them in ZIR." className={`relative z-[1] inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-all ${computeTier === "zir" ? "bg-[color-mix(in_srgb,var(--teal)_15%,transparent)] text-[var(--teal)] shadow-[0_1px_0_color-mix(in_srgb,var(--teal)_22%,transparent)]" : "text-faint hover:text-text"}`}>
                 <Coins size={12} /> ZIR
               </button>
-              <button role="tab" aria-disabled title="Your own computer answers, coming soon." disabled className="relative z-[1] inline-flex cursor-not-allowed items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-faint opacity-60">
+              <button role="tab" aria-selected={computeTier === "machine"} onClick={() => setTier("machine")} title="Your own computer answers, using a model on this machine. Private, costs and earns no ZIR." className={`relative z-[1] inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-all ${computeTier === "machine" ? "bg-[color-mix(in_srgb,var(--indigo)_15%,transparent)] text-[var(--indigo)] shadow-[0_1px_0_color-mix(in_srgb,var(--indigo)_22%,transparent)]" : "text-faint hover:text-text"}`}>
                 <Cpu size={12} /> Machine
-                <span className="ml-0.5 rounded-full border border-hairline px-1.5 py-px text-[9px] uppercase tracking-wide text-faint">soon</span>
               </button>
             </div>
             <span className="hidden min-w-0 max-w-xl truncate text-xs text-faint xl:inline">{(answerMode === "local" ? "Work in a folder on your computer. " : "") + (computeTier === "zir" ? "The network answers; independent miners run the inference on their hardware and you pay them in ZIR (unlock a wallet first)." : "Your own computer answers. Private, costs and earns no ZIR (that is Mining, a separate switch).")}</span>
