@@ -523,7 +523,13 @@ function YourMachine({
   const ramGb = hw ? hw.ramTotalGB : hardware ? Math.round((hardware.ramMb ?? 0) / 1024) : 0;
   const platform = hw ? `${hw.platform}/${hw.arch}` : hardware ? `${hardware.platform}/${hardware.arch ?? "?"}` : "";
   const capacity = Math.min(1, (mining?.threads ?? 0) / Math.max(1, cores));
-  const storageEnabled = mining?.storageEnabled ?? false;
+  // Optimistic switch state so the toggle flips the instant it is clicked, instead of waiting for the
+  // /storage round-trip + status refresh (which made it look stuck "off"). Clears once the node's reported
+  // state catches up to what we set.
+  const [storageOpt, setStorageOpt] = useState<boolean | null>(null);
+  const reportedStorage = mining?.storageEnabled ?? false;
+  useEffect(() => { if (storageOpt !== null && reportedStorage === storageOpt) setStorageOpt(null); }, [reportedStorage, storageOpt]);
+  const storageEnabled = storageOpt ?? reportedStorage;
   const usedBytes = mining?.storageUsedBytes ?? 0;
   const capBytes = mining?.storageCapBytes ?? (mining?.storageLimitGb ?? 8) * 1024 ** 3;
   const bar = (pct: number) => (
@@ -595,7 +601,7 @@ function YourMachine({
             <div className="flex items-center gap-2 font-medium text-text"><Link2 size={14} className="text-[var(--indigo)]" /> Share storage</div>
             <div className="mt-0.5 text-faint">Hold and pass authorized model bytes to peers for a bonus on top of coordination. Optional: with it off, this machine still mines and earns from coordination.</div>
           </div>
-          <Toggle on={storageEnabled} onClick={() => onUpdateStorage(!storageEnabled)} disabled={busy} />
+          <Toggle on={storageEnabled} onClick={() => { const v = !storageEnabled; setStorageOpt(v); onUpdateStorage(v); }} disabled={busy} />
         </div>
         <div className="mt-2 grid gap-2 sm:grid-cols-2">
           <Field label="Storage cap" hint="GB. The node never holds more than this on disk. Set 0 for Unlimited. When full it evicts what no longer earns and stops taking new bytes.">
@@ -868,15 +874,22 @@ export function Mine() {
   // friendly view of the cap; we convert to bytes for the dedicated /storage RPC. When enabling, we never
   // set the cap below what is already cached, so verified bytes are not immediately evicted.
   async function updateStorage(on = mining?.storageEnabled ?? false) {
-    const usedGb = Math.ceil((mining?.storageUsedBytes ?? 0) / 1024 ** 3);
-    const limitGb = Math.max(on ? Math.max(1, usedGb) : 1, Math.min(4096, Number(storageLimit) || 1));
-    const capBytes = limitGb * 1024 ** 3;
+    // "0" means Unlimited: send capBytes 0 (the node treats <=0 as no limit). Otherwise clamp 1..4096 GB and,
+    // when enabling, never set the cap below what is already cached so verified bytes are not evicted.
+    const raw = Number(storageLimit);
+    const unlimited = raw === 0;
+    let capBytes = 0, limitGb = 0;
+    if (!unlimited) {
+      const usedGb = Math.ceil((mining?.storageUsedBytes ?? 0) / 1024 ** 3);
+      limitGb = Math.max(on ? Math.max(1, usedGb) : 1, Math.min(4096, raw || 1));
+      capBytes = limitGb * 1024 ** 3;
+    }
     setBusy(true);
     try {
       await NodeApi.setStorage({ enabled: on, capBytes });
       await refreshStatus();
-      toast.push(on ? (limitGb !== Number(storageLimit) ? `Storage on. Cap raised to ${limitGb} GB to cover what is already cached.` : "Storage on. Sharing authorized bytes with peers.") : "Storage off. This node no longer advertises or replicates peer storage.");
-      setStorageLimit(String(limitGb));
+      toast.push(on ? (unlimited ? "Storage on. Unlimited cap: this node holds every authorized model it can." : (limitGb !== raw ? `Storage on. Cap raised to ${limitGb} GB to cover what is already cached.` : "Storage on. Sharing authorized bytes with peers.")) : "Storage off. This node no longer advertises or replicates peer storage.");
+      if (!unlimited) setStorageLimit(String(limitGb));
     }
     catch (e) { toast.push(e instanceof Error ? e.message : "could not update storage", "danger"); }
     finally { setBusy(false); }

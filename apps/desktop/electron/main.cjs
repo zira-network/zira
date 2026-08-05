@@ -42,6 +42,30 @@ function desktopConfigPath() { return path.join(app.getPath("userData"), "zira-d
 function readDesktopConfig() { try { return JSON.parse(fs.readFileSync(desktopConfigPath(), "utf8")) || {}; } catch { return {}; } }
 function writeDesktopConfig(patch) { try { const c = { ...readDesktopConfig(), ...patch }; fs.writeFileSync(desktopConfigPath(), JSON.stringify(c, null, 2)); return c; } catch { return readDesktopConfig(); } }
 function defaultDataDir() { return path.join(app.getPath("userData"), "zira-data", NETWORK); }
+// First-run only: ask where to keep the wallet, ledger, and (large) model cache before the node starts.
+// Skipped for existing installs (a chosen folder is already saved, or the default dir already holds data),
+// so we never nag returning users. Choosing "Use default" just proceeds; "Choose folder" persists a path.
+async function maybePromptStorageLocation() {
+  try {
+    if (readDesktopConfig().dataDir) return;                 // user already chose a folder
+    if (fs.existsSync(path.join(defaultDataDir(), "identity.json"))) return; // existing install with data
+    const r = await dialog.showMessageBox({
+      type: "question",
+      title: "ZIRA storage location",
+      message: "Where should ZIRA keep your wallet, ledger, and model cache?",
+      detail: `Models can be large, so you may prefer a drive with room to spare. Default:\n${defaultDataDir()}\n\nYou can change this later in Mine.`,
+      buttons: ["Use default", "Choose folder..."],
+      defaultId: 0, cancelId: 0, noLink: true,
+    });
+    if (r.response === 1) {
+      const pick = await dialog.showOpenDialog({ title: "Choose ZIRA storage folder", properties: ["openDirectory", "createDirectory"] });
+      if (!pick.canceled && pick.filePaths && pick.filePaths[0]) {
+        const target = path.resolve(pick.filePaths[0]);
+        try { fs.mkdirSync(target, { recursive: true }); writeDesktopConfig({ dataDir: target }); } catch { /* fall back to default */ }
+      }
+    }
+  } catch { /* any dialog failure: proceed with the default */ }
+}
 function resolveDataDir() {
   const override = readDesktopConfig().dataDir;
   if (override && typeof override === "string") {
@@ -298,6 +322,10 @@ else {
     }
 
     if (process.env.ZIRA_RESET === "1") { try { await fullReset(); } catch (e) { console.error("reset failed", e); } }
+
+    // 1b) First-run only: ask where to store data/models before the node starts (so the chosen folder is
+    //     used from the very first launch). No-op for existing installs.
+    await maybePromptStorageLocation();
 
     // 2) Discover a co-located mesh and bootstrap to it, then start our OWN node on our OWN ports.
     //    Then poll the RPC and swap the splash for the Console when it's ready.
