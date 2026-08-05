@@ -292,6 +292,19 @@ export class SoftState {
     return [...this.queries.values()].filter((q) => now - q.postedAt <= QUERY_TTL_MS && (domains.length === 0 || domains.includes(q.domain)));
   }
 
+  /** Recent answers (within the query TTL) held by this node, for periodic RE-GOSSIP. publishAnswer
+   * broadcasts an answer only ONCE; if that single gossipsub publish loses a mesh race, the asker's node
+   * never receives it and the Console silently shows no answer even though a miner answered. Re-broadcasting
+   * recent answers gives every asker a reliable chance to collect them. Soft-state, consensus-neutral,
+   * idempotent (peers de-dupe by answer id in addAnswer, and the asker stops polling once it has enough). */
+  recentAnswers(now: number, cap = 60): AnswerMsg[] {
+    const out: AnswerMsg[] = [];
+    for (const arr of this.answers.values()) {
+      for (const a of arr) { if (now - a.ts <= QUERY_TTL_MS) { out.push(a); if (out.length >= cap) return out; } }
+    }
+    return out;
+  }
+
   marketplace(args: { sort: string; domain?: Domain; q?: string; limit?: number }): Listing[] {
     let list = [...this.resonators.values()].filter((r) => r.listed);
     if (args.domain) list = list.filter((r) => r.domains.includes(args.domain!));

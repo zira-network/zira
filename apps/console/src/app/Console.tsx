@@ -344,15 +344,15 @@ export function Console() {
   // It applies in BOTH modes: Field (plain chat) and Local (work inside a chosen folder).
   type ComputeTier = "zir" | "machine";
   const [computeTier, setComputeTier] = useState<ComputeTier>(() => {
-    // Two tiers: ZIR (independent miners run the inference on their hardware, paid in ZIR) and Machine
-    // (your OWN hardware answers via the node's local model, private, no ZIR). The retired "free" tier
-    // migrates to ZIR. Machine is selectable when the node has a local model; send() gracefully offers to
-    // turn on own-task inference, and falls back to the field if this machine has no model yet.
-    return localStorage.getItem("zira.console.computeTier") === "machine" ? "machine" : "zir";
+    // ZIR is the live tier: the network answers, with independent miners running the inference on their
+    // hardware and coordinating across distributed models. Both Field and Local (work-in-a-folder) route
+    // through the network this way, so a user never needs a model of their own. The Machine tier (your own
+    // hardware answers privately) is coming soon; any stored "machine"/"free" preference maps to ZIR.
+    return "zir";
   });
   useEffect(() => { localStorage.setItem("zira.console.computeTier", computeTier); }, [computeTier]);
-  const useLocalInference = computeTier === "machine";
-  function setTier(t: ComputeTier) { setComputeTier(t); }
+  const useLocalInference = computeTier === "machine"; // always false until Machine ships; Local uses the field
+  function setTier(t: ComputeTier) { if (t === "machine") return; setComputeTier(t); }
   const [coordinationProfile, setCoordinationProfile] = useState<CoordinationProfile>(() => (localStorage.getItem("zira.console.coordinationProfile") as CoordinationProfile) || "balanced");
   const { simpleMode } = useUi();
   const [attachments, setAttachments] = useState<WorkspaceAttachment[]>([]);
@@ -1085,8 +1085,9 @@ export function Console() {
               <button role="tab" aria-selected={computeTier === "zir"} onClick={() => setTier("zir")} title="The network answers; independent miners run the inference on their hardware and you pay them in ZIR." className={`relative z-[1] inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-all ${computeTier === "zir" ? "bg-[color-mix(in_srgb,var(--teal)_15%,transparent)] text-[var(--teal)] shadow-[0_1px_0_color-mix(in_srgb,var(--teal)_22%,transparent)]" : "text-faint hover:text-text"}`}>
                 <Coins size={12} /> ZIR
               </button>
-              <button role="tab" aria-selected={computeTier === "machine"} onClick={() => setTier("machine")} title="Your own computer answers, using a model on this machine. Private, costs and earns no ZIR." className={`relative z-[1] inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-all ${computeTier === "machine" ? "bg-[color-mix(in_srgb,var(--indigo)_15%,transparent)] text-[var(--indigo)] shadow-[0_1px_0_color-mix(in_srgb,var(--indigo)_22%,transparent)]" : "text-faint hover:text-text"}`}>
+              <button role="tab" aria-disabled title="Your own computer answers, coming soon." disabled className="relative z-[1] inline-flex cursor-not-allowed items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-faint opacity-60">
                 <Cpu size={12} /> Machine
+                <span className="ml-0.5 rounded-full border border-hairline px-1.5 py-px text-[9px] uppercase tracking-wide text-faint">soon</span>
               </button>
             </div>
             <span className="hidden min-w-0 max-w-xl truncate text-xs text-faint xl:inline">{(answerMode === "local" ? "Work in a folder on your computer. " : "") + (computeTier === "zir" ? "The network answers; independent miners run the inference on their hardware and you pay them in ZIR (unlock a wallet first)." : "Your own computer answers. Private, costs and earns no ZIR (that is Mining, a separate switch).")}</span>

@@ -1566,6 +1566,11 @@ export class ZiraNode {
       // open queries within their TTL gives every live provider a reliable chance to pick them up.
       // Soft-state, consensus-neutral, idempotent (peers de-dupe by query id; providers skip answered).
       for (const q of this.soft.openQueries([], Date.now()).slice(0, 30)) this.publish(this.topics.app, { t: "query", data: q });
+      // Re-gossip recent ANSWERS too: publishAnswer broadcasts once, so a lost mesh race left the asker with
+      // no answer even though a miner produced one (the "field not answering" report). Every node that holds
+      // an answer re-broadcasts it within the query TTL, so answers reliably reach the asker. Idempotent
+      // (de-duped by answer id), soft-state, consensus-neutral.
+      for (const a of this.soft.recentAnswers(Date.now(), 60)) this.publish(this.topics.app, { t: "answer", data: a });
     }
     // FINALITY DETERMINISM FIX (2026-07-10 hard-wedge at 356724426): re-broadcast the txs in the UNFINALIZED
     // window (committedEpoch > lastFinalizedEpoch). A tx that reaches some masters later than the settle window
