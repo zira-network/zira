@@ -42,28 +42,63 @@ function desktopConfigPath() { return path.join(app.getPath("userData"), "zira-d
 function readDesktopConfig() { try { return JSON.parse(fs.readFileSync(desktopConfigPath(), "utf8")) || {}; } catch { return {}; } }
 function writeDesktopConfig(patch) { try { const c = { ...readDesktopConfig(), ...patch }; fs.writeFileSync(desktopConfigPath(), JSON.stringify(c, null, 2)); return c; } catch { return readDesktopConfig(); } }
 function defaultDataDir() { return path.join(app.getPath("userData"), "zira-data", NETWORK); }
-// First-run only: ask where to keep the wallet, ledger, and (large) model cache before the node starts.
-// Skipped for existing installs (a chosen folder is already saved, or the default dir already holds data),
-// so we never nag returning users. Choosing "Use default" just proceeds; "Choose folder" persists a path.
+// Move the data dir to a new location. Always preserves the wallet + ledger (small files, copied so it works
+// even across drives). The heavy model cache is moved instantly when it is on the same volume; across volumes
+// it is left to re-fill in the new folder (models are re-fetchable), so we never freeze startup on a multi-GB
+// copy. Returns true if the wallet/ledger are now in newDir.
+function moveDataDir(oldDir, newDir) {
+  try {
+    fs.mkdirSync(newDir, { recursive: true });
+    if (fs.existsSync(path.join(oldDir, "identity.json"))) migrateSmallState(oldDir, newDir);
+    try {
+      const om = path.join(oldDir, "models"), nm = path.join(newDir, "models");
+      if (fs.existsSync(om) && !fs.existsSync(nm)) fs.renameSync(om, nm); // fast same-volume move of the cache
+    } catch { /* cross-volume or busy: the cache re-fills in the new location per the cap */ }
+    return true;
+  } catch { return false; }
+}
+
+// Runs ONCE, ever (tracked by a config flag), before the node starts. On a fresh install it offers a storage
+// location; on an existing install it detects the current wallet + data and offers to keep it or move it to a
+// new folder. After this the folder is only changed from Mine, so returning users are never nagged again.
 async function maybePromptStorageLocation() {
   try {
-    if (readDesktopConfig().dataDir) return;                 // user already chose a folder
-    if (fs.existsSync(path.join(defaultDataDir(), "identity.json"))) return; // existing install with data
-    const r = await dialog.showMessageBox({
-      type: "question",
-      title: "ZIRA storage location",
-      message: "Where should ZIRA keep your wallet, ledger, and model cache?",
-      detail: `Models can be large, so you may prefer a drive with room to spare. Default:\n${defaultDataDir()}\n\nYou can change this later in Mine.`,
-      buttons: ["Use default", "Choose folder..."],
-      defaultId: 0, cancelId: 0, noLink: true,
-    });
-    if (r.response === 1) {
-      const pick = await dialog.showOpenDialog({ title: "Choose ZIRA storage folder", properties: ["openDirectory", "createDirectory"] });
-      if (!pick.canceled && pick.filePaths && pick.filePaths[0]) {
-        const target = path.resolve(pick.filePaths[0]);
-        try { fs.mkdirSync(target, { recursive: true }); writeDesktopConfig({ dataDir: target }); } catch { /* fall back to default */ }
+    const cfg = readDesktopConfig();
+    if (cfg.dataDir || cfg.storagePrompted) return;          // already chosen a folder, or already asked once
+    const current = defaultDataDir();
+    const hasData = fs.existsSync(path.join(current, "identity.json"));
+    if (hasData) {
+      const r = await dialog.showMessageBox({
+        type: "question", noLink: true, defaultId: 0, cancelId: 0,
+        title: "ZIRA storage location",
+        message: "Your ZIRA wallet, ledger, and models are stored here:",
+        detail: `${current}\n\nKeep them here, or move everything to another folder (for example a drive with more room for models)? Your wallet is preserved either way.`,
+        buttons: ["Keep here", "Move to another folder..."],
+      });
+      if (r.response === 1) {
+        const pick = await dialog.showOpenDialog({ title: "Move ZIRA storage to...", properties: ["openDirectory", "createDirectory"] });
+        if (!pick.canceled && pick.filePaths && pick.filePaths[0]) {
+          const target = path.resolve(pick.filePaths[0]);
+          if (path.resolve(current) !== target && moveDataDir(current, target)) writeDesktopConfig({ dataDir: target });
+        }
+      }
+    } else {
+      const r = await dialog.showMessageBox({
+        type: "question", noLink: true, defaultId: 0, cancelId: 0,
+        title: "ZIRA storage location",
+        message: "Where should ZIRA keep your wallet, ledger, and model cache?",
+        detail: `Models can be large, so you may prefer a drive with room to spare. Default:\n${current}\n\nYou can change this later in Mine.`,
+        buttons: ["Use default", "Choose folder..."],
+      });
+      if (r.response === 1) {
+        const pick = await dialog.showOpenDialog({ title: "Choose ZIRA storage folder", properties: ["openDirectory", "createDirectory"] });
+        if (!pick.canceled && pick.filePaths && pick.filePaths[0]) {
+          const target = path.resolve(pick.filePaths[0]);
+          try { fs.mkdirSync(target, { recursive: true }); writeDesktopConfig({ dataDir: target }); } catch { /* fall back to default */ }
+        }
       }
     }
+    writeDesktopConfig({ storagePrompted: true });           // asked once; never nag again (change later in Mine)
   } catch { /* any dialog failure: proceed with the default */ }
 }
 function resolveDataDir() {
