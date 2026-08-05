@@ -141,6 +141,24 @@ export interface LocalLaunchMinerSummary {
 // ---- live, decentralized pricing ----
 export interface Pricing { queryUZIR: number; taskBaseUZIR: number; resonatorCreationUZIR?: number; resonatorCreationOpen?: boolean; openQueries: number; providersOnline: number }
 
+// Live field-health snapshot: coverage (providers + models, overall and per domain) and delivery quality
+// (answer rate, converged rate, median first-answer latency) over the recent query window. Read-only,
+// derived from gossiped soft state; powers the field-health panel in Explorer and on the website.
+export interface FieldHealth {
+  updatedAt: number;
+  providersOnline: number;
+  modelsCovered: number;
+  models: string[];
+  recentQueries: number;
+  answered: number;
+  converged: number;
+  openQueries: number;
+  answerRate: number | null;
+  convergedRate: number | null;
+  medianFirstAnswerMs: number | null;
+  byDomain: Record<string, { providers: number; models: number }>;
+}
+
 // ---- free tier (limited free field questions per rolling window, enforced by the node) ----
 export interface FreeTierQuota { limit: number; used: number; remaining: number; resetMs: number; windowMs: number; contributor?: boolean; unlimited?: boolean; freeTierEnded?: boolean }
 
@@ -208,6 +226,9 @@ export const NodeApi = {
   // anchor seats, not just what the local node has heard. On web/mobile anchorBase() already IS the gateway.
   networkProviders: () => rpcGetFrom<ProviderView[]>(anchorBase(), "/providers"),
   networkAnchorSeats: () => rpcGetFrom<AnchorSeatSummary>(anchorBase(), "/anchors/seats"),
+  // Whole-network field health (coverage + answer rate + latency), read from the shared consensus gateway so
+  // Explorer shows the network's real serving state, not just this node's partial view.
+  networkFieldHealth: () => rpcGetFrom<FieldHealth>(anchorBase(), "/field-health"),
 
   // labeled project wallets (reserve, events, network, resonator pool, steward ops) + live balances
   treasury: () => rpcGet<Treasury>("/treasury"),
@@ -295,6 +316,7 @@ export const NodeApi = {
 
   // provider profiles
   providers: () => rpcGet<ProviderView[]>("/providers"),
+  fieldHealth: () => rpcGet<FieldHealth>("/field-health"),
   myProvider: () => rpcGet<ProviderView | null>("/providers/mine"),
 
   // current ZTI (overall + per domain)

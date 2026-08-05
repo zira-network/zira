@@ -404,6 +404,9 @@ const PUBLIC_GET_ROUTES = new Set<string>([
   "/marketplace", "/resonators", "/resonator", "/resonator/stats", "/tasks", "/task",
   // providers + query reads
   "/providers", "/provider/poll", "/query/answers", "/query/fusion", "/query/result",
+  // live field-health snapshot (coverage + answer rate + latency) — a safe public read derived from the
+  // soft state the field already gossips, powering the app + website field-health panel.
+  "/field-health",
   // answerer leaderboard (challenge scoreboard) — a public, read-only on-chain derivation for the Explorer
   "/answerers",
   // anchors* + resonators* reads
@@ -666,6 +669,7 @@ async function rpc(node: ZiraNode, route: string, req: IncomingMessage, res: Ser
 
     // ---- providers + query fusion ----
     case "GET /providers": return json(res, providers(node));
+    case "GET /field-health": return json(res, fieldHealth(node));
     case "GET /providers/mine": return json(res, node.inferenceProvider?.lastProfile ?? null);
     case "POST /provider/register": { const b = await body(req); return json(res, { ok: node.publishProvider(b.provider ?? b) }); }
     case "GET /provider/poll": return json(res, node.soft.openQueries((q.get("domains") ? q.get("domains")!.split(",") : []) as Domain[], Date.now()));
@@ -893,6 +897,58 @@ function providers(node: ZiraNode) {
       supportsStreaming: prof?.supportsStreaming ?? false, modelHint: prof?.modelHint, updatedAt: prof?.updatedAt ?? p.ts,
     };
   });
+}
+
+// Live field-health snapshot: coverage (providers + models per domain) and delivery quality (answer rate,
+// converged rate, median first-answer latency) derived from the SOFT state the field already gossips. Pure
+// read, no keys, no consensus effect — safe to expose on a public gateway so the app + website can show a
+// truthful "the field is answering" panel instead of an anecdote. Answer coherence uses the same garbage
+// gate as fusion so junk answers do not inflate the rate.
+function fieldHealth(node: ZiraNode) {
+  const now = Date.now();
+  const QUERY_WINDOW_MS = 240_000; // matches SoftState QUERY_TTL_MS
+  const online = node.soft.onlineProviders(now);
+  const models = new Set<string>();
+  const byDomain: Record<string, { providers: number; models: Set<string> }> = {};
+  for (const p of online) {
+    if (p.model) models.add(p.model);
+    for (const d of p.domains ?? []) {
+      const e = byDomain[d] ?? (byDomain[d] = { providers: 0, models: new Set<string>() });
+      e.providers++;
+      if (p.model) e.models.add(p.model);
+    }
+  }
+  const queries = [...node.soft.queries.values()].filter((q) => now - q.postedAt <= QUERY_WINDOW_MS);
+  let answered = 0, converged = 0;
+  const latencies: number[] = [];
+  for (const q of queries) {
+    const coherent = (node.soft.answers.get(q.id) ?? []).filter((a) => !looksLikeGarbage(a.answer));
+    if (coherent.length >= 1) {
+      answered++;
+      latencies.push(Math.max(0, Math.min(...coherent.map((a) => a.ts)) - q.postedAt));
+    }
+    if (coherent.length >= 2) converged++; // fusion settles only with >= 2 converged answers
+  }
+  const total = queries.length;
+  const median = latencies.length
+    ? latencies.slice().sort((a, b) => a - b)[Math.floor(latencies.length / 2)]
+    : null;
+  return {
+    updatedAt: now,
+    providersOnline: online.length,
+    modelsCovered: models.size,
+    models: [...models].sort(),
+    recentQueries: total,
+    answered,
+    converged,
+    openQueries: Math.max(0, total - answered),
+    answerRate: total ? Number((answered / total).toFixed(3)) : null,
+    convergedRate: total ? Number((converged / total).toFixed(3)) : null,
+    medianFirstAnswerMs: median,
+    byDomain: Object.fromEntries(
+      Object.entries(byDomain).map(([d, e]) => [d, { providers: e.providers, models: e.models.size }]),
+    ),
+  };
 }
 
 function queryFusion(node: ZiraNode, id: string): QueryFusion | { error: string } {

@@ -13,7 +13,7 @@ import {
 import { useZira } from "../store/useZira";
 import { formatNum, formatZir, shortAddress, shortHash, timeAgo } from "../lib/format";
 import { loadReconciledHistory } from "../lib/history";
-import { NodeApi, type ExtendedStats, type SupplyInfo, type ProviderView, type AnchorSeatSummary } from "../lib/nodeApi";
+import { NodeApi, type ExtendedStats, type SupplyInfo, type ProviderView, type AnchorSeatSummary, type FieldHealth } from "../lib/nodeApi";
 import { NeonDial } from "../components/viz";
 
 // ---- local helpers (kept in this file; not promoted to ui.tsx) ----
@@ -58,6 +58,7 @@ export function Explorer() {
         description="Trace the whole network. Every transfer, reward, and answer is a signed public record, the same data an exchange or indexer reads."
       />
       <NetworkAndSupply showHealth={mode === "node"} />
+      <FieldHealthPanel />
       <div className="grid gap-4 lg:grid-cols-2">
         <ProvidersPanel />
         <AnchorsPanel />
@@ -203,6 +204,93 @@ function NetworkAndSupply({ showHealth }: { showHealth: boolean }) {
               <div className="rounded-lg border border-hairline bg-surface/70 p-3"><div className="font-medium text-text">Exchange checks</div><div className="mt-1 text-faint">Verify address format `zir1...`, signed tx ids, network `mainnet`, fees in uZIR, and supply audit agreement.</div></div>
               <div className="rounded-lg border border-hairline bg-surface/70 p-3"><div className="font-medium text-text">Units</div><div className="mt-1 text-faint">Ticker ZIR. 1 ZIR = 1,000,000 uZIR. Network {stats?.network ?? "mainnet"}.</div></div>
             </div>
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+
+// Live field health: is the network actually answering, and how fast. Coverage (providers + models,
+// per domain) and delivery quality (answer rate, converged rate, median first-answer latency) over the
+// recent query window, read from the shared gateway. Proof, not a slogan: it shows real numbers,
+// including zeros, so a coverage gap is visible instead of anecdotal.
+function fmtLatency(ms: number | null): string {
+  if (ms === null) return "n/a";
+  if (ms < 1000) return `${ms} ms`;
+  return `${(ms / 1000).toFixed(1)} s`;
+}
+
+function FieldHealthPanel() {
+  const [fh, setFh] = useState<FieldHealth | null>(null);
+  const [error, setError] = useState("");
+  const slow = useSlowHint(fh === null);
+
+  const load = () => {
+    NodeApi.networkFieldHealth()
+      .catch(() => NodeApi.fieldHealth())
+      .then((next) => { setFh(next); setError(""); })
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load field health."));
+  };
+  usePoll(load, 8000, []);
+
+  // Health verdict from real coverage: >= 2 providers means the field can converge an answer (fusion needs
+  // two). Answer rate colors the headline once there are recent queries to judge by.
+  const providers = fh?.providersOnline ?? 0;
+  const answerRate = fh?.answerRate ?? null;
+  const canConverge = providers >= 2;
+  const verdict = fh === null ? "neutral"
+    : !canConverge ? "warn"
+    : answerRate === null ? "teal"
+    : answerRate >= 0.8 ? "teal" : answerRate >= 0.4 ? "warn" : "danger";
+  const domains = Object.entries(fh?.byDomain ?? {}).sort((a, b) => b[1].providers - a[1].providers);
+
+  return (
+    <Card>
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <Badge tone="teal">field health</Badge>
+          <h3 className="mt-2 text-sm font-semibold">Is the field answering</h3>
+          <p className="text-[11px] text-faint">Live coverage and delivery quality over the last few minutes of real queries.</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {fh && fh.updatedAt > 0 && <span className="text-[11px] text-faint">updated {timeAgo(fh.updatedAt)}</span>}
+          <Badge tone={verdict === "danger" ? "danger" : verdict === "warn" ? "neutral" : "teal"}>
+            {fh === null ? "checking" : !canConverge ? "low coverage" : answerRate === null ? "ready" : answerRate >= 0.8 ? "answering" : "degraded"}
+          </Badge>
+        </div>
+      </div>
+      {fh === null && !error ? <LoadingState slow={slow} /> : error && fh === null ? (
+        <ErrorState message={error} onRetry={load} />
+      ) : fh && (
+        <>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <Metric label="Providers online" value={String(providers)} sub={canConverge ? "can converge" : "need 2+ to converge"} tone={canConverge ? "teal" : "warn"} />
+            <Metric label="Models covered" value={String(fh.modelsCovered)} />
+            <Metric label="Answer rate" value={answerRate === null ? "no recent queries" : `${Math.round(answerRate * 100)}%`} sub={fh.recentQueries > 0 ? `${fh.answered}/${fh.recentQueries} answered` : undefined} tone={answerRate === null ? undefined : answerRate >= 0.8 ? "teal" : answerRate >= 0.4 ? "warn" : "danger"} />
+            <Metric label="Median first answer" value={fmtLatency(fh.medianFirstAnswerMs)} />
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <Metric label="Converged" value={fh.convergedRate === null ? "n/a" : `${Math.round(fh.convergedRate * 100)}%`} sub={`${fh.converged} of ${fh.recentQueries}`} />
+            <Metric label="Open now" value={String(fh.openQueries)} sub="awaiting an answer" />
+            <Metric label="Recent queries" value={String(fh.recentQueries)} sub="last few minutes" />
+            <Metric label="Domains served" value={String(domains.length)} />
+          </div>
+          {domains.length > 0 ? (
+            <div className="mt-3">
+              <div className="mb-1 text-[11px] uppercase tracking-wide text-faint">Coverage by domain</div>
+              <div className="space-y-1.5">
+                {domains.slice(0, 8).map(([d, c]) => (
+                  <div key={d} className="flex items-center gap-3 text-[11px]">
+                    <span className="w-24 shrink-0 truncate text-muted" title={d}>{d}</span>
+                    <div className="flex-1"><Meter value={Math.min(1, c.providers / 3)} /></div>
+                    <span className="mono w-24 shrink-0 text-right text-faint">{c.providers} prov · {c.models} mdl</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <p className="mt-3 text-[11px] text-faint">No providers are serving a model right now, so the field has no coverage. Turn on serving in Mine, or run a node, to answer the field.</p>
           )}
         </>
       )}
